@@ -114,12 +114,20 @@ Architecture decisions are recorded in [docs/decisions/](docs/decisions/). A dec
 
 ## Results
 
-| Measurement | Value | Conditions |
+One short run so far. Conditions for every row: 29 minutes on 2026-11-23 from 21:02 UTC, the local compose stack on a laptop (Apple M1 Max, Docker Desktop), one Kafka node, events of kinds commit, account and sync for the post collection.
+
+| Measurement | Value | Note |
 |---|---|---|
-| Live post events per second, average | | |
-| Live post events per second, peak | | |
-| Raw topic size per day | | |
-| Ingest memory | | |
+| Live events per second, typical | 48 (median of 10-second windows) | 49 on average outside the burst below |
+| Live events per second, average | 79 | 138,039 events in 1,745 seconds, including one burst |
+| Live events per second, peak | about 5,300 for 10 seconds | one burst of about 53,000 events, with no source error |
+| Lag behind the source | 0.16 s median, 0.26 s at the 95th percentile, 0.52 s highest sample | sampled every 10 seconds, so the lag inside the burst was not seen |
+| Raw topic size on disk | 67 MiB for 144,452 records, about 480 bytes per record | zstd, includes index files. JSON payloads were 1,155 bytes per event before compression |
+| Ingest memory | 45 to 90 MB resident, 62 MB median | the highest value was during the burst |
+| Kafka memory | 416 to 558 MiB for the container | broker heap capped at 512 MB |
+| Errors and restarts | 0 produce errors, 0 source errors, 0 restarts | |
+
+What this run does not show: a full day, a quiet hour, or the busiest hour. Bursts like the one above were seen twice in about one hour of watching, so a daily size is not projected from this sample. A 24-hour measurement comes next.
 
 This table is filled only with real measurements, together with the conditions they were taken under.
 
