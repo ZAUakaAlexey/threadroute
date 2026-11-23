@@ -14,3 +14,5 @@ Status values: `Proposed` (under review), `Accepted`, `Superseded by NNNN`.
 | [0006](0006-normalize-and-event-model.md) | The normalize service and the channel-agnostic event model | Accepted |
 | [0007](0007-conversation-lifecycle.md) | Conversation lifecycle and state | Accepted |
 | [0008](0008-company-admission.md) | Which companies are served | Accepted |
+| [0009](0009-routing-model.md) | Routing: queues, teams, assignment and SLA | Accepted |
+| [0010](0010-operators-and-simulator.md) | Operators: the operator API and the simulator | Accepted |
