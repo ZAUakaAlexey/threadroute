@@ -1,6 +1,6 @@
 # 0006. The normalize service and the channel-agnostic event model
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
 ## Context
@@ -42,21 +42,17 @@ One message event has: event ID, channel, source time (the witnessed time), mess
 
 A deletion names a message but not its conversation, and an author removal touches many conversations, so neither can be keyed by a conversation. They go to a separate topic. The `conv` service consumes both topics.
 
-## Open choices
+## Choices made
 
-### 1. Where a deletion is matched to its conversation
+### Where a deletion is matched to its conversation
 
-| Option | Note |
-|---|---|
-| **In `conv`, with its own index (recommended)** | `normalize` stays free of conversation state. `conv` keeps an index from message ID to conversation in Redis. A deletion that arrives before its message is remembered for a few minutes and applied when the message comes |
-| In `normalize`, with an index in Redis | deletions travel in `events` with the conversation key and stay in order with the messages. `normalize` then holds state for every message |
+In `conv`, with its own index. `normalize` stays free of conversation state. `conv` keeps an index from message ID to conversation in Redis. A deletion that arrives before its message is remembered for a few minutes and applied when the message comes.
 
-### 2. Retention of `events`
+The other option was an index in `normalize`, so that deletions travel in `events` in order with the messages. It was not chosen because `normalize` would then hold state for every message.
 
-| Option | Note |
-|---|---|
-| **6 hours (recommended)** | long enough to restart or redeploy `conv`. The text of a deleted post stays in this topic for up to that time |
-| 24 hours | the same as the raw topic, twice the storage |
+### Retention of `events`
+
+6 hours. It is long enough to restart or redeploy `conv`. The text of a deleted post stays in this topic for up to that time. The other option was 24 hours, with twice the storage.
 
 ## Consequences
 

@@ -1,6 +1,6 @@
 # 0008. Which companies are served
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
 ## Context
@@ -37,40 +37,16 @@ The sample is 20 minutes long and the rule uses one hour, so over an hour each r
 - An admitted company stays admitted while it is active. Admission ends after a period with no customer message.
 - Admission is decided in `conv`, which owns conversation state. `normalize` does not filter by company.
 
-## Open choices
+## Choices made
 
-### 1. The threshold N
-
-| Option | In the 20-minute sample | Note |
+| Question | Choice | Other options considered |
 |---|---|---|
-| 5 | 432 companies, 5,637 conversations | many small companies, the highest load |
-| **10 (recommended to start)** | 150 companies, 3,859 conversations | several thousand live conversations, which is the scale the console is built for, with a company count that is easy to show |
-| 20 | 53 companies, 2,606 conversations | fewer companies, each one clearly busy |
+| Threshold N | 10 different customers within an hour, to start | 5 (432 companies and 5,637 conversations in the sample), 20 (53 and 2,606). N stays a configuration value |
+| Messages that arrived before admission | conversations start from the moment of admission | keeping an hour of all replies in Redis to open earlier conversations on admission |
+| When admission ends | after 2 hours without a customer message | after 24 hours |
+| Limit on the number of admitted companies | a configuration value that can be a maximum or no limit | a fixed limit, or no setting at all |
 
-### 2. Messages that arrived before a company was admitted
-
-The first N-1 customers wrote before the company reached the threshold.
-
-| Option | Note |
-|---|---|
-| **Start from the moment of admission (recommended)** | simple and cheap. Conversations of the earlier customers open only if they write again |
-| Keep messages of not yet admitted companies for one hour and open their conversations on admission | closer to a real onboarding, but it keeps an hour of all replies in Redis (about 60,000 messages at the sampled rate) |
-
-### 3. When admission ends
-
-| Option | Note |
-|---|---|
-| **After 2 hours without a customer message (recommended)** | a company leaves soon after its thread goes quiet |
-| After 24 hours | more stable set of companies, more idle ones |
-
-### 4. A safety limit on the number of admitted companies
-
-The agreed rule has no upper limit. A day with many viral threads could admit far more companies than the server can hold.
-
-| Option | Note |
-|---|---|
-| **A configurable maximum, set high (recommended)** | when it is reached, new companies are not admitted and a metric counts the refusals. Normal days never touch it |
-| No limit | follows the agreed rule exactly, with a risk of running out of memory on a small server |
+The limit setting accepts 0 for "no limit". With a maximum set, new companies are not admitted once it is reached, and a metric counts the refusals. The default value is chosen after the one-hour measurement in stage 2.
 
 ## Consequences
 

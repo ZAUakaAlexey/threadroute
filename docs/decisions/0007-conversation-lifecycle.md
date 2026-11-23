@@ -1,6 +1,6 @@
 # 0007. Conversation lifecycle and state
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-23
 
 ## Context
@@ -37,35 +37,14 @@ No real agent answers anyone. Operators are simulated. The only real reply in th
 - A deletion removes the message text and its index entries at once. Counters stay.
 - An author removal deletes every stored message of that author. If the author was the customer of a conversation, the conversation is closed.
 
-## Open choices
+## Choices made
 
-### 1. Inactivity timeout
-
-| Option | Note |
-|---|---|
-| 10 minutes | conversations close fast, many are reopened |
-| **30 minutes (recommended)** | a usual value for chat sessions |
-| 60 minutes | fewer reopenings, more open conversations in memory |
-
-### 2. A company message that arrives when no conversation is open
-
-This happens when events arrive out of order, or when the author answers someone whose message was not admitted.
-
-| Option | Note |
-|---|---|
-| **Drop and count (recommended for the first version)** | simplest. The counter shows how often it happens, and the rule can be changed with numbers |
-| Hold for up to 30 seconds | covers out-of-order arrival, adds a buffer and a timer |
-
-### 3. How long message text is kept
-
-| Option | Note |
-|---|---|
-| **Until the conversation closes, plus 10 minutes (recommended)** | an operator can read the conversation while it is open |
-| Fixed 1 hour from arrival | simple, but text can disappear from an open conversation |
-
-### 4. How many messages are kept per conversation
-
-Recommended: the last 50. Older ones are dropped from Redis and only counted.
+| Question | Choice | Other options considered |
+|---|---|---|
+| Inactivity timeout | 30 minutes | 10 minutes (many reopenings), 60 minutes (more open conversations in memory) |
+| A company message that arrives when no conversation is open | drop it and count it | hold it for up to 30 seconds. The counter shows how often this happens, so the rule can be changed with numbers |
+| How long message text is kept | until the conversation closes, plus 10 minutes | a fixed hour from arrival, which can remove text from an open conversation |
+| Messages kept per conversation | the last 50 | older ones are dropped from Redis and only counted |
 
 ## Consequences
 
