@@ -68,6 +68,8 @@ These points follow from the decisions above. They are written down so that ever
 - **Company removal.** An author removal for a company deletes its stored messages, closes its open conversations with the reason "company removed", and ends its admission.
 - **Early deletion.** A deletion for a message that is not stored yet is remembered for 10 minutes and applied if the message arrives in that time.
 - **No lost conversation events.** Conversation state lives in Redis and conversation events go to Kafka, and the two cannot change in one transaction. `conv` therefore changes the state and stores the events to publish in one atomic step in Redis (an outbox), publishes them, and removes them from the outbox after Kafka confirmed them. After a crash the outbox is published again. Consumers of `conversations` skip an event whose sequence number they have already seen.
+- **A partition without events.** The watermark of a partition moves only when the partition receives events. If the stream stops, the conversations of that partition stay open until events arrive again, and they then close with their deadline as the source time.
+- **Processed-event markers.** `conv` remembers the ID of every event it applied for 7 hours, which is the retention of `events` plus one segment hour, so that a redelivered event changes nothing. At about 20 message events per second this takes about 50 MB in Redis. The lifetime is a configuration value.
 - **IDs across channels.** Author and message IDs must be unique across channels. A normaliser for a new channel must make them so, for example with a prefix.
 
 ## Consequences
