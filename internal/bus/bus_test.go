@@ -108,7 +108,15 @@ func TestOtherTopicSpecs(t *testing.T) {
 		configs    map[string]string
 	}{
 		{name: "events", spec: EventsTopicSpec(), topic: "events", partitions: 16, configs: map[string]string{ConfigCleanupPolicy: "delete"}},
-		{name: "cursor", spec: CursorTopicSpec(), topic: "ingest.cursor", partitions: 1, configs: map[string]string{ConfigCleanupPolicy: "compact"}},
+		{name: "cursor", spec: CursorTopicSpec(), topic: "ingest.cursor", partitions: 1, configs: map[string]string{
+			ConfigCleanupPolicy:          "compact",
+			ConfigSegmentMs:              "600000",
+			ConfigSegmentBytes:           "1048576",
+			ConfigMinCleanableDirtyRatio: "0.01",
+			ConfigMinCompactionLagMs:     "0",
+			ConfigMaxCompactionLagMs:     "900000",
+			ConfigDeleteRetentionMs:      "3600000",
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -122,12 +122,22 @@ func TestIntegrationRealBroker(t *testing.T) {
 		testEnsureTopicsOnBroker(t, brokers, []TopicSpec{raw})
 	})
 
+	t.Run("CursorConfigsUpgrade", func(t *testing.T) {
+		testCursorConfigsUpgradeOnBroker(t, brokers)
+	})
+
 	t.Run("WriteBatchAndReadCursor", func(t *testing.T) {
 		testWriteBatchOnBroker(t, brokers)
 	})
 
 	t.Run("SameKeySamePartition", func(t *testing.T) {
 		testKeyPartitionOnBroker(t, brokers)
+	})
+
+	// Last: it writes tens of thousands of cursor records, and the
+	// subtests above count the records of the cursor topic.
+	t.Run("ReadCursorLargeTopic", func(t *testing.T) {
+		testReadCursorLargeTopicOnBroker(t, brokers)
 	})
 }
 
@@ -325,4 +335,247 @@ func testKeyPartitionOnBroker(t *testing.T, brokers []string) {
 		t.Errorf("got %d keys, want 3", len(partitionOf))
 	}
 	t.Logf("3 keys in %d partitions", len(used))
+}
+
+// testCursorConfigsUpgradeOnBroker removes the compaction configs from the
+// cursor topic, as a topic created by an older version has them, and checks
+// that EnsureTopics sets them again in one alter call.
+func testCursorConfigsUpgradeOnBroker(t *testing.T, brokers []string) {
+	ctx := testContext(t)
+	cl := newBrokerClient(t, brokers)
+	adm := kadm.NewClient(cl)
+	spec := CursorTopicSpec()
+
+	var remove []kadm.AlterConfig
+	for key := range spec.Configs {
+		if key != ConfigCleanupPolicy {
+			remove = append(remove, kadm.AlterConfig{Op: kadm.DeleteConfig, Name: key})
+		}
+	}
+	resps, err := adm.AlterTopicConfigs(ctx, remove, TopicCursor)
+	if err == nil {
+		for _, r := range resps {
+			if r.Err != nil {
+				err = r.Err
+			}
+		}
+	}
+	if err != nil {
+		t.Fatalf("remove cursor configs: %v", err)
+	}
+
+	admin := &countingAdmin{TopicAdmin: adm}
+	if err := ensureTopics(ctx, admin, cl, discardLogger(), spec); err != nil {
+		t.Fatalf("EnsureTopics() error = %v", err)
+	}
+	if got := admin.alters.Load(); got != 1 {
+		t.Errorf("alter calls = %d, want 1", got)
+	}
+
+	// EnsureTopics compares values only. min.compaction.lag.ms is 0, the
+	// broker default, so on an upgraded topic it stays a default and is
+	// not set as a topic config. The value is still the spec value.
+	rcs, err := adm.DescribeTopicConfigs(ctx, TopicCursor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rc, err := rcs.On(TopicCursor, nil)
+	if err != nil || rc.Err != nil {
+		t.Fatalf("describe configs of %s: %v, %v", TopicCursor, err, rc.Err)
+	}
+	got := map[string]string{}
+	for _, c := range rc.Configs {
+		got[c.Key] = c.MaybeValue()
+	}
+	for key, want := range spec.Configs {
+		if got[key] != *want {
+			t.Errorf("%s: config %s = %q, want %q", TopicCursor, key, got[key], *want)
+		}
+	}
+
+	again := &countingAdmin{TopicAdmin: adm}
+	if err := ensureTopics(ctx, again, cl, discardLogger(), spec); err != nil {
+		t.Fatalf("second EnsureTopics() error = %v", err)
+	}
+	if got := again.alters.Load(); got != 0 {
+		t.Errorf("second call alter calls = %d, want 0", got)
+	}
+}
+
+// largeCursorRecords is the number of cursor records the large topic test
+// writes: about 27 minutes of cursor writes at the measured rate.
+const largeCursorRecords = 30_000
+
+// readCursorLargeBound is the time ReadCursor may take on the large topic.
+// Reading from the end takes a few tens of milliseconds on a local broker;
+// the bound leaves room for a slow CI machine.
+const readCursorLargeBound = 3 * time.Second
+
+func testReadCursorLargeTopicOnBroker(t *testing.T, brokers []string) {
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
+	defer cancel()
+
+	// Small batches, close to the real writer, which sends one record per
+	// batch, so the topic fills several 1 MiB segments. 512 bytes is the
+	// smallest batch size the client accepts: two cursor records.
+	cl := newBrokerClient(t, brokers, kgo.ProducerBatchMaxBytes(512))
+
+	// One record for another source first. Reading it later has to step
+	// back through many windows to the start of the topic.
+	other := &kgo.Record{Topic: TopicCursor, Key: CursorKey(testOtherSource), Value: cursorValue(t, 5)}
+	if err := cl.ProduceSync(ctx, other).FirstErr(); err != nil {
+		t.Fatalf("produce cursor record: %v", err)
+	}
+
+	start := time.Now()
+	recs := make([]*kgo.Record, largeCursorRecords)
+	for i := range recs {
+		v, err := MarshalCursor(CursorRecord{
+			Host:      "jetstream-east.example.test",
+			Witnessed: testWitnessedBase.Add(time.Duration(i+1) * time.Millisecond),
+			Seq:       uint64(1000 + i + 1),
+			WrittenAt: time.Now(),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs[i] = &kgo.Record{Topic: TopicCursor, Key: CursorKey(SourceBluesky), Value: v}
+	}
+	if err := cl.ProduceSync(ctx, recs...).FirstErr(); err != nil {
+		t.Fatalf("produce cursor records: %v", err)
+	}
+	t.Logf("produced %d cursor records in %s", largeCursorRecords, time.Since(start).Round(time.Millisecond))
+
+	counter := &fetchCounter{}
+	readStart := time.Now()
+	got, found, err := ReadCursor(ctx, brokers, SourceBluesky, discardLogger(), kgo.WithHooks(counter))
+	took := time.Since(readStart)
+	if err != nil || !found {
+		t.Fatalf("ReadCursor() = %v, %v", found, err)
+	}
+	if want := testCursor(largeCursorRecords); got.Seq != want.Seq || !got.Witnessed.Equal(want.Witnessed) {
+		t.Errorf("ReadCursor() = %+v, want %+v", got, want)
+	}
+	t.Logf("ReadCursor took %s and fetched %d records", took.Round(time.Millisecond), counter.n.Load())
+	if took > readCursorLargeBound {
+		t.Errorf("ReadCursor took %s, want at most %s", took, readCursorLargeBound)
+	}
+	if n := counter.n.Load(); n > 2*cursorWindowFirst {
+		t.Errorf("ReadCursor fetched %d records, want at most %d", n, 2*cursorWindowFirst)
+	}
+
+	testReadOtherSourceOnBroker(t, ctx, brokers, "before compaction")
+
+	// Compaction. The topic now has closed 1 MiB segments full of old
+	// copies of one key. The broker cleaner looks for work every 15
+	// seconds (log.cleaner.backoff.ms), so with the low dirty ratio it
+	// compacts them well within a minute. On a local broker this took
+	// about 15 seconds. The open segment is not compacted, so the count
+	// does not go down to one.
+	//
+	// The baseline is the number of offsets, not a count read now: the
+	// cleaner runs on its own timer and may already have run.
+	logStart, end, err := cursorOffsets(ctx, kadm.NewClient(cl))
+	if err != nil {
+		t.Fatal(err)
+	}
+	offsets := int(end - logStart)
+	deadline := time.Now().Add(compactionWait)
+	for {
+		count := countBrokerRecords(t, brokers, end)
+		if count < offsets/2 {
+			t.Logf("compacted after %s: %d offsets, %d records left, %d bytes on disk",
+				time.Since(start).Round(time.Second), offsets, count, cursorTopicSize(t, cl))
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("not compacted within %s: %d offsets, %d records, %d bytes on disk",
+				compactionWait, offsets, count, cursorTopicSize(t, cl))
+		}
+		time.Sleep(2 * time.Second)
+	}
+
+	// After compaction the offsets have gaps, and the newest record of
+	// each source is still found.
+	got, found, err = ReadCursor(ctx, brokers, SourceBluesky, discardLogger())
+	if err != nil || !found {
+		t.Fatalf("ReadCursor() after compaction = %v, %v", found, err)
+	}
+	if want := testCursor(largeCursorRecords); got.Seq != want.Seq {
+		t.Errorf("ReadCursor() after compaction = %+v, want %+v", got, want)
+	}
+	testReadOtherSourceOnBroker(t, ctx, brokers, "after compaction")
+}
+
+// testReadOtherSourceOnBroker reads the cursor of testOtherSource, whose
+// only record is at the start of the topic.
+func testReadOtherSourceOnBroker(t *testing.T, ctx context.Context, brokers []string, when string) {
+	t.Helper()
+	counter := &fetchCounter{}
+	readStart := time.Now()
+	got, found, err := ReadCursor(ctx, brokers, testOtherSource, discardLogger(), kgo.WithHooks(counter))
+	if err != nil || !found {
+		t.Fatalf("ReadCursor(%s) %s = %v, %v", testOtherSource, when, found, err)
+	}
+	if want := testCursor(5); got.Seq != want.Seq {
+		t.Errorf("ReadCursor(%s) %s = %+v, want %+v", testOtherSource, when, got, want)
+	}
+	t.Logf("ReadCursor(%s) %s took %s and fetched %d records",
+		testOtherSource, when, time.Since(readStart).Round(time.Millisecond), counter.n.Load())
+}
+
+// compactionWait bounds the wait for the broker cleaner in the large topic
+// test.
+const compactionWait = 60 * time.Second
+
+// cursorTopicSize returns the on-disk size of the cursor topic.
+func cursorTopicSize(t *testing.T, cl *kgo.Client) int64 {
+	t.Helper()
+	dirs, err := kadm.NewClient(cl).DescribeAllLogDirs(testContext(t), kadm.TopicsSet{TopicCursor: {cursorPartition: {}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var size int64
+	for _, d := range dirs {
+		if err := d.Error(); err != nil {
+			t.Fatal(err)
+		}
+		size += d.Size()
+	}
+	return size
+}
+
+// countBrokerRecords counts the records of the cursor topic below end. It
+// stops at end-1, because a compacted topic holds fewer records than its
+// end offset.
+func countBrokerRecords(t *testing.T, brokers []string, end int64) int {
+	t.Helper()
+	if end == 0 {
+		return 0
+	}
+	ctx := testContext(t)
+	cl := newBrokerClient(t, brokers, kgo.ConsumePartitions(map[string]map[int32]kgo.Offset{
+		TopicCursor: {cursorPartition: kgo.NewOffset().AtStart()},
+	}))
+	defer cl.Close()
+	n := 0
+	for {
+		f := cl.PollFetches(ctx)
+		if ctx.Err() != nil {
+			t.Fatalf("count cursor records: %v", ctx.Err())
+		}
+		if errs := f.Errors(); len(errs) > 0 {
+			t.Fatalf("fetch %s: %v", TopicCursor, errs[0].Err)
+		}
+		last := false
+		f.EachRecord(func(r *kgo.Record) {
+			if r.Offset < end {
+				n++
+			}
+			last = last || r.Offset >= end-1
+		})
+		if last {
+			return n
+		}
+	}
 }

@@ -71,6 +71,11 @@ const (
 	// broker stamp each record with the time it was appended, so time
 	// retention counts from the write to the topic, not from the event time.
 	ConfigMessageTimestampType = "message.timestamp.type"
+	// Compaction settings, used by TopicCursor.
+	ConfigMinCleanableDirtyRatio = "min.cleanable.dirty.ratio"
+	ConfigMinCompactionLagMs     = "min.compaction.lag.ms"
+	ConfigMaxCompactionLagMs     = "max.compaction.lag.ms"
+	ConfigDeleteRetentionMs      = "delete.retention.ms"
 
 	CleanupDelete  = "delete"
 	CleanupCompact = "compact"
@@ -178,17 +183,66 @@ func EventsTopicSpec() TopicSpec {
 	}
 }
 
+// Compaction settings of TopicCursor.
+//
+// Ingest writes one cursor record after every delivered batch, about 20
+// records per second or 1.6 million per day, and only the newest record
+// per key matters. Kafka never compacts the open (active) segment, and with
+// the broker defaults a segment closes only after 7 days or 1 GiB. So with
+// compaction alone nothing is cleaned for days. These settings close
+// segments often and let the cleaner run soon after, so the topic stays at
+// a few MiB.
+const (
+	// cursorSegmentInterval is segment.ms: the open segment closes after 10
+	// minutes, so at most about 10 minutes of records wait in it, out of
+	// the cleaner's reach. Kafka accepts 1 ms or more.
+	cursorSegmentInterval = 10 * time.Minute
+	// cursorSegmentBytes is segment.bytes: the open segment also closes at
+	// 1 MiB, the smallest value Kafka 4.x accepts. At the current write
+	// rate this is reached every few minutes.
+	cursorSegmentBytes int64 = 1 << 20
+	// cursorMinDirtyRatio is min.cleanable.dirty.ratio: the cleaner works
+	// on the topic as soon as 1% of it is not yet cleaned. Here almost the
+	// whole topic is old copies of one key, so cleaning is cheap. Kafka
+	// accepts 0 to 1.
+	cursorMinDirtyRatio = "0.01"
+	// cursorMinCompactionLag is min.compaction.lag.ms: 0, a record can be
+	// removed by compaction at once. No reader needs old cursor values.
+	// Kafka accepts 0 or more.
+	cursorMinCompactionLag = time.Duration(0)
+	// cursorMaxCompactionLag is max.compaction.lag.ms: a record must be
+	// compacted within 15 minutes even if the dirty ratio is not reached.
+	// Kafka accepts 1 ms or more, and it must not be lower than
+	// min.compaction.lag.ms.
+	cursorMaxCompactionLag = 15 * time.Minute
+	// cursorDeleteRetention is delete.retention.ms: a tombstone (an
+	// operator reset) is kept for 1 hour after compaction, then removed. A
+	// reader that starts later finds no record for the key, which gives
+	// the same result as the tombstone: start from live. Kafka accepts 0
+	// or more.
+	cursorDeleteRetention = time.Hour
+)
+
 // CursorTopicSpec returns the spec of TopicCursor, a compacted topic with one
-// partition.
+// partition. See the compaction settings above for the reason of each
+// config.
 func CursorTopicSpec() TopicSpec {
 	return TopicSpec{
 		Name:              TopicCursor,
 		Partitions:        PartitionsCursor,
 		ReplicationFactor: ReplicationFactor,
 		Configs: map[string]*string{
-			ConfigCleanupPolicy: ptr(CleanupCompact),
+			ConfigCleanupPolicy:          ptr(CleanupCompact),
+			ConfigSegmentMs:              ptr(msString(cursorSegmentInterval)),
+			ConfigSegmentBytes:           ptr(strconv.FormatInt(cursorSegmentBytes, 10)),
+			ConfigMinCleanableDirtyRatio: ptr(cursorMinDirtyRatio),
+			ConfigMinCompactionLagMs:     ptr(msString(cursorMinCompactionLag)),
+			ConfigMaxCompactionLagMs:     ptr(msString(cursorMaxCompactionLag)),
+			ConfigDeleteRetentionMs:      ptr(msString(cursorDeleteRetention)),
 		},
 	}
 }
+
+func msString(d time.Duration) string { return strconv.FormatInt(d.Milliseconds(), 10) }
 
 func ptr(s string) *string { return &s }

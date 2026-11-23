@@ -239,3 +239,33 @@ func TestEnsureTopicsInvalidSpec(t *testing.T) {
 		t.Errorf("EnsureTopics() error = %v, want an error naming synthetic.topic", err)
 	}
 }
+
+// TestEnsureTopicsUpgradesCursorConfigs covers a cursor topic created by an
+// older version, with only cleanup.policy set: the next start must bring
+// it to the current spec.
+func TestEnsureTopicsUpgradesCursorConfigs(t *testing.T) {
+	c := newTestCluster(t)
+	if err := c.CreateTopic(TopicCursor, PartitionsCursor, map[string]string{ConfigCleanupPolicy: CleanupCompact}); err != nil {
+		t.Fatalf("CreateTopic() error = %v", err)
+	}
+	spec := CursorTopicSpec()
+	ctx := testContext(t)
+	cl := newTestClient(t, c)
+
+	first := &countingAdmin{TopicAdmin: kadm.NewClient(cl)}
+	if err := ensureTopics(ctx, first, cl, discardLogger(), spec); err != nil {
+		t.Fatalf("EnsureTopics() error = %v", err)
+	}
+	if got := first.alters.Load(); got != 1 {
+		t.Errorf("alter calls = %d, want 1", got)
+	}
+	assertTopicMatchesSpec(t, c, spec)
+
+	second := &countingAdmin{TopicAdmin: kadm.NewClient(cl)}
+	if err := ensureTopics(ctx, second, cl, discardLogger(), spec); err != nil {
+		t.Fatalf("second EnsureTopics() error = %v", err)
+	}
+	if got := second.alters.Load(); got != 0 {
+		t.Errorf("second call alter calls = %d, want 0", got)
+	}
+}
