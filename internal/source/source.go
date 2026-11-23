@@ -28,7 +28,8 @@ type RawEvent struct {
 	// Key is the record key: the author ID (a DID for Bluesky).
 	Key string
 	// ID is the content-based event ID (see CommitEventID, AccountEventID
-	// and SyncEventID). It is the same on every source host.
+	// and SyncEventID). It is the same on every source host, except for
+	// the rare sync event without rev and time (see SyncEventID).
 	ID string
 	// Kind is the event kind.
 	Kind Kind
@@ -60,7 +61,9 @@ type Cursor struct {
 	// SDK reports 0), the connector leaves the zero time.Time here, not
 	// time.UnixMicro(0).
 	Witnessed time.Time
-	// Seq is the highest sequence number in the batch, valid on Host only.
+	// Seq is the sequence number of the event with the highest witnessed
+	// time in the batch, valid on Host only. It is 0 when Witnessed is
+	// unset.
 	Seq uint64
 }
 

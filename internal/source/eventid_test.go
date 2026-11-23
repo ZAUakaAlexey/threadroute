@@ -54,20 +54,27 @@ func TestCommitEventID(t *testing.T) {
 	}
 }
 
+const (
+	testTime  = "2026-01-02T03:04:05.123Z"
+	testTime2 = "2026-01-02T03:04:06.000Z"
+)
+
 func TestAccountEventID(t *testing.T) {
 	tests := []struct {
-		name string
-		did  string
-		seq  int64
-		want string
+		name         string
+		did          string
+		active       bool
+		status, time string
+		want         string
 	}{
-		{name: "simple", did: testDID, seq: 42, want: "a:did:plc:testalice0000000000000000:42"},
-		{name: "zero seq", did: testDID, seq: 0, want: "a:did:plc:testalice0000000000000000:0"},
-		{name: "other author", did: testDID2, seq: 42, want: "a:did:plc:testbob00000000000000000:42"},
+		{name: "active", did: testDID, active: true, time: testTime, want: "a:did:plc:testalice0000000000000000:1::2026-01-02T03%3A04%3A05.123Z"},
+		{name: "deleted", did: testDID, status: "deleted", time: testTime, want: "a:did:plc:testalice0000000000000000:0:deleted:2026-01-02T03%3A04%3A05.123Z"},
+		{name: "other author", did: testDID2, status: "takendown", time: testTime, want: "a:did:plc:testbob00000000000000000:0:takendown:2026-01-02T03%3A04%3A05.123Z"},
+		{name: "empty time", did: testDID, active: true, want: "a:did:plc:testalice0000000000000000:1::"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := AccountEventID(tt.did, tt.seq); got != tt.want {
+			if got := AccountEventID(tt.did, tt.active, tt.status, tt.time); got != tt.want {
 				t.Errorf("AccountEventID() = %q, want %q", got, tt.want)
 			}
 		})
@@ -75,15 +82,22 @@ func TestAccountEventID(t *testing.T) {
 }
 
 func TestSyncEventID(t *testing.T) {
+	witnessed := time.UnixMicro(1_700_000_000_123_456)
 	tests := []struct {
-		name, did, rev, want string
+		name, did, rev, time string
+		witnessed            time.Time
+		want                 string
 	}{
-		{name: "simple", did: testDID, rev: testRev, want: "s:did:plc:testalice0000000000000000:3testrev00001"},
-		{name: "rev with colon is escaped", did: testDID, rev: "a:b", want: "s:did:plc:testalice0000000000000000:a%3Ab"},
+		{name: "simple", did: testDID, rev: testRev, time: testTime, witnessed: witnessed, want: "s:did:plc:testalice0000000000000000:3testrev00001:2026-01-02T03%3A04%3A05.123Z"},
+		{name: "rev with colon is escaped", did: testDID, rev: "a:b", time: testTime, want: "s:did:plc:testalice0000000000000000:a%3Ab:2026-01-02T03%3A04%3A05.123Z"},
+		{name: "rev without time", did: testDID, rev: testRev, witnessed: witnessed, want: "s:did:plc:testalice0000000000000000:3testrev00001:"},
+		{name: "time without rev", did: testDID, time: testTime, witnessed: witnessed, want: "s:did:plc:testalice0000000000000000::2026-01-02T03%3A04%3A05.123Z"},
+		{name: "fallback to witnessed time", did: testDID, witnessed: witnessed, want: "s:did:plc:testalice0000000000000000:w1700000000123456"},
+		{name: "fallback with zero witnessed time", did: testDID, want: "s:did:plc:testalice0000000000000000:w0"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := SyncEventID(tt.did, tt.rev); got != tt.want {
+			if got := SyncEventID(tt.did, tt.rev, tt.time, tt.witnessed); got != tt.want {
 				t.Errorf("SyncEventID() = %q, want %q", got, tt.want)
 			}
 		})
@@ -113,9 +127,29 @@ func TestEventIDNoCollision(t *testing.T) {
 			b:    CommitEventID(testDID, testPost, "aaa:111", testRev, "create"),
 		},
 		{
-			name: "sync rev against account seq",
-			a:    SyncEventID(testDID, "42"),
-			b:    AccountEventID(testDID, 42),
+			name: "account with different status",
+			a:    AccountEventID(testDID, false, "deleted", testTime),
+			b:    AccountEventID(testDID, false, "takendown", testTime),
+		},
+		{
+			name: "account with different upstream time",
+			a:    AccountEventID(testDID, false, "deleted", testTime),
+			b:    AccountEventID(testDID, false, "deleted", testTime2),
+		},
+		{
+			name: "account active against not active",
+			a:    AccountEventID(testDID, true, "", testTime),
+			b:    AccountEventID(testDID, false, "", testTime),
+		},
+		{
+			name: "colon moved between sync rev and time",
+			a:    SyncEventID(testDID, "a:b", "c", time.Time{}),
+			b:    SyncEventID(testDID, "a", "b:c", time.Time{}),
+		},
+		{
+			name: "sync fallback against a rev that looks like it",
+			a:    SyncEventID(testDID, "", "", time.UnixMicro(1_700_000_000_000_000)),
+			b:    SyncEventID(testDID, "w1700000000000000", "", time.Time{}),
 		},
 	}
 	for _, tt := range tests {
@@ -143,8 +177,9 @@ func TestEventIDIgnoresHostAndSeq(t *testing.T) {
 		id   func(d delivery) string
 	}{
 		{name: "commit", id: func(delivery) string { return CommitEventID(testDID, testPost, "aaa111", testRev, "create") }},
-		{name: "account", id: func(delivery) string { return AccountEventID(testDID, 42) }},
-		{name: "sync", id: func(delivery) string { return SyncEventID(testDID, testRev) }},
+		// The account seq differs between hosts and is not an argument.
+		{name: "account", id: func(delivery) string { return AccountEventID(testDID, false, "deleted", testTime) }},
+		{name: "sync", id: func(d delivery) string { return SyncEventID(testDID, testRev, testTime, d.witnessed) }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
