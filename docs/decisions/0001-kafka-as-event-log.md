@@ -42,7 +42,7 @@ Proposed partition counts: 6 for `raw.bluesky`, 16 for `events`, 1 for `ingest.c
 Ingest holds no business logic and talks to nothing except the source and Kafka. For each event it takes from the SDK it:
 
 - builds the record key (the author ID) and a content-based event ID (see decision 0003), and puts the event ID in a record header,
-- serialises the event to JSON,
+- serialises the event to JSON. The SDK carries every record twice, as a JSON object and as binary CBOR. The CBOR copy is dropped before serialising, because it holds no extra information and roughly doubles the size of a record,
 - produces it to `raw.bluesky` with `acks=all` and idempotence enabled.
 
 It does not filter, enrich or store events anywhere else.
@@ -108,11 +108,11 @@ A production setup would use at least three brokers, replication factor 3, `min.
 2. The source sees a reader that does not read and disconnects it, or the connection idles.
 3. By default `franz-go` retries a record without a time limit. Ingest sets a delivery timeout, so a record that cannot be delivered in time is reported as failed. With the idempotent producer the client only fails a record when that is safe for the sequence numbers, so in some cases a record stays in doubt for longer. In both cases the cursor is written only after a successful delivery report, so it never moves past an event that was not written. A failed record is fatal for the current run, and ingest restarts from the stored cursor.
 4. When Kafka is back, ingest resumes from the cursor in `ingest.cursor`. Events delivered twice are removed later (decision 0003).
-5. If the outage is longer than the source's replay window, the source answers `CursorTooOld`. Ingest then continues from live, logs the gap and counts it in a metric. This is the only case where events are lost.
+5. If the outage is longer than the source's replay window, the stored position is older than anything the source still keeps. With a time cursor the SDK then resumes from the oldest event that is still available and reports that the cursor was clamped. The connector logs the gap and counts it in a metric. Events older than the window are lost, and this is the only case where events are lost.
 
 ## Limits
 
-- `raw.bluesky`: `retention.ms` of 24 hours and `retention.bytes` set per partition so that the topic never takes more than about 8 GB in total. Kafka deletes whole segments, so `segment.ms` is one hour and a record can live up to about 25 hours.
+- `raw.bluesky`: `retention.ms` of 24 hours and `retention.bytes` set per partition so that the topic never takes more than about 8 GB in total. Kafka deletes whole segments, so `segment.ms` is one hour and a record can live up to about 25 hours. A partition can also exceed its size limit by one open segment, so `segment.bytes` is set to a small value and the per-partition limit leaves room for it.
 - Producers compress with zstd. At the sampled rate the post stream is about 4.5 GB of JSON per day before compression. The size on disk is measured in stage 1.
 - The broker heap is capped (512 MB to start with). Total memory use is measured before deployment, and the server is resized if needed.
 
