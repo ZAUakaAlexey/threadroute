@@ -9,6 +9,7 @@
 *.ndjson
 *.ndjson.zst
 *.ndjson.gz
+*.ndjson.zst.tmp
 *.rec
 
 # build output
