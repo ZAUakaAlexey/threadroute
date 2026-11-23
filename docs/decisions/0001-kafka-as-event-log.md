@@ -62,14 +62,16 @@ What is given up: `confluent-kafka-go` uses the same option names as the Kafka d
 
 | Kafka setting | `franz-go` option |
 |---|---|
-| `acks=all` | `kgo.RequiredAcks(kgo.AllISRAcks())` |
+| `acks=all` | `kgo.RequiredAcks(kgo.AllISRAcks())`, the default |
 | `enable.idempotence=true` | on by default, turned off with `kgo.DisableIdempotentWrite()` |
-| `compression.type=zstd` | `kgo.ProducerBatchCompression(kgo.ZstdCompression())` |
+| `compression.type=zstd` | `kgo.ProducerBatchCompression(kgo.ZstdCompression())`, the default is snappy |
+| `delivery.timeout.ms` | `kgo.RecordDeliveryTimeout(...)`, unlimited by default |
+| `buffer.memory` | `kgo.MaxBufferedRecords(...)` (50,000 by default) and `kgo.MaxBufferedBytes(...)` (unlimited by default) |
 | `transactional.id` | `kgo.TransactionalID(...)` |
 | `isolation.level=read_committed` | `kgo.FetchIsolationLevel(kgo.ReadCommitted())` |
 | `group.id` | `kgo.ConsumerGroup(...)` |
 
-The option names in this table are checked against the pinned `franz-go` version when the code is written.
+The option names and defaults in this table were checked against `franz-go` v1.22.3.
 
 ## Why two topics instead of one
 
@@ -102,9 +104,9 @@ A production setup would use at least three brokers, replication factor 3, `min.
 
 ## When Kafka is unavailable
 
-1. The producer's local queue is bounded. When it is full, ingest stops taking batches from the SDK. Nothing is buffered without a limit.
+1. The producer's local buffer is bounded by a record count and a byte size, both set explicitly. When the buffer is full, a produce call blocks, so ingest stops taking batches from the SDK. Nothing is buffered without a limit.
 2. The source sees a reader that does not read and disconnects it, or the connection idles.
-3. A record that cannot be delivered before its timeout is reported as failed. Ingest treats this as fatal for the current run and restarts from the stored cursor, so the cursor never moves past an event that was not written.
+3. By default `franz-go` retries a record without a time limit. Ingest sets a delivery timeout, so a record that cannot be delivered in time is reported as failed. With the idempotent producer the client only fails a record when that is safe for the sequence numbers, so in some cases a record stays in doubt for longer. In both cases the cursor is written only after a successful delivery report, so it never moves past an event that was not written. A failed record is fatal for the current run, and ingest restarts from the stored cursor.
 4. When Kafka is back, ingest resumes from the cursor in `ingest.cursor`. Events delivered twice are removed later (decision 0003).
 5. If the outage is longer than the source's replay window, the source answers `CursorTooOld`. Ingest then continues from live, logs the gap and counts it in a metric. This is the only case where events are lost.
 
