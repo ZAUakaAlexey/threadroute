@@ -1,6 +1,7 @@
 // Package bus holds the names and settings that every service must agree on
-// to use Kafka as the event log (decisions 0001 and 0003): topic names,
-// partition counts, topic configs, record headers and the cursor record.
+// to use Kafka as the event log (decisions 0001, 0003, 0006 and 0007):
+// topic names, partition counts, topic configs, record headers and the
+// cursor record.
 //
 // It also has the Kafka client code built on these names: topic setup
 // (EnsureTopics), the raw writer (RawWriter) and the cursor reader
@@ -18,9 +19,15 @@ import (
 const (
 	// TopicRaw holds Bluesky source events as JSON, keyed by author DID.
 	TopicRaw = "raw.bluesky"
-	// TopicEvents holds channel-agnostic events from normalize, keyed by
-	// conversation key.
+	// TopicEvents holds channel-agnostic message events from normalize,
+	// keyed by conversation key (decision 0006).
 	TopicEvents = "events"
+	// TopicControl holds deletions and author removals from normalize,
+	// keyed by author ID (decision 0006).
+	TopicControl = "events.control"
+	// TopicConversations holds conversation events from conv, keyed by
+	// conversation key (decision 0007).
+	TopicConversations = "conversations"
 	// TopicCursor holds the resume position of the source reader, keyed by
 	// source name. It is compacted.
 	TopicCursor = "ingest.cursor"
@@ -29,9 +36,11 @@ const (
 // Partition counts. A count can be raised later but not lowered, and raising
 // it changes which partition a key maps to.
 const (
-	PartitionsRaw    int32 = 6
-	PartitionsEvents int32 = 16
-	PartitionsCursor int32 = 1
+	PartitionsRaw           int32 = 6
+	PartitionsEvents        int32 = 16
+	PartitionsControl       int32 = 6
+	PartitionsConversations int32 = 16
+	PartitionsCursor        int32 = 1
 )
 
 // ReplicationFactor is used for every topic while Kafka runs as one node.
@@ -168,17 +177,62 @@ func RawTopicSpec(l RawLimits) (TopicSpec, error) {
 	}, nil
 }
 
-// EventsTopicSpec returns the spec of TopicEvents.
-//
-// Decision 0001 leaves its limits to a later decision, so only the cleanup
-// policy is set and retention comes from the broker defaults.
+// Retention of the stage 2 topics (decisions 0004 and 0006). Size-based
+// retention is not decided for them, so retention.bytes is not set and the
+// broker default applies.
+const (
+	// EventsRetention is retention.ms of TopicEvents (decision 0006).
+	EventsRetention = 6 * time.Hour
+	// ControlRetention is retention.ms of TopicControl (decision 0004).
+	ControlRetention = 6 * time.Hour
+	// ConversationsRetention is retention.ms of TopicConversations
+	// (decision 0004).
+	ConversationsRetention = 24 * time.Hour
+	// Stage2SegmentInterval is segment.ms of the three topics above.
+	// Retention only deletes closed segments, and with the broker default
+	// a segment closes after 7 days or 1 GiB, so without this setting a
+	// small topic would keep records far longer than its retention. With 1
+	// hour a record lives up to retention plus 1 hour, which matches
+	// decision 0004: a deleted post leaves TopicEvents "within about 7
+	// hours".
+	Stage2SegmentInterval = time.Hour
+)
+
+// EventsTopicSpec returns the spec of TopicEvents: delete cleanup,
+// EventsRetention, Stage2SegmentInterval, and LogAppendTime timestamps.
 func EventsTopicSpec() TopicSpec {
+	return timeRetainedSpec(TopicEvents, PartitionsEvents, EventsRetention)
+}
+
+// ControlTopicSpec returns the spec of TopicControl: delete cleanup,
+// ControlRetention, Stage2SegmentInterval, and LogAppendTime timestamps.
+func ControlTopicSpec() TopicSpec {
+	return timeRetainedSpec(TopicControl, PartitionsControl, ControlRetention)
+}
+
+// ConversationsTopicSpec returns the spec of TopicConversations: delete
+// cleanup, ConversationsRetention, Stage2SegmentInterval, and LogAppendTime
+// timestamps.
+func ConversationsTopicSpec() TopicSpec {
+	return timeRetainedSpec(TopicConversations, PartitionsConversations, ConversationsRetention)
+}
+
+// timeRetainedSpec returns a delete-cleanup spec with time retention only.
+//
+// message.timestamp.type is LogAppendTime for the same reason as on
+// TopicRaw: retention counts from the write to the topic, not from the
+// source time. Otherwise a catch-up or a replay of old events would be
+// deleted at once.
+func timeRetainedSpec(name string, partitions int32, retention time.Duration) TopicSpec {
 	return TopicSpec{
-		Name:              TopicEvents,
-		Partitions:        PartitionsEvents,
+		Name:              name,
+		Partitions:        partitions,
 		ReplicationFactor: ReplicationFactor,
 		Configs: map[string]*string{
-			ConfigCleanupPolicy: ptr(CleanupDelete),
+			ConfigCleanupPolicy:        ptr(CleanupDelete),
+			ConfigRetentionMs:          ptr(msString(retention)),
+			ConfigSegmentMs:            ptr(msString(Stage2SegmentInterval)),
+			ConfigMessageTimestampType: ptr(TimestampLogAppendTime),
 		},
 	}
 }

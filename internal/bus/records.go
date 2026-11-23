@@ -7,16 +7,20 @@ import (
 	"time"
 )
 
-// Record header names on TopicRaw.
+// Record header names. Records in TopicRaw carry all three. Records in
+// TopicEvents and TopicControl carry HeaderEventID only, with the same value
+// as the event_id field of the payload. Records in TopicConversations carry
+// no header: the payload has everything.
 const (
 	// HeaderEventID carries the content-based event ID (decision 0003).
 	HeaderEventID = "event-id"
 	// HeaderEventKind carries the source event kind, for example "commit".
+	// It is used on TopicRaw only.
 	HeaderEventKind = "event-kind"
 	// HeaderEventWitnessed carries the witnessed time of the event as unix
-	// microseconds in decimal. It is omitted when the witnessed time is
-	// unset. The record timestamp is the time the record was written to
-	// the topic, not the event time.
+	// microseconds in decimal. It is used on TopicRaw only. It is omitted
+	// when the witnessed time is unset. The record timestamp is the time
+	// the record was written to the topic, not the event time.
 	HeaderEventWitnessed = "event-witnessed"
 )
 

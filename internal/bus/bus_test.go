@@ -107,7 +107,24 @@ func TestOtherTopicSpecs(t *testing.T) {
 		partitions int32
 		configs    map[string]string
 	}{
-		{name: "events", spec: EventsTopicSpec(), topic: "events", partitions: 16, configs: map[string]string{ConfigCleanupPolicy: "delete"}},
+		{name: "events", spec: EventsTopicSpec(), topic: "events", partitions: 16, configs: map[string]string{
+			ConfigCleanupPolicy:        "delete",
+			ConfigRetentionMs:          "21600000",
+			ConfigSegmentMs:            "3600000",
+			ConfigMessageTimestampType: "LogAppendTime",
+		}},
+		{name: "control", spec: ControlTopicSpec(), topic: "events.control", partitions: 6, configs: map[string]string{
+			ConfigCleanupPolicy:        "delete",
+			ConfigRetentionMs:          "21600000",
+			ConfigSegmentMs:            "3600000",
+			ConfigMessageTimestampType: "LogAppendTime",
+		}},
+		{name: "conversations", spec: ConversationsTopicSpec(), topic: "conversations", partitions: 16, configs: map[string]string{
+			ConfigCleanupPolicy:        "delete",
+			ConfigRetentionMs:          "86400000",
+			ConfigSegmentMs:            "3600000",
+			ConfigMessageTimestampType: "LogAppendTime",
+		}},
 		{name: "cursor", spec: CursorTopicSpec(), topic: "ingest.cursor", partitions: 1, configs: map[string]string{
 			ConfigCleanupPolicy:          "compact",
 			ConfigSegmentMs:              "600000",
