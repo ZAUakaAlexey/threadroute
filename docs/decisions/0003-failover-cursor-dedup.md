@@ -22,7 +22,7 @@ Kafka does not remove duplicate events on the broker side. Its idempotent produc
 
 1. `jetstream.us-east.bsky.network` is the primary host and `jetstream.us-west.bsky.network` is the failover host.
 2. The resume position is the witnessed time of the last batch that Kafka acknowledged. On a resume the SDK rewinds it by a few seconds (5 by default) to cover clock differences between hosts.
-3. The position is stored in the compacted topic `ingest.cursor` (one partition, key = source name, value = host, witnessed time, `seq` and the time of the write). Ingest writes it after every delivered batch and reads the topic to its end at start. An empty topic means "start from live".
+3. The position is stored in the compacted topic `ingest.cursor` (one partition, key = source name, value = host, witnessed time, `seq` and the time of the write). Ingest writes it after every delivered batch. At start it reads the newest record for its key from the end of the topic, so the cost does not depend on the size of the topic. No record, or a tombstone as the newest record, means "start from live".
 
 ### Event ID
 
@@ -60,6 +60,6 @@ The numbers are checked again after the 24-hour measurement and before load test
 - A restart or a host change re-delivers a few seconds of events into `raw.bluesky`. They do not reach `events`.
 - If the reader was down for longer than 10 minutes and the source replays older events, some duplicates can pass the Redis layer. Services after `normalize` must therefore be idempotent on the event ID. This is a rule for all later services.
 - The stored cursor can be slightly behind the log after a crash. This only causes re-delivery, never loss.
-- Cursor writes add one small record per batch (up to 64 events or 20 ms by default). Compaction keeps the topic small.
+- Cursor writes add one small record per batch (up to 64 events or 20 ms by default). A 30-minute run wrote 33,563 of them, about 1.6 million per day. With broker defaults a compacted topic is not cleaned for days, because the open segment is never compacted and it rolls after 7 days or 1 GiB. The topic therefore has its own settings: a segment rolls after 10 minutes or 1 MiB, and every record is compacted within 15 minutes. On a real broker 30,001 records were reduced to about 4,850 within 15 seconds of the cleaner's next pass.
 - `normalize` depends on Redis. If Redis is unavailable, `normalize` stops and the raw topic absorbs the delay.
 - Transactions add latency to `normalize` (one commit per batch). The cost is measured in stage 2.
