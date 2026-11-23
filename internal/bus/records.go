@@ -13,6 +13,11 @@ const (
 	HeaderEventID = "event-id"
 	// HeaderEventKind carries the source event kind, for example "commit".
 	HeaderEventKind = "event-kind"
+	// HeaderEventWitnessed carries the witnessed time of the event as unix
+	// microseconds in decimal. It is omitted when the witnessed time is
+	// unset. The record timestamp is the time the record was written to
+	// the topic, not the event time.
+	HeaderEventWitnessed = "event-witnessed"
 )
 
 // SourceBluesky is the source name of the Bluesky reader. It is the record

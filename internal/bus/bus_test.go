@@ -1,31 +1,49 @@
 package bus
 
 import (
+	"math"
 	"strconv"
 	"testing"
 	"time"
 )
 
 func TestRawLimitsPerPartitionBytes(t *testing.T) {
+	const mib = 1 << 20
 	tests := []struct {
-		name     string
-		maxBytes int64
-		want     int64
+		name        string
+		maxBytes    int64
+		wantSegment int64
+		wantBytes   int64
 	}{
-		{name: "default", maxBytes: DefaultRawMaxBytes, want: DefaultRawMaxBytes / 6},
-		{name: "divides evenly", maxBytes: 600, want: 100},
-		{name: "rounds down", maxBytes: 605, want: 100},
-		{name: "one byte per partition", maxBytes: 6, want: 1},
+		{name: "default", maxBytes: DefaultRawMaxBytes, wantSegment: 64 * mib, wantBytes: DefaultRawMaxBytes/6 - 64*mib},
+		{name: "segment at the cap", maxBytes: 6 * 256 * mib, wantSegment: 64 * mib, wantBytes: 192 * mib},
+		{name: "segment below the cap", maxBytes: 6 * 40 * mib, wantSegment: 10 * mib, wantBytes: 30 * mib},
+		{name: "share rounds down", maxBytes: 6*40*mib + 5, wantSegment: 10 * mib, wantBytes: 30 * mib},
+		{name: "segment at the floor", maxBytes: 6 * 3 * mib, wantSegment: mib, wantBytes: 2 * mib},
+		{name: "smallest valid limit", maxBytes: RawMinMaxBytes, wantSegment: mib, wantBytes: mib},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			l := RawLimits{Retention: DefaultRawRetention, MaxBytes: tt.maxBytes}
-			got := l.PerPartitionBytes()
-			if got != tt.want {
-				t.Errorf("PerPartitionBytes() = %d, want %d", got, tt.want)
+			if err := l.Validate(); err != nil {
+				t.Fatalf("Validate() error = %v", err)
 			}
-			if got*int64(PartitionsRaw) > tt.maxBytes {
-				t.Errorf("%d bytes x %d partitions exceeds the limit %d", got, PartitionsRaw, tt.maxBytes)
+			seg := l.SegmentBytes()
+			got := l.PerPartitionBytes()
+			if seg != tt.wantSegment {
+				t.Errorf("SegmentBytes() = %d, want %d", seg, tt.wantSegment)
+			}
+			if got != tt.wantBytes {
+				t.Errorf("PerPartitionBytes() = %d, want %d", got, tt.wantBytes)
+			}
+			if (got+seg)*int64(PartitionsRaw) > tt.maxBytes {
+				t.Errorf("(%d + %d) bytes x %d partitions exceeds the limit %d", got, seg, PartitionsRaw, tt.maxBytes)
+			}
+			if got < seg {
+				t.Errorf("retention.bytes %d is smaller than one segment %d", got, seg)
+			}
+			if seg < RawSegmentBytesMin || seg > RawSegmentBytesMax || seg > math.MaxInt32 {
+				t.Errorf("SegmentBytes() = %d is out of range", seg)
 			}
 		})
 	}
@@ -43,6 +61,9 @@ func TestRawLimitsValidate(t *testing.T) {
 		{name: "retention not whole ms", limits: RawLimits{Retention: 2*time.Hour + time.Microsecond, MaxBytes: 1 << 30}, wantErr: true},
 		{name: "zero bytes", limits: RawLimits{Retention: DefaultRawRetention}, wantErr: true},
 		{name: "less than one byte per partition", limits: RawLimits{Retention: DefaultRawRetention, MaxBytes: 5}, wantErr: true},
+		{name: "smallest valid bytes", limits: RawLimits{Retention: DefaultRawRetention, MaxBytes: RawMinMaxBytes}},
+		{name: "one byte below the smallest", limits: RawLimits{Retention: DefaultRawRetention, MaxBytes: RawMinMaxBytes - 1}, wantErr: true},
+		{name: "too small for two segments", limits: RawLimits{Retention: DefaultRawRetention, MaxBytes: 600_000}, wantErr: true},
 		{name: "negative bytes", limits: RawLimits{Retention: DefaultRawRetention, MaxBytes: -1}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -64,10 +85,12 @@ func TestRawTopicSpec(t *testing.T) {
 		t.Errorf("spec = %+v", spec)
 	}
 	want := map[string]string{
-		ConfigCleanupPolicy:  "delete",
-		ConfigRetentionMs:    "86400000",
-		ConfigRetentionBytes: strconv.FormatInt(8_000_000_000/6, 10),
-		ConfigSegmentMs:      "3600000",
+		ConfigCleanupPolicy:        "delete",
+		ConfigRetentionMs:          "86400000",
+		ConfigRetentionBytes:       strconv.FormatInt(8_000_000_000/6-64<<20, 10),
+		ConfigSegmentMs:            "3600000",
+		ConfigSegmentBytes:         strconv.FormatInt(64<<20, 10),
+		ConfigMessageTimestampType: "LogAppendTime",
 	}
 	assertConfigs(t, spec.Configs, want)
 

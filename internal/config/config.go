@@ -106,8 +106,8 @@ func Load(lookup LookupFunc) (Config, error) {
 			r.fail(EnvRawRetention, fmt.Errorf("%s is not a whole number of milliseconds", d))
 		}
 	}
-	if n := cfg.RawLimits.MaxBytes; n > 0 && n < int64(bus.PartitionsRaw) {
-		r.fail(EnvRawMaxBytes, fmt.Errorf("%d is less than one byte per partition (%d partitions)", n, bus.PartitionsRaw))
+	if n := cfg.RawLimits.MaxBytes; n > 0 && n < bus.RawMinMaxBytes {
+		r.fail(EnvRawMaxBytes, fmt.Errorf("%d is less than %d: each of the %d partitions needs room for two segments of at least %d bytes", n, bus.RawMinMaxBytes, bus.PartitionsRaw, bus.RawSegmentBytesMin))
 	}
 
 	if err := errors.Join(r.errs...); err != nil {

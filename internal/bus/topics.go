@@ -2,7 +2,9 @@
 // to use Kafka as the event log (decisions 0001 and 0003): topic names,
 // partition counts, topic configs, record headers and the cursor record.
 //
-// It has no Kafka client code.
+// It also has the Kafka client code built on these names: topic setup
+// (EnsureTopics), the raw writer (RawWriter) and the cursor reader
+// (ReadCursor).
 package bus
 
 import (
@@ -45,6 +47,17 @@ const (
 	// RawSegmentInterval is segment.ms for TopicRaw. Kafka deletes whole
 	// segments, so a record can live up to retention plus this interval.
 	RawSegmentInterval = time.Hour
+	// RawSegmentBytesMax is the largest segment.bytes for TopicRaw. With
+	// the default limits each partition gets segments of this size.
+	RawSegmentBytesMax int64 = 64 << 20 // 64 MiB
+	// RawSegmentBytesMin is the smallest segment.bytes for TopicRaw. It is
+	// believed to be the lowest value Kafka 4.x accepts (KIP-1030). This is
+	// not checked by the tests, because the fake cluster accepts any value.
+	RawSegmentBytesMin int64 = 1 << 20 // 1 MiB
+	// RawMinMaxBytes is the smallest valid RawLimits.MaxBytes: every
+	// partition needs room for one open segment and at least one closed
+	// segment of the minimum size.
+	RawMinMaxBytes = 2 * RawSegmentBytesMin * int64(PartitionsRaw)
 )
 
 // Kafka topic config keys used here.
@@ -53,9 +66,16 @@ const (
 	ConfigRetentionMs    = "retention.ms"
 	ConfigRetentionBytes = "retention.bytes"
 	ConfigSegmentMs      = "segment.ms"
+	ConfigSegmentBytes   = "segment.bytes"
+	// ConfigMessageTimestampType set to TimestampLogAppendTime makes the
+	// broker stamp each record with the time it was appended, so time
+	// retention counts from the write to the topic, not from the event time.
+	ConfigMessageTimestampType = "message.timestamp.type"
 
 	CleanupDelete  = "delete"
 	CleanupCompact = "compact"
+
+	TimestampLogAppendTime = "LogAppendTime"
 )
 
 // TopicSpec is everything needed to create a topic. The field types match
@@ -90,20 +110,37 @@ func (l RawLimits) Validate() error {
 	if l.Retention%time.Millisecond != 0 {
 		errs = append(errs, fmt.Errorf("retention %s is not a whole number of milliseconds", l.Retention))
 	}
-	if l.MaxBytes < int64(PartitionsRaw) {
-		errs = append(errs, fmt.Errorf("max bytes %d is less than one byte per partition (%d partitions)", l.MaxBytes, PartitionsRaw))
+	if l.MaxBytes < RawMinMaxBytes {
+		errs = append(errs, fmt.Errorf("max bytes %d is less than %d: each of the %d partitions needs room for two segments of at least %d bytes", l.MaxBytes, RawMinMaxBytes, PartitionsRaw, RawSegmentBytesMin))
 	}
 	return errors.Join(errs...)
 }
 
-// PerPartitionBytes returns retention.bytes for TopicRaw: the total limit
-// divided by the partition count, rounded down, so the sum never exceeds the
-// total limit.
-//
-// Kafka can keep up to one more segment per partition above this value,
-// because it only deletes closed segments.
-func (l RawLimits) PerPartitionBytes() int64 {
+// partitionShare is the total limit divided by the partition count, rounded
+// down.
+func (l RawLimits) partitionShare() int64 {
 	return l.MaxBytes / int64(PartitionsRaw)
+}
+
+// SegmentBytes returns segment.bytes for TopicRaw: a quarter of the
+// per-partition share, kept between RawSegmentBytesMin and
+// RawSegmentBytesMax. The result is only meaningful for valid limits.
+//
+// A quarter keeps at least three closed segments under retention.bytes, so
+// size-based deletion removes a small part of the partition at a time.
+func (l RawLimits) SegmentBytes() int64 {
+	return min(max(l.partitionShare()/4, RawSegmentBytesMin), RawSegmentBytesMax)
+}
+
+// PerPartitionBytes returns retention.bytes for TopicRaw: the per-partition
+// share minus one segment.
+//
+// Kafka only deletes closed segments, so a partition can hold up to
+// retention.bytes plus one open segment. Leaving room for that segment keeps
+// partitions x (retention.bytes + segment.bytes) within the total limit.
+// The result is only meaningful for valid limits.
+func (l RawLimits) PerPartitionBytes() int64 {
+	return l.partitionShare() - l.SegmentBytes()
 }
 
 // RawTopicSpec returns the spec of TopicRaw for the given limits.
@@ -116,10 +153,12 @@ func RawTopicSpec(l RawLimits) (TopicSpec, error) {
 		Partitions:        PartitionsRaw,
 		ReplicationFactor: ReplicationFactor,
 		Configs: map[string]*string{
-			ConfigCleanupPolicy:  ptr(CleanupDelete),
-			ConfigRetentionMs:    ptr(strconv.FormatInt(l.Retention.Milliseconds(), 10)),
-			ConfigRetentionBytes: ptr(strconv.FormatInt(l.PerPartitionBytes(), 10)),
-			ConfigSegmentMs:      ptr(strconv.FormatInt(RawSegmentInterval.Milliseconds(), 10)),
+			ConfigCleanupPolicy:        ptr(CleanupDelete),
+			ConfigRetentionMs:          ptr(strconv.FormatInt(l.Retention.Milliseconds(), 10)),
+			ConfigRetentionBytes:       ptr(strconv.FormatInt(l.PerPartitionBytes(), 10)),
+			ConfigSegmentMs:            ptr(strconv.FormatInt(RawSegmentInterval.Milliseconds(), 10)),
+			ConfigSegmentBytes:         ptr(strconv.FormatInt(l.SegmentBytes(), 10)),
+			ConfigMessageTimestampType: ptr(TimestampLogAppendTime),
 		},
 	}, nil
 }

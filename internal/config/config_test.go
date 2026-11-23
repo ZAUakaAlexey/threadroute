@@ -100,9 +100,9 @@ func TestLoadOverrides(t *testing.T) {
 		},
 		{
 			name: "raw limits",
-			env:  map[string]string{EnvRawRetention: "6h", EnvRawMaxBytes: "600000"},
+			env:  map[string]string{EnvRawRetention: "6h", EnvRawMaxBytes: "600000000"},
 			check: func(t *testing.T, c Config) {
-				want := bus.RawLimits{Retention: 6 * time.Hour, MaxBytes: 600_000}
+				want := bus.RawLimits{Retention: 6 * time.Hour, MaxBytes: 600_000_000}
 				if c.RawLimits != want {
 					t.Errorf("RawLimits = %+v, want %+v", c.RawLimits, want)
 				}
@@ -158,6 +158,7 @@ func TestLoadInvalid(t *testing.T) {
 		{name: "retention shorter than segment", env: map[string]string{EnvRawRetention: "30m"}, wantBad: []string{EnvRawRetention}},
 		{name: "retention not whole ms", env: map[string]string{EnvRawRetention: "2h1us"}, wantBad: []string{EnvRawRetention}},
 		{name: "raw bytes below partitions", env: map[string]string{EnvRawMaxBytes: "5"}, wantBad: []string{EnvRawMaxBytes}},
+		{name: "raw bytes too small for two segments", env: map[string]string{EnvRawMaxBytes: "600000"}, wantBad: []string{EnvRawMaxBytes}},
 		{
 			name: "every bad variable is named",
 			env: map[string]string{
