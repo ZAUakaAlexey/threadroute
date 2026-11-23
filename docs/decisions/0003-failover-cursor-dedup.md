@@ -29,8 +29,10 @@ Kafka does not remove duplicate events on the broker side. Its idempotent produc
 Each record in `raw.bluesky` carries a header with an event ID built from the event content, not from `seq`, so it is the same on both hosts:
 
 - commit: `c:<did>:<collection>:<rkey>:<rev>:<operation>`
-- account: `a:<did>:<account seq>`
-- sync: `s:<did>:<rev>`
+- account: `a:<did>:<active>:<status>:<upstream time>`
+- sync: `s:<did>:<rev>:<upstream time>`
+
+The account and sync formats were changed after a live check on 2026-11-23. The first version used the `seq` field inside the account payload. Two connections, one to each host, showed that this number is different on the two hosts for the same event (74 matched pairs, none equal), while the upstream `time` field was the same. Some sync events carry no revision and no time. Their ID falls back to the witnessed time, which is specific to one host. Such an event can pass twice after a host change, and that is harmless because handling a sync is idempotent.
 
 ### Deduplication
 

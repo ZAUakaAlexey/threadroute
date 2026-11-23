@@ -7,7 +7,7 @@ Date: 2026-11-23
 
 The system reads the public Bluesky post stream (about 50 post events per second in a short evening sample, to be measured over 24 hours) and turns it into conversations that are routed to operators.
 
-The source does not wait for a slow reader. A client that falls too far behind is disconnected with a `ConsumerTooSlow` error. Reading and processing must therefore be separated: the reader must never wait for a database, a cache or business logic.
+The source does not wait for a slow reader. A client that falls too far behind is disconnected. The protocol defines a `ConsumerTooSlow` error for this. In a live check a reader that stopped for 60 seconds simply had its connection closed. Reading and processing must therefore be separated: the reader must never wait for a database, a cache or business logic.
 
 Load tests will replay recorded traffic at up to 50 times the live rate, so the log must also be the entry point for a replay tool.
 
@@ -112,6 +112,7 @@ A production setup would use at least three brokers, replication factor 3, `min.
 
 ## Limits
 
+- `raw.bluesky` uses `message.timestamp.type=LogAppendTime`: the broker stamps each record with the time it was written. Retention therefore counts from the moment a record entered the topic, not from the event time. Without this, events that arrive late (a catch-up after an outage, or a replay of an old recording) would be deleted at once, and the producer would treat them as timed out. The event time is kept in a record header and inside the payload.
 - `raw.bluesky`: `retention.ms` of 24 hours and `retention.bytes` set per partition so that the topic never takes more than about 8 GB in total. Kafka deletes whole segments, so `segment.ms` is one hour and a record can live up to about 25 hours. A partition can also exceed its size limit by one open segment, so `segment.bytes` is set to a small value and the per-partition limit leaves room for it.
 - Producers compress with zstd. At the sampled rate the post stream is about 4.5 GB of JSON per day before compression. The size on disk is measured in stage 1.
 - The broker heap is capped (512 MB to start with). Total memory use is measured before deployment, and the server is resized if needed.

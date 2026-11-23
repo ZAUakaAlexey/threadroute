@@ -19,7 +19,10 @@ There is an official Go client, `github.com/bluesky-social/jetstream` (v0.4.6 at
 - The SDK API covers what ingest needs: kinds and collection filters, `WithFailoverHosts`, `WithCursorMode`, `WithLiveCursor`, batch size and delay, and `Batch.LastCursor`.
 - The SDK has no metrics of its own. The connector counts events, bytes and reconnects itself.
 - Building the SDK client package pulls in `sentry-go`, parts of `pebble`, `cockroachdb/errors` and `gogo/protobuf`. This makes the binary and the vulnerability-scan surface larger, but none of it runs in the live-tail path.
-- Not checked yet: how the SDK behaves when the consumer is blocked for a long time (memory use and recovery).
+- A blocked consumer, checked on the live stream on 2026-11-23 in two runs. The sink was blocked for 60 seconds.
+  - Memory stayed bounded: heap in use 3.5 to 5.5 MB, resident memory 23 to 26 MB during the block.
+  - The source dropped the connection. The SDK reconnected to the same host and resumed, and caught up in 1.7 and 8.8 seconds.
+  - Compared with a second, unblocked connection over the same period (7,537 and 21,234 events): no event was missing and none was repeated.
 
 ## Decision
 
@@ -31,4 +34,4 @@ Use the official SDK. Wrap it in a small connector interface owned by this proje
 - Protocol changes are followed by upgrading one dependency.
 - The connector interface is the only place that changes if the SDK is replaced or another channel is added.
 - The SDK is before version 1.0, so its API can change between releases. The version is pinned.
-- Open check for stage 1: block publishing for one minute and watch memory and recovery. If memory grows without a limit, this decision is reviewed with the numbers.
+- The blocked-consumer check passed, so the SDK stays. The check ran for one minute on a laptop. It is repeated with Kafka stopped in the stage 1 integration run.
