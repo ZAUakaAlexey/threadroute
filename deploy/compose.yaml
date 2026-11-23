@@ -1,0 +1,134 @@
+# Local development stack for stage 1: Kafka, ingest and (optional) record.
+#
+#   docker compose -f deploy/compose.yaml up -d --build            # kafka + ingest
+#   docker compose -f deploy/compose.yaml --profile record up -d   # also record
+#
+# Every published port listens on 127.0.0.1 only. No secrets exist in stage 1.
+
+name: threadroute
+
+x-go-service: &go-service
+  build:
+    context: ..
+    dockerfile: deploy/Dockerfile
+  restart: unless-stopped
+  read_only: true
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  depends_on:
+    kafka:
+      condition: service_healthy
+
+services:
+  kafka:
+    image: apache/kafka:4.4.0
+    hostname: kafka
+    restart: unless-stopped
+    environment:
+      # KRaft combined mode: broker and controller in one process (decision 0001).
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      # INTERNAL is for containers in this stack, HOST for tools on the host.
+      KAFKA_LISTENERS: INTERNAL://:9092,CONTROLLER://:9093,HOST://:9094
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://kafka:9092,HOST://localhost:9094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      # One node, so every internal topic has one replica.
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      # Services create their topics with explicit configs (EnsureTopics).
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+      # The broker heap is capped at 512 MB (decision 0001).
+      KAFKA_HEAP_OPTS: -Xmx512m -Xms512m
+    ports:
+      - "127.0.0.1:9094:9094"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 15s
+      retries: 12
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  ingest:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: ingest
+    image: threadroute-ingest:dev
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_SOURCE_PRIMARY_HOST: ${THREADROUTE_SOURCE_PRIMARY_HOST:-jetstream.us-east.bsky.network}
+      THREADROUTE_SOURCE_FAILOVER_HOST: ${THREADROUTE_SOURCE_FAILOVER_HOST:-jetstream.us-west.bsky.network}
+      THREADROUTE_SOURCE_COLLECTION: ${THREADROUTE_SOURCE_COLLECTION:-app.bsky.feed.post}
+      THREADROUTE_METRICS_ADDR: ":9464"
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_PRODUCER_MAX_BUFFERED_RECORDS: ${THREADROUTE_PRODUCER_MAX_BUFFERED_RECORDS:-10000}
+      THREADROUTE_PRODUCER_MAX_BUFFERED_BYTES: ${THREADROUTE_PRODUCER_MAX_BUFFERED_BYTES:-33554432}
+      THREADROUTE_PRODUCER_DELIVERY_TIMEOUT: ${THREADROUTE_PRODUCER_DELIVERY_TIMEOUT:-2m}
+      THREADROUTE_RAW_RETENTION: ${THREADROUTE_RAW_RETENTION:-24h}
+      THREADROUTE_RAW_MAX_BYTES: ${THREADROUTE_RAW_MAX_BYTES:-8000000000}
+    ports:
+      - "127.0.0.1:9464:9464"
+    # Ingest lets the current batch finish (up to 10s) and then flushes the
+    # producer (up to 10s) before it exits.
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  record:
+    <<: *go-service
+    profiles: ["record"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: record
+    image: threadroute-record:dev
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_RECORD_GROUP_ID: ${THREADROUTE_RECORD_GROUP_ID:-threadroute-record}
+      THREADROUTE_RECORD_START: ${THREADROUTE_RECORD_START:-end}
+      # The path inside the container. It has no .git above it, so the
+      # recorder's git working tree check passes.
+      THREADROUTE_RECORD_DIR: /recordings
+      THREADROUTE_RECORD_SEGMENT_MAX_BYTES: ${THREADROUTE_RECORD_SEGMENT_MAX_BYTES:-268435456}
+      THREADROUTE_RECORD_SEGMENT_MAX_AGE: ${THREADROUTE_RECORD_SEGMENT_MAX_AGE:-1h}
+      THREADROUTE_RECORD_RETENTION: ${THREADROUTE_RECORD_RETENTION:-336h}
+      THREADROUTE_RECORD_MAX_TOTAL_BYTES: ${THREADROUTE_RECORD_MAX_TOTAL_BYTES:-}
+      THREADROUTE_RECORD_METRICS_ADDR: ":9465"
+    volumes:
+      # Recordings hold real post text and author IDs. They live on the
+      # host, outside the repository (decision 0004).
+      - type: bind
+        source: ${THREADROUTE_RECORD_HOST_DIR:-${HOME}/threadroute-recordings}
+        target: /recordings
+        bind:
+          create_host_path: true
+    ports:
+      - "127.0.0.1:9465:9465"
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+volumes:
+  kafka-data:
