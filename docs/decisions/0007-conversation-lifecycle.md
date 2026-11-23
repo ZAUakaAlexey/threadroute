@@ -1,0 +1,75 @@
+# 0007. Conversation lifecycle and state
+
+Status: Proposed
+Date: 2026-11-23
+
+## Context
+
+A conversation is a pair of a company and a customer (decision 0006). The `conv` service reads message events and control events, keeps the state of open conversations, and tells the router when a conversation needs an operator.
+
+Live state goes to Redis and long-lived routing data to PostgreSQL (agreed earlier). Post text must have a short lifetime and must be removed when the author deletes it (decision 0004).
+
+No real agent answers anyone. Operators are simulated. The only real reply in the data is the one the thread author writes themselves.
+
+## Decision
+
+### Lifecycle
+
+1. **Opened.** The first customer message of an admitted company (decision 0008) opens a conversation.
+2. **Updated.** Every later message of the same pair is added. Messages are ordered by source time, not by arrival.
+3. **Answered by the company.** When the thread author replies to the customer, the time since the customer's first unanswered message is recorded as the real response time. It is kept as a metric next to the simulated response time, so the two can be compared.
+4. **Closed.** No new message for the inactivity timeout.
+5. **Reopened.** A new customer message after closing starts a new session of the same conversation. The router is told the previous operator, so it can prefer them.
+
+### Events for other services
+
+`conv` publishes conversation events (opened, message added, answered by the company, closed) to a topic `conversations`, keyed by the conversation key, with 16 partitions. The router and the gateway consume it. These events carry IDs, language, counters and times, but no post text.
+
+### State in Redis
+
+- One hash per open conversation: company, customer, language, counters, times, session number.
+- The messages of a conversation as a sorted set by source time, with a limit on the number kept.
+- An index from message ID to conversation, and from author to their messages, for deletions and author removals.
+- A sorted set of close deadlines, checked by a sweeper.
+
+### Deletions
+
+- A deletion removes the message text and its index entries at once. Counters stay.
+- An author removal deletes every stored message of that author. If the author was the customer of a conversation, the conversation is closed.
+
+## Open choices
+
+### 1. Inactivity timeout
+
+| Option | Note |
+|---|---|
+| 10 minutes | conversations close fast, many are reopened |
+| **30 minutes (recommended)** | a usual value for chat sessions |
+| 60 minutes | fewer reopenings, more open conversations in memory |
+
+### 2. A company message that arrives when no conversation is open
+
+This happens when events arrive out of order, or when the author answers someone whose message was not admitted.
+
+| Option | Note |
+|---|---|
+| **Drop and count (recommended for the first version)** | simplest. The counter shows how often it happens, and the rule can be changed with numbers |
+| Hold for up to 30 seconds | covers out-of-order arrival, adds a buffer and a timer |
+
+### 3. How long message text is kept
+
+| Option | Note |
+|---|---|
+| **Until the conversation closes, plus 10 minutes (recommended)** | an operator can read the conversation while it is open |
+| Fixed 1 hour from arrival | simple, but text can disappear from an open conversation |
+
+### 4. How many messages are kept per conversation
+
+Recommended: the last 50. Older ones are dropped from Redis and only counted.
+
+## Consequences
+
+- The real response time exists only for conversations where the thread author answered. Its share is measured in stage 2.
+- Ordering by source time means a late message can be inserted before messages that were already shown. The gateway must handle that.
+- A sweeper closes conversations, so closing can be late by one sweep interval.
+- Redis memory grows with the number of open conversations. It is measured, and admission (decision 0008) is the control for it.
