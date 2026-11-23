@@ -1,0 +1,28 @@
+# secrets and local config
+.env
+.env.*
+!.env.example
+
+# recorded traffic and local data: never commit captured events
+/data/
+/recordings/
+*.ndjson
+*.ndjson.zst
+*.ndjson.gz
+*.rec
+
+# build output
+/bin/
+/dist/
+*.test
+*.out
+*.prof
+
+# editors and OS
+.DS_Store
+.idea/
+.vscode/
+
+# web
+node_modules/
+web/dist/
