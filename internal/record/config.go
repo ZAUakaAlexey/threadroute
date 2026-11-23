@@ -26,6 +26,7 @@ const (
 	EnvRecordSegmentAge     = Prefix + "RECORD_SEGMENT_MAX_AGE"
 	EnvRecordRetention      = Prefix + "RECORD_RETENTION"
 	EnvRecordMaxTotalBytes  = Prefix + "RECORD_MAX_TOTAL_BYTES"
+	EnvRecordMetricsAddr    = Prefix + "RECORD_METRICS_ADDR"
 	envHome                 = "HOME"
 	defaultRecordingsSubdir = "threadroute-recordings"
 )
@@ -36,6 +37,9 @@ const (
 	DefaultLogLevel     = slog.LevelInfo
 	DefaultGroupID      = "threadroute-record"
 	DefaultStart        = StartEnd
+	// DefaultMetricsAddr differs from the ingest default (:9464), so both
+	// can run on one host.
+	DefaultMetricsAddr = ":9465"
 )
 
 // StartPosition is where a new consumer group starts reading. A group that
@@ -63,6 +67,9 @@ type Config struct {
 	Writer WriterOptions
 	// LogLevel is the minimum level for log/slog.
 	LogLevel slog.Level
+	// MetricsAddr is the listen address of the metrics, pprof and health
+	// endpoint.
+	MetricsAddr string
 }
 
 // LookupFunc returns the value of an environment variable and whether it is
@@ -89,7 +96,8 @@ func Load(lookup LookupFunc) (Config, error) {
 			Retention:       r.positiveDuration(EnvRecordRetention, DefaultRetention),
 			MaxTotalBytes:   r.positiveInt(EnvRecordMaxTotalBytes, 0),
 		},
-		LogLevel: r.logLevel(EnvLogLevel, DefaultLogLevel),
+		LogLevel:    r.logLevel(EnvLogLevel, DefaultLogLevel),
+		MetricsAddr: r.listenAddr(EnvRecordMetricsAddr, DefaultMetricsAddr),
 	}
 	// Decision 0004: a recording is deleted 14 days after it was made. A
 	// shorter retention is allowed, a longer one is not.
@@ -185,6 +193,18 @@ func (r *reader) dir(key string) string {
 		return ""
 	}
 	return filepath.Clean(v)
+}
+
+func (r *reader) listenAddr(key, def string) string {
+	v, ok := r.get(key)
+	if !ok {
+		return def
+	}
+	if err := checkHostPort(v); err != nil {
+		r.fail(key, err)
+		return ""
+	}
+	return v
 }
 
 func (r *reader) logLevel(key string, def slog.Level) slog.Level {

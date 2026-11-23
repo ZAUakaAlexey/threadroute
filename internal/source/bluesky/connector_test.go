@@ -136,7 +136,7 @@ func TestRunSinkError(t *testing.T) {
 	if !errors.Is(err, sinkErr) {
 		t.Fatalf("Run = %v, want wrapped sink error", err)
 	}
-	if err == sinkErr {
+	if errors.Unwrap(err) == nil {
 		t.Fatalf("sink error is not wrapped")
 	}
 	if calls != 1 || fs.yielded.Load() != 1 {

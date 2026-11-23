@@ -71,7 +71,7 @@ func (f *fakeJetstream) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Wait for anything from the client (its close frame) or an error,
 	// then drop the TCP connection so the client does not wait for a
 	// close reply.
-	_, _ = rw.Reader.ReadByte()
+	_, _ = rw.ReadByte()
 }
 
 func (f *fakeJetstream) lastQuery() url.Values {

@@ -9,16 +9,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/ZAUakaAlexey/threadroute/internal/obs"
 	"github.com/ZAUakaAlexey/threadroute/internal/record"
 )
 
 func main() {
 	if err := run(); err != nil {
-		slog.New(slog.NewJSONHandler(os.Stderr, nil)).Error("record failed", "error", err)
+		obs.NewLogger(os.Stderr, slog.LevelInfo).Error("record failed", "error", err)
 		os.Exit(1)
 	}
 }
@@ -28,14 +30,28 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: cfg.LogLevel}))
+	logger := obs.NewLogger(os.Stderr, cfg.LogLevel)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// A shared metrics endpoint is added later. Until then the registry is
-	// only filled.
 	reg := prometheus.NewRegistry()
+	// Ready while the recorder runs.
+	var ready atomic.Bool
+	srv, err := obs.NewServer(ctx, cfg.MetricsAddr, reg, ready.Load, logger)
+	if err != nil {
+		return err
+	}
+	// The metrics server outlives ctx, so the final commit can still be
+	// observed. It stops when run returns.
+	srvCtx, stopSrv := context.WithCancel(context.WithoutCancel(ctx))
+	waitSrv := srv.Start(srvCtx)
+	defer func() {
+		stopSrv()
+		if err := waitSrv(); err != nil {
+			logger.Warn("metrics server", "error", err)
+		}
+	}()
 
 	w, err := record.OpenWriter(cfg.Writer, logger, reg)
 	if err != nil {
@@ -57,8 +73,12 @@ func run() error {
 		"segment_max_age", cfg.Writer.SegmentMaxAge.String(),
 		"retention", cfg.Writer.Retention.String(),
 		"max_total_bytes", cfg.Writer.MaxTotalBytes,
+		"metrics_addr", srv.Addr(),
 	)
-	if err := rec.Run(ctx); err != nil {
+	ready.Store(true)
+	err = rec.Run(ctx)
+	ready.Store(false)
+	if err != nil {
 		return fmt.Errorf("recorder: %w", err)
 	}
 	return nil

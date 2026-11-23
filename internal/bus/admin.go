@@ -37,6 +37,10 @@ type TopicAdmin interface {
 //   - Each config in the spec is set to the spec value if it differs.
 //     Configs that the spec does not mention are left alone.
 //   - A different replication factor is logged as a warning and not changed.
+//   - At the end it waits up to LeaderWait until every partition of every
+//     ensured topic has a leader. A new topic or a new partition can have
+//     no leader for a short time, and a client that uses it at once gets
+//     UNKNOWN_TOPIC_OR_PARTITION or LEADER_NOT_AVAILABLE.
 //
 // The returned error names every topic that failed.
 func EnsureTopics(ctx context.Context, client *kgo.Client, logger *slog.Logger, specs ...TopicSpec) error {
@@ -58,6 +62,10 @@ func ensureTopics(ctx context.Context, admin TopicAdmin, meta kmsg.Requestor, lo
 	var errs []error
 	for _, spec := range specs {
 		if err := ensureTopic(ctx, admin, meta, logger, spec); err != nil {
+			errs = append(errs, fmt.Errorf("topic %s: %w", spec.Name, err))
+			continue
+		}
+		if err := waitForLeaders(ctx, meta, spec); err != nil {
 			errs = append(errs, fmt.Errorf("topic %s: %w", spec.Name, err))
 		}
 	}
@@ -82,7 +90,7 @@ func ensureTopic(ctx context.Context, admin TopicAdmin, meta kmsg.Requestor, log
 	}
 
 	// The topic exists. Compare it with the spec once metadata lists it.
-	layout, err := waitForTopic(ctx, meta, spec.Name, func(topicLayout) bool { return true })
+	layout, err := waitForTopic(ctx, meta, spec.Name, metadataWait, func(topicLayout) bool { return true })
 	if err != nil {
 		return fmt.Errorf("create reported that the topic exists: %w", err)
 	}
@@ -100,10 +108,12 @@ func ensureTopic(ctx context.Context, admin TopicAdmin, meta kmsg.Requestor, log
 	return errors.Join(errs...)
 }
 
-// topicLayout is the partition count and replication factor of a topic.
+// topicLayout is the partition count and replication factor of a topic,
+// and how many of its partitions have no leader.
 type topicLayout struct {
 	partitions int32
 	replicas   int
+	leaderless int
 }
 
 // describeTopic returns the topic layout and whether the topic exists, from
@@ -133,6 +143,11 @@ func describeTopic(ctx context.Context, meta kmsg.Requestor, topic string) (topi
 		if len(t.Partitions) > 0 {
 			l.replicas = len(t.Partitions[0].Replicas)
 		}
+		for _, p := range t.Partitions {
+			if p.Leader < 0 || p.ErrorCode != 0 {
+				l.leaderless++
+			}
+		}
 		return l, true, nil
 	}
 	return topicLayout{}, false, nil
@@ -146,8 +161,12 @@ const (
 	metadataInterval = 250 * time.Millisecond
 )
 
-func waitForTopic(ctx context.Context, meta kmsg.Requestor, topic string, ok func(topicLayout) bool) (topicLayout, error) {
-	ctx, cancel := context.WithTimeout(ctx, metadataWait)
+// LeaderWait bounds the wait for partition leaders at the end of
+// EnsureTopics.
+const LeaderWait = 30 * time.Second
+
+func waitForTopic(ctx context.Context, meta kmsg.Requestor, topic string, wait time.Duration, ok func(topicLayout) bool) (topicLayout, error) {
+	ctx, cancel := context.WithTimeout(ctx, wait)
 	defer cancel()
 	ticker := time.NewTicker(metadataInterval)
 	defer ticker.Stop()
@@ -161,10 +180,24 @@ func waitForTopic(ctx context.Context, meta kmsg.Requestor, topic string, ok fun
 			if err != nil {
 				return topicLayout{}, err
 			}
-			return topicLayout{}, fmt.Errorf("metadata did not show the expected topic state within %s: %w", metadataWait, ctx.Err())
+			return topicLayout{}, fmt.Errorf("metadata did not show the expected topic state within %s: %w", wait, ctx.Err())
 		case <-ticker.C:
 		}
 	}
+}
+
+// waitForLeaders waits until metadata shows the spec partition count and a
+// leader for every partition, or until LeaderWait or ctx ends.
+func waitForLeaders(ctx context.Context, meta kmsg.Requestor, spec TopicSpec) error {
+	var last topicLayout
+	_, err := waitForTopic(ctx, meta, spec.Name, LeaderWait, func(l topicLayout) bool {
+		last = l
+		return l.partitions >= spec.Partitions && l.leaderless == 0
+	})
+	if err != nil {
+		return fmt.Errorf("wait for partition leaders: %d of %d partitions have no leader: %w", last.leaderless, last.partitions, err)
+	}
+	return nil
 }
 
 func ensurePartitions(ctx context.Context, admin TopicAdmin, meta kmsg.Requestor, logger *slog.Logger, spec TopicSpec, have int32) error {
@@ -186,7 +219,7 @@ func ensurePartitions(ctx context.Context, admin TopicAdmin, meta kmsg.Requestor
 	if err != nil {
 		// Another service may have raised the count at the same time. Then
 		// the broker rejects our request, but the topic is as wanted.
-		if _, werr := waitForTopic(ctx, meta, spec.Name, func(l topicLayout) bool {
+		if _, werr := waitForTopic(ctx, meta, spec.Name, metadataWait, func(l topicLayout) bool {
 			return l.partitions == spec.Partitions
 		}); werr == nil {
 			return nil

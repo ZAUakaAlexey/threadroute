@@ -36,7 +36,8 @@ func TestLoadDefaults(t *testing.T) {
 			Retention:       14 * 24 * time.Hour,
 			MaxTotalBytes:   0,
 		},
-		LogLevel: slog.LevelInfo,
+		LogLevel:    slog.LevelInfo,
+		MetricsAddr: ":9465",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load() =\n%+v\nwant\n%+v", got, want)
@@ -55,6 +56,7 @@ func TestLoadOverrides(t *testing.T) {
 		"THREADROUTE_RECORD_RETENTION":         "72h",
 		"THREADROUTE_RECORD_MAX_TOTAL_BYTES":   "10000000000",
 		"THREADROUTE_LOG_LEVEL":                "debug",
+		"THREADROUTE_RECORD_METRICS_ADDR":      "127.0.0.1:19465",
 	}))
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
@@ -70,7 +72,8 @@ func TestLoadOverrides(t *testing.T) {
 			Retention:       72 * time.Hour,
 			MaxTotalBytes:   10_000_000_000,
 		},
-		LogLevel: slog.LevelDebug,
+		LogLevel:    slog.LevelDebug,
+		MetricsAddr: "127.0.0.1:19465",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Load() =\n%+v\nwant\n%+v", got, want)
@@ -97,6 +100,7 @@ func TestLoadInvalid(t *testing.T) {
 		{"retention above 14 days", map[string]string{"THREADROUTE_RECORD_RETENTION": "337h"}, []string{EnvRecordRetention}},
 		{"total size negative", map[string]string{"THREADROUTE_RECORD_MAX_TOTAL_BYTES": "-5"}, []string{EnvRecordMaxTotalBytes}},
 		{"log level", map[string]string{"THREADROUTE_LOG_LEVEL": "loud"}, []string{EnvLogLevel}},
+		{"metrics addr without port", map[string]string{"THREADROUTE_RECORD_METRICS_ADDR": "localhost"}, []string{EnvRecordMetricsAddr}},
 		{
 			"several at once",
 			map[string]string{
