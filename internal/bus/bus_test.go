@@ -110,19 +110,25 @@ func TestOtherTopicSpecs(t *testing.T) {
 		{name: "events", spec: EventsTopicSpec(), topic: "events", partitions: 16, configs: map[string]string{
 			ConfigCleanupPolicy:        "delete",
 			ConfigRetentionMs:          "21600000",
+			ConfigRetentionBytes:       "93750000",
 			ConfigSegmentMs:            "3600000",
+			ConfigSegmentBytes:         "31250000",
 			ConfigMessageTimestampType: "LogAppendTime",
 		}},
 		{name: "control", spec: ControlTopicSpec(), topic: "events.control", partitions: 6, configs: map[string]string{
 			ConfigCleanupPolicy:        "delete",
 			ConfigRetentionMs:          "21600000",
+			ConfigRetentionBytes:       "64000000",
 			ConfigSegmentMs:            "3600000",
+			ConfigSegmentBytes:         "21333333",
 			ConfigMessageTimestampType: "LogAppendTime",
 		}},
 		{name: "conversations", spec: ConversationsTopicSpec(), topic: "conversations", partitions: 16, configs: map[string]string{
 			ConfigCleanupPolicy:        "delete",
 			ConfigRetentionMs:          "86400000",
+			ConfigRetentionBytes:       "46875000",
 			ConfigSegmentMs:            "3600000",
+			ConfigSegmentBytes:         "15625000",
 			ConfigMessageTimestampType: "LogAppendTime",
 		}},
 		{name: "cursor", spec: CursorTopicSpec(), topic: "ingest.cursor", partitions: 1, configs: map[string]string{
@@ -143,6 +149,54 @@ func TestOtherTopicSpecs(t *testing.T) {
 			assertConfigs(t, tt.spec.Configs, tt.configs)
 		})
 	}
+}
+
+// TestStage2SizeLimits checks that the size configs of the three stage 2
+// topics keep each topic within its total limit (decision 0006), with room
+// for one open segment per partition, and that every partition keeps at
+// least one closed segment.
+func TestStage2SizeLimits(t *testing.T) {
+	tests := []struct {
+		name     string
+		spec     TopicSpec
+		maxBytes int64
+	}{
+		{name: "events", spec: EventsTopicSpec(), maxBytes: 2_000_000_000},
+		{name: "control", spec: ControlTopicSpec(), maxBytes: 512_000_000},
+		{name: "conversations", spec: ConversationsTopicSpec(), maxBytes: 1_000_000_000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			retention := configInt(t, tt.spec, ConfigRetentionBytes)
+			segment := configInt(t, tt.spec, ConfigSegmentBytes)
+			if total := (retention + segment) * int64(tt.spec.Partitions); total > tt.maxBytes {
+				t.Errorf("(%d + %d) bytes x %d partitions = %d exceeds the limit %d",
+					retention, segment, tt.spec.Partitions, total, tt.maxBytes)
+			}
+			if retention < segment {
+				t.Errorf("retention.bytes %d is smaller than one segment %d", retention, segment)
+			}
+			if segment < RawSegmentBytesMin || segment > RawSegmentBytesMax || segment > math.MaxInt32 {
+				t.Errorf("segment.bytes %d is out of range", segment)
+			}
+		})
+	}
+	if EventsMaxBytes != 2_000_000_000 || ControlMaxBytes != 512_000_000 || ConversationsMaxBytes != 1_000_000_000 {
+		t.Errorf("size limit constants differ from decision 0006")
+	}
+}
+
+func configInt(t *testing.T, spec TopicSpec, key string) int64 {
+	t.Helper()
+	p, ok := spec.Configs[key]
+	if !ok || p == nil {
+		t.Fatalf("%s: config %s missing", spec.Name, key)
+	}
+	n, err := strconv.ParseInt(*p, 10, 64)
+	if err != nil {
+		t.Fatalf("%s: config %s = %q: %v", spec.Name, key, *p, err)
+	}
+	return n
 }
 
 func assertConfigs(t *testing.T, got map[string]*string, want map[string]string) {

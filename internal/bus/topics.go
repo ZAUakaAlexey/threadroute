@@ -177,9 +177,8 @@ func RawTopicSpec(l RawLimits) (TopicSpec, error) {
 	}, nil
 }
 
-// Retention of the stage 2 topics (decisions 0004 and 0006). Size-based
-// retention is not decided for them, so retention.bytes is not set and the
-// broker default applies.
+// Retention of the stage 2 topics (decisions 0004 and 0006). Time is the
+// main limit. The size limits below are only a safety net.
 const (
 	// EventsRetention is retention.ms of TopicEvents (decision 0006).
 	EventsRetention = 6 * time.Hour
@@ -198,32 +197,66 @@ const (
 	Stage2SegmentInterval = time.Hour
 )
 
+// Total size limits of the stage 2 topics, over all partitions, in decimal
+// bytes (decision 0006, "Details fixed before implementation"). They are far
+// above the expected size and are a safety net only.
+//
+// Each limit is split the same way as the raw topic limit (see
+// RawLimits.SegmentBytes and RawLimits.PerPartitionBytes): the
+// per-partition share is the total divided by the partition count,
+// segment.bytes is a quarter of the share kept between RawSegmentBytesMin
+// and RawSegmentBytesMax, and retention.bytes is the share minus one
+// segment. Kafka only deletes closed segments, so a partition can hold
+// retention.bytes plus one open segment, and partitions x (retention.bytes
+// + segment.bytes) stays within the total.
+const (
+	// EventsMaxBytes is the size limit of TopicEvents: 2 GB.
+	EventsMaxBytes int64 = 2_000_000_000
+	// ControlMaxBytes is the size limit of TopicControl: 512 MB.
+	ControlMaxBytes int64 = 512_000_000
+	// ConversationsMaxBytes is the size limit of TopicConversations: 1 GB.
+	ConversationsMaxBytes int64 = 1_000_000_000
+)
+
 // EventsTopicSpec returns the spec of TopicEvents: delete cleanup,
-// EventsRetention, Stage2SegmentInterval, and LogAppendTime timestamps.
+// EventsRetention, EventsMaxBytes, Stage2SegmentInterval, and LogAppendTime
+// timestamps.
 func EventsTopicSpec() TopicSpec {
-	return timeRetainedSpec(TopicEvents, PartitionsEvents, EventsRetention)
+	return limitedSpec(TopicEvents, PartitionsEvents, EventsRetention, EventsMaxBytes)
 }
 
 // ControlTopicSpec returns the spec of TopicControl: delete cleanup,
-// ControlRetention, Stage2SegmentInterval, and LogAppendTime timestamps.
+// ControlRetention, ControlMaxBytes, Stage2SegmentInterval, and
+// LogAppendTime timestamps.
 func ControlTopicSpec() TopicSpec {
-	return timeRetainedSpec(TopicControl, PartitionsControl, ControlRetention)
+	return limitedSpec(TopicControl, PartitionsControl, ControlRetention, ControlMaxBytes)
 }
 
 // ConversationsTopicSpec returns the spec of TopicConversations: delete
-// cleanup, ConversationsRetention, Stage2SegmentInterval, and LogAppendTime
-// timestamps.
+// cleanup, ConversationsRetention, ConversationsMaxBytes,
+// Stage2SegmentInterval, and LogAppendTime timestamps.
 func ConversationsTopicSpec() TopicSpec {
-	return timeRetainedSpec(TopicConversations, PartitionsConversations, ConversationsRetention)
+	return limitedSpec(TopicConversations, PartitionsConversations, ConversationsRetention, ConversationsMaxBytes)
 }
 
-// timeRetainedSpec returns a delete-cleanup spec with time retention only.
+// sizeSplit returns segment.bytes and retention.bytes for a topic with the
+// given total size limit, with the same rule as the raw topic. The constant
+// limits above are large enough for every partition to get two segments of
+// at least RawSegmentBytesMin, which the tests check.
+func sizeSplit(partitions int32, maxBytes int64) (segmentBytes, retentionBytes int64) {
+	share := maxBytes / int64(partitions)
+	segmentBytes = min(max(share/4, RawSegmentBytesMin), RawSegmentBytesMax)
+	return segmentBytes, share - segmentBytes
+}
+
+// limitedSpec returns a delete-cleanup spec with a time and a size limit.
 //
 // message.timestamp.type is LogAppendTime for the same reason as on
 // TopicRaw: retention counts from the write to the topic, not from the
 // source time. Otherwise a catch-up or a replay of old events would be
 // deleted at once.
-func timeRetainedSpec(name string, partitions int32, retention time.Duration) TopicSpec {
+func limitedSpec(name string, partitions int32, retention time.Duration, maxBytes int64) TopicSpec {
+	segmentBytes, retentionBytes := sizeSplit(partitions, maxBytes)
 	return TopicSpec{
 		Name:              name,
 		Partitions:        partitions,
@@ -231,7 +264,9 @@ func timeRetainedSpec(name string, partitions int32, retention time.Duration) To
 		Configs: map[string]*string{
 			ConfigCleanupPolicy:        ptr(CleanupDelete),
 			ConfigRetentionMs:          ptr(msString(retention)),
+			ConfigRetentionBytes:       ptr(strconv.FormatInt(retentionBytes, 10)),
 			ConfigSegmentMs:            ptr(msString(Stage2SegmentInterval)),
+			ConfigSegmentBytes:         ptr(strconv.FormatInt(segmentBytes, 10)),
 			ConfigMessageTimestampType: ptr(TimestampLogAppendTime),
 		},
 	}
