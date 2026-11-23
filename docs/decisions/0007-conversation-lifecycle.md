@@ -37,6 +37,16 @@ No real agent answers anyone. Operators are simulated. The only real reply in th
 - A deletion removes the message text and its index entries at once. Counters stay.
 - An author removal deletes every stored message of that author. If the author was the customer of a conversation, the conversation is closed.
 
+## Which clock the windows use
+
+Every time window in this decision is measured in source time: the witnessed time carried by the events, not the clock of the machine.
+
+The reason is that the same code must give the same result in three cases: live traffic, a catch-up after an outage that delivers hours of events in a minute, and a load test that replays a recording at 50 times the live speed. With a wall clock, a replay would squeeze an hour of traffic into 72 seconds, and a window of "one hour" would cover 50 hours of events.
+
+The service keeps a watermark, the highest source time it has processed, and compares deadlines with the watermark. In live traffic the watermark is the current time minus a fraction of a second. Lifetimes of keys in Redis are only a safety net for cleaning up and are never the window itself.
+
+The alternative was the wall clock, which is simpler but makes replay tests behave differently from live traffic.
+
 ## Choices made
 
 | Question | Choice | Other options considered |

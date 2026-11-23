@@ -32,10 +32,20 @@ The sample is 20 minutes long and the rule uses one hour, so over an hour each r
 
 ## Decision
 
-- A company is admitted when N different customers replied to it within a sliding hour. N is a configuration value.
+- A company is admitted when at least N different customers replied to it within a sliding hour. N is a configuration value.
 - The count is kept in Redis, per company, as a small set of customer IDs with a lifetime of one hour. The set stops growing at N members, because only "reached N or not" matters.
 - An admitted company stays admitted while it is active. Admission ends after a period with no customer message.
 - Admission is decided in `conv`, which owns conversation state. `normalize` does not filter by company.
+
+## Which clock the windows use
+
+Every time window in this decision is measured in source time: the witnessed time carried by the events, not the clock of the machine.
+
+The reason is that the same code must give the same result in three cases: live traffic, a catch-up after an outage that delivers hours of events in a minute, and a load test that replays a recording at 50 times the live speed. With a wall clock, a replay would squeeze an hour of traffic into 72 seconds, and a window of "one hour" would cover 50 hours of events.
+
+The service keeps a watermark, the highest source time it has processed, and compares deadlines with the watermark. In live traffic the watermark is the current time minus a fraction of a second. Lifetimes of keys in Redis are only a safety net for cleaning up and are never the window itself.
+
+The alternative was the wall clock, which is simpler but makes replay tests behave differently from live traffic.
 
 ## Choices made
 

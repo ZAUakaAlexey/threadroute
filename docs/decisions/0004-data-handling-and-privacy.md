@@ -16,7 +16,10 @@ This project is a personal, non-commercial demo. It does not need post text for 
 | Place | Content | Lifetime |
 |---|---|---|
 | `raw.bluesky` topic | source events with post text and author IDs | 24 hours, then removed by topic retention (up to about 25 hours, because Kafka deletes whole segments) |
-| Redis | open conversations and recent message text | short TTL, removed at once on a deletion event |
+| `events` topic | normalised message events with post text and author IDs | 6 hours (decision 0006) |
+| `events.control` topic | deletions and author removals: IDs only, no text | 6 hours |
+| `conversations` topic | conversation events: IDs, language, counters and times, no text | 24 hours |
+| Redis | open conversations and recent message text | until the conversation closes plus 10 minutes (decision 0007), removed at once on a deletion event |
 | PostgreSQL | conversation and routing metadata, no post text | kept for statistics |
 | Recordings for load tests | source events with post text and author IDs | private, 14 days, see below |
 
@@ -24,7 +27,7 @@ This project is a personal, non-commercial demo. It does not need post text for 
 
 - A deleted post is removed from Redis as soon as the deletion event is processed.
 - An account event with a non-active status, or a `sync` event, removes all stored messages of that author from Redis.
-- A single record cannot be removed from the `raw.bluesky` topic. A deleted post leaves the topic within about 25 hours.
+- A single record cannot be removed from a Kafka topic. A deleted post leaves `raw.bluesky` within about 25 hours and `events` within about 7 hours.
 - This document does not promise immediate removal everywhere. It describes what the system really does.
 
 ### Recordings for load tests

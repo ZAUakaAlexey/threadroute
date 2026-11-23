@@ -53,7 +53,11 @@ The partition and offset in the Redis value matter. Redis is not part of the Kaf
 | **10 minutes (chosen)** | about 30,000 | a slow deploy or a short outage |
 | 1 hour | about 180,000 | a long outage, at a higher memory cost |
 
+These counts assume a steady rate. The live stream has bursts: about 53,000 events in 10 seconds were seen on 2026-11-23, twice in about one hour of watching. One such burst adds its whole size to the key count for 10 minutes, so the real peak for a 10-minute lifetime is closer to 100,000 keys than to 30,000. At about 100 bytes per key that is still only around 10 MB in Redis.
+
 The numbers are checked again after the 24-hour measurement and before load tests at 50 times the live rate.
+
+A replay of the same recording twice within 10 minutes would be dropped as duplicates, because the event IDs repeat. The replay tool (stage 5) must deal with that.
 
 ## Consequences
 
