@@ -58,6 +58,12 @@ The alternative was the wall clock, which is simpler but makes replay tests beha
 
 The limit setting accepts 0 for "no limit". With a maximum set, new companies are not admitted once it is reached, and a metric counts the refusals. The default value is chosen after the one-hour measurement in stage 2.
 
+## Details fixed before implementation
+
+- **No sweeper for admission.** The windows are checked when a customer message arrives, against the source time of that message. The service adds the customer to the company's set with that time, drops entries older than one hour before it, and counts. The same check ends an admission: if the company's previous customer message is more than 2 hours older than the new one, the company must reach the threshold again.
+- **Open conversations at the end of admission.** There are none to handle. Admission ends after 2 hours without a customer message, and a conversation closes after 30 minutes without a message, so every conversation of the company is already closed.
+- **A company's customers sit in different partitions.** The admission state of a company is therefore shared state in Redis, updated atomically, and not local to one partition consumer.
+
 ## Consequences
 
 - With N = 10, about one fifth of customer messages belong to admitted companies in the sample. The rest are dropped after counting.

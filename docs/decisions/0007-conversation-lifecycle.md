@@ -56,6 +56,20 @@ The alternative was the wall clock, which is simpler but makes replay tests beha
 | How long message text is kept | until the conversation closes, plus 10 minutes | a fixed hour from arrival, which can remove text from an open conversation |
 | Messages kept per conversation | the last 50 | older ones are dropped from Redis and only counted |
 
+## Details fixed before implementation
+
+These points follow from the decisions above. They are written down so that every service reads them the same way.
+
+- **Sessions.** A session is one open period of a conversation. The message counters, the opening time and the language belong to the session. A small record with the session number and the event sequence number outlives the close for 24 hours, so a reopened conversation continues its numbering. After that the conversation is forgotten and starts again at session 1.
+- **Language.** The language of a session is the normalised language of its first customer message. It does not change inside the session, because the router uses it to pick a queue.
+- **Events for a company message.** Every stored message produces a "message added" event. A company message that answers a customer message which had no answer yet also produces an "answered" event with the real response time.
+- **Close time.** The source time of an inactivity close is its deadline: the time of the last message plus the timeout. It does not depend on when the sweeper ran.
+- **Watermark.** The watermark is kept per partition of `events`: the highest source time processed in that partition. A conversation lives in one partition, so its deadline is compared with the watermark of that partition. A partition that is catching up therefore does not close conversations of another partition, and it closes its own only as its own events move forward.
+- **Company removal.** An author removal for a company deletes its stored messages, closes its open conversations with the reason "company removed", and ends its admission.
+- **Early deletion.** A deletion for a message that is not stored yet is remembered for 10 minutes and applied if the message arrives in that time.
+- **No lost conversation events.** Conversation state lives in Redis and conversation events go to Kafka, and the two cannot change in one transaction. `conv` therefore changes the state and stores the events to publish in one atomic step in Redis (an outbox), publishes them, and removes them from the outbox after Kafka confirmed them. After a crash the outbox is published again. Consumers of `conversations` skip an event whose sequence number they have already seen.
+- **IDs across channels.** Author and message IDs must be unique across channels. A normaliser for a new channel must make them so, for example with a prefix.
+
 ## Consequences
 
 - The real response time exists only for conversations where the thread author answered. Its share is measured in stage 2.
