@@ -58,6 +58,10 @@ The other option was an index in `normalize`, so that deletions travel in `event
 
 - **Topic size limits.** The three stage 2 topics get a total size limit as a safety net, like the raw topic: 2 GB for `events`, 512 MB for `events.control` and 1 GB for `conversations`. They are far above the expected size (about 20 message events per second in the measured sample) and are reviewed after the first long run.
 - **Event IDs.** A normalised event keeps the event ID of the source event it came from.
+- **Edited posts.** An edit of a post arrives as a message event with the same message ID and a new event ID. `conv` replaces the stored text of that message and changes nothing else: no counter, no sequence number and no conversation event.
+- **Source time.** The source time of an event is the witnessed time. When the source gives none, the event's own time field is used, so that a deletion or an author removal is never lost for lack of a time. An event with no time at all is dropped and counted.
+- **One replica.** `normalize` runs as one instance. A second instance would need its own transactional ID.
+- **Redis version.** The deduplication uses one command that sets a key only if it is missing and returns the old value. It needs Redis 7.0 or newer, and the service checks the version at start.
 
 ## Consequences
 
