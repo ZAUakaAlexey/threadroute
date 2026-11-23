@@ -53,6 +53,12 @@ type Message struct {
 	Langs []string
 	// Lang is NormalizeLang(Langs) at the time normalize wrote the event.
 	Lang string
+	// Edited is true when the event is an edit of a message that was
+	// written before (for Bluesky, a commit with operation "update"). It has
+	// the same MessageID as the original and a new EventID, and carries the
+	// new text and language tags (decision 0006). It is false for a new
+	// message, and omitted from the JSON then.
+	Edited bool
 }
 
 // messageJSON is the wire form of Message.
@@ -68,6 +74,7 @@ type messageJSON struct {
 	Text         string   `json:"text"`
 	Langs        []string `json:"langs"`
 	Lang         string   `json:"lang"`
+	Edited       bool     `json:"edited,omitempty"`
 }
 
 // Validate reports every missing or invalid field. It never includes the
@@ -124,6 +131,7 @@ func MarshalMessage(m Message) ([]byte, error) {
 		Text:         m.Text,
 		Langs:        langs,
 		Lang:         m.Lang,
+		Edited:       m.Edited,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal message: %w", err)
@@ -150,6 +158,7 @@ func UnmarshalMessage(b []byte) (Message, error) {
 		Text:       j.Text,
 		Langs:      j.Langs,
 		Lang:       j.Lang,
+		Edited:     j.Edited,
 	}
 	if m.Langs == nil {
 		m.Langs = []string{}

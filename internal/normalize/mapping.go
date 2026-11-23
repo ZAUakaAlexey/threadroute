@@ -191,11 +191,10 @@ type rawAccount struct {
 // so its use is marked in Result.DisplayTime and counted. A record with none
 // of the three is dropped with DropMissingTime.
 //
-// A commit with operation "update" (an edited post) is handled like
-// "create": the edited post is classified by its content and gives a new
-// message event with a new event ID and the same message ID. Decision 0006
-// does not name edits. conv treats a known message ID that arrives with a
-// new event ID as an edit.
+// A commit with operation "update" (an edited post) is classified like
+// "create" by its content and gives a message event with a new event ID,
+// the same message ID and Edited set (decision 0006). conv uses Edited to
+// replace the stored text and language tags of the message.
 func Map(rec *kgo.Record) Result {
 	eventID := headerValue(rec.Headers, bus.HeaderEventID)
 	if eventID == "" {
@@ -304,6 +303,7 @@ func mapCommit(ev *rawEvent, eventID string, at time.Time) Result {
 		Text:       post.Text,
 		Langs:      post.Langs,
 		Lang:       event.NormalizeLang(post.Langs),
+		Edited:     c.Operation == opUpdate,
 	}
 	var kind Kind
 	switch {

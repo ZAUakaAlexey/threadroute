@@ -31,6 +31,7 @@ func TestMessageRoundTrip(t *testing.T) {
 		{name: "company message", change: func(m *Message) { m.Direction = FromCompany }},
 		{name: "empty text", change: func(m *Message) { m.Text = "" }},
 		{name: "no langs", change: func(m *Message) { m.Langs = []string{}; m.Lang = LangUndetermined }},
+		{name: "edit", change: func(m *Message) { m.Edited = true }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -66,6 +67,16 @@ func TestMarshalMessageFormat(t *testing.T) {
 		`"direction":"customer","parent_id":"` + testParentID + `","text":"synthetic reply one","langs":[],"lang":"und"}`
 	if string(b) != want {
 		t.Errorf("MarshalMessage() =\n%s\nwant\n%s", b, want)
+	}
+
+	// An edit adds "edited":true at the end. A new message leaves it out.
+	m.Edited = true
+	b, err = MarshalMessage(m)
+	if err != nil {
+		t.Fatalf("MarshalMessage() edit error = %v", err)
+	}
+	if wantEdit := want[:len(want)-1] + `,"edited":true}`; string(b) != wantEdit {
+		t.Errorf("MarshalMessage() edit =\n%s\nwant\n%s", b, wantEdit)
 	}
 }
 

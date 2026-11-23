@@ -57,13 +57,23 @@ func TestMapMessages(t *testing.T) {
 			},
 		},
 		{
-			name: "edited reply is classified like a new one",
+			name: "edited reply is classified like a new one and marked as an edit",
 			did:  testBob, op: "update", rkey: "aaa111",
 			post: replyRecord(rootURI, rootURI, "en"),
 			kind: KindCustomerMessage,
 			want: event.Message{
 				CompanyID: testAlice, CustomerID: testBob, Direction: event.FromCustomer,
-				ParentID: rootURI, Langs: []string{"en"}, Lang: "en",
+				ParentID: rootURI, Langs: []string{"en"}, Lang: "en", Edited: true,
+			},
+		},
+		{
+			name: "edited company reply is marked as an edit",
+			did:  testAlice, op: "update", rkey: "aaa111",
+			post: replyRecord(rootURI, bobReplyURI, "en"),
+			kind: KindCompanyMessage,
+			want: event.Message{
+				CompanyID: testAlice, CustomerID: testBob, Direction: event.FromCompany,
+				ParentID: bobReplyURI, Langs: []string{"en"}, Lang: "en", Edited: true,
 			},
 		},
 	}
