@@ -114,7 +114,7 @@ A production setup would use at least three brokers, replication factor 3, `min.
 
 - `raw.bluesky` uses `message.timestamp.type=LogAppendTime`: the broker stamps each record with the time it was written. Retention therefore counts from the moment a record entered the topic, not from the event time. Without this, events that arrive late (a catch-up after an outage, or a replay of an old recording) would be deleted at once, and the producer would treat them as timed out. The event time is kept in a record header and inside the payload.
 - `raw.bluesky`: `retention.ms` of 24 hours and `retention.bytes` set per partition so that the topic never takes more than about 8 GB in total. Kafka deletes whole segments, so `segment.ms` is one hour and a record can live up to about 25 hours. A partition can also exceed its size limit by one open segment, so `segment.bytes` is set to a small value and the per-partition limit leaves room for it.
-- Producers compress with zstd. At the sampled rate the post stream is about 4.5 GB of JSON per day before compression. The size on disk is measured in stage 1.
+- Producers compress with zstd. A 29-minute run on 2026-11-23 measured 1,155 bytes of JSON per event and about 480 bytes per record on disk, index files included. That run held one burst of about 53,000 events in 10 seconds, so a daily size is not projected from it. The 24-hour measurement gives that number, and the 8 GB limit is reviewed then.
 - The broker heap is capped (512 MB to start with). Total memory use is measured before deployment, and the server is resized if needed.
 
 ## Consequences

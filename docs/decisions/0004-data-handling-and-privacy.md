@@ -50,5 +50,5 @@ This project is a personal, non-commercial demo. It does not need post text for 
 ## Consequences
 
 - The public demo is less striking than a page with live text, but it carries no content or moderation risk.
-- The 24-hour retention of `raw.bluesky` needs disk space for one day of posts (about 4.5 GB of JSON before compression at the sampled rate). The topic size limit is set to match, and disk space is checked before deployment.
+- The 24-hour retention of `raw.bluesky` needs disk space for one day of posts. The topic has a total size limit (decision 0001), and disk space is checked before deployment.
 - The project owner is responsible for the personal data in `raw.bluesky`, Redis and the recordings while they exist.
