@@ -68,6 +68,18 @@ Conversation windows in `conv` run on source time (decision 0007). The router ca
 - It publishes routing events (queued, offered, accepted, offer expired, resolved, SLA missed, team formed, team released) to a topic `routing`, keyed by the conversation key, for the gateway and the simulator. They carry IDs, times and counters, and no post text.
 - State changes in PostgreSQL and routing events use the outbox pattern: the event rows are written in the same database transaction as the state change and published to Kafka afterwards.
 
+## Details fixed before implementation
+
+These points follow from the decisions above and from decisions 0007 and 0008.
+
+- **Which conversations count for a team.** The count is the active load of a company: its conversations that wait in a queue or are held by an operator. It is not the number of conversations that `conv` still has open, because a conversation stays open there for 30 minutes after the last message even when no operator is needed. A team forms at 20 active conversations, is released below 8 for 15 minutes, and its size is the active load divided by the capacity, rounded up, between 2 and 20. The size is checked again at a fixed interval.
+- **Languages in a team.** Team members are taken from the shared pool for the languages of the company's active conversations, most needed language first. A conversation of a team company goes to the team only if a team member has its language. If no member has it, the conversation is served from the shared queue of that language like any other. It never waits for a team that cannot serve it.
+- **Where the timers start.** The waiting time and both SLA targets start when the router puts the conversation in a queue, on the machine clock with the speed factor. They do not start at the source time of the customer message. A source time can be hours old after a catch-up, and every such conversation would count as late at once.
+- **Catching up.** When the router starts, it reads the end offsets of `conversations` and first applies everything up to them to its state without making any offer. Conversations that were opened and closed in that backlog never reach an operator. When the backlog is done, the conversations that are still open enter their queues, and their waiting time starts at that moment. A new consumer group starts at the beginning of the topic.
+- **Sequence numbers from `conv` can restart.** `conv` forgets a conversation 24 hours after it closed and then starts again at session 1, sequence 1 (decision 0007). The router skips an event whose session and sequence number it has already applied. The one exception: an "opened" event with session 1 and sequence 1 for a conversation that the router holds as closed is accepted and resets the stored numbers.
+- **Order of routing events.** Each routing event about a conversation carries a sequence number of its own, per conversation, given in the same database transaction as the state change. Events about a team are keyed by the company and carry a sequence number per company. One publisher at a time sends the outbox to Kafka in the order of the outbox rows, so events of one key reach the topic in order. Consumers skip a sequence number they have already seen.
+- **One speed factor.** The factor is a setting of the router only. The simulator reads it from the router's API at start, so the two cannot drift apart.
+
 ## Choices confirmed by the project owner
 
 - **When a slot is freed:** when the operator resolves the conversation, not when the conversation closes by inactivity. The alternative keeps every conversation with its operator for at least 30 minutes and needs several times more operators.
@@ -101,3 +113,4 @@ These are configuration values. The numbers are starting points and are tuned wi
 - The team rules add state and moving parts: forming, resizing and releasing a team must be safe when several things change at once. They are covered by tests on a real database.
 - The speed factor is a second notion of time next to source time. Load-test setups must set it to match the replay speed.
 - Without a share limit, a company that is busy but below the team threshold competes with everyone else in the shared queues.
+- PostgreSQL is one more process on the server. Its memory use is measured before deployment, next to Kafka and Redis.

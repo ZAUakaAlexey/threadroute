@@ -29,7 +29,7 @@ Operators are told through the `routing` topic (decision 0009). The simulator co
 - **Presence.** Each operator works in shifts: online for a while, then offline. Going offline while holding conversations returns them to the queue, which exercises reassignment.
 - **Accepting.** An operator accepts an offer after a short random delay. With a small probability they do not answer at all, so the accept timeout and the next offer are exercised.
 - **Replying and resolving.** After accepting, the operator sends the reply marker after a random handling time, and resolves the conversation some time after that. The times come from a distribution with a long tail, because real handling times look like that.
-- **Speed.** All simulator delays are divided by the same speed factor as the router timers (decision 0009).
+- **Speed.** All simulator delays are divided by the same speed factor as the router timers (decision 0009). The simulator reads the factor from the router's API at start and does not start without it.
 - **Repeatable runs.** The random generator takes a seed from the configuration, so a load test can be repeated with the same operator behaviour.
 
 ## Starting values
