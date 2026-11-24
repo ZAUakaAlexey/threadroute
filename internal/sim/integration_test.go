@@ -139,6 +139,12 @@ type runningSim struct {
 
 func (env *itEnv) startSim() *runningSim {
 	env.t.Helper()
+	return env.startSimWith(itBehaviour())
+}
+
+// startSimWith starts a simulator with a behaviour.
+func (env *itEnv) startSimWith(b Behaviour) *runningSim {
+	env.t.Helper()
 	cfg := Config{
 		KafkaBrokers: env.brokers,
 		RouterURL:    env.apiURL,
@@ -146,7 +152,7 @@ func (env *itEnv) startSim() *runningSim {
 		GroupID:      "sim-it",
 		MetricsAddr:  "127.0.0.1:0",
 		OutageLimit:  30 * time.Second,
-		Behaviour:    itBehaviour(),
+		Behaviour:    b,
 		LogLevel:     slog.LevelWarn,
 	}
 	svc, err := New(Options{Config: cfg, Logger: itLogger(), Registerer: prometheus.NewRegistry()})

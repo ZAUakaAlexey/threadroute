@@ -77,10 +77,18 @@ type Service struct {
 	m            *metrics
 	topic        string
 	consumerOpts []kgo.Opt
-	ids          []string
-	langs        [][]string
+	// ids and langs are the operators of the start, set in Run once the
+	// operator count is known.
+	ids   []string
+	langs [][]string
+	// eng is the engine, set in Run. Only the goroutine of Run reads it.
+	eng *engine
+	// capacityDefault is the router default capacity read at start.
+	capacityDefault int
 	// stopWait is stopOfflineWait. Tests change it.
 	stopWait time.Duration
+	// pollEvery is opapi.SettingsPollInterval. Tests change it.
+	pollEvery time.Duration
 
 	running  atomic.Bool
 	assigned atomic.Bool
@@ -105,7 +113,7 @@ func New(o Options) (*Service, error) {
 		// open a new connection for each call.
 		tr := http.DefaultTransport.(*http.Transport).Clone()
 		tr.MaxIdleConnsPerHost = callWorkers + startParallel
-		c, err := opclient.New(o.Config.RouterURL, opclient.WithHTTPClient(&http.Client{Transport: tr}))
+		c, err := opclient.New(o.Config.RouterURL, opclient.WithHTTPClient(&http.Client{Transport: tr}), opclient.WithLogger(o.Logger))
 		if err != nil {
 			return nil, fmt.Errorf("new sim service: %w", err)
 		}
@@ -115,24 +123,34 @@ func New(o Options) (*Service, error) {
 		o.RoutingTopic = bus.TopicRouting
 	}
 	b := o.Config.Behaviour
-	scaled, err := b.Languages.Scale(b.Operators)
-	if err != nil {
+	if _, err := b.Languages.Scale(b.Operators); err != nil {
 		return nil, fmt.Errorf("new sim service: languages: %w", err)
 	}
 	m, err := newMetrics(o.Registerer)
 	if err != nil {
 		return nil, fmt.Errorf("new sim service: %w", err)
 	}
-	s := &Service{
+	return &Service{
 		cfg: o.Config, api: o.API, clock: o.Clock, logger: o.Logger, m: m,
 		topic: o.RoutingTopic, consumerOpts: o.ConsumerOpts,
-		langs: operatorLangs(scaled), stopWait: stopOfflineWait,
+		stopWait: stopOfflineWait, pollEvery: opapi.SettingsPollInterval,
+	}, nil
+}
+
+// setOperators sets the operators of the start for a behaviour: the IDs
+// sim-op-0001 and on, the languages of the scaled spread in blocks.
+func (s *Service) setOperators(b Behaviour) error {
+	scaled, err := b.Languages.Scale(b.Operators)
+	if err != nil {
+		return fmt.Errorf("languages: %w", err)
 	}
+	s.langs = operatorLangs(scaled)
+	s.ids = make([]string, len(s.langs))
 	for i := range s.langs {
-		s.ids = append(s.ids, operatorID(i+1))
+		s.ids[i] = operatorID(i + 1)
 	}
-	o.Logger.Info("operator languages", "spread", scaled.String(), "operators", b.Operators)
-	return s, nil
+	s.logger.Info("operator languages", "spread", scaled.String(), "operators", b.Operators)
+	return nil
 }
 
 // Ready reports whether the operators exist and the consumer runs. It is
@@ -159,11 +177,24 @@ func (s *Service) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	b := s.cfg.Behaviour
 	s.logger.Info("router settings read",
 		"speed_factor", settings.SpeedFactor,
 		"accept_timeout", settings.AcceptTimeout().String(),
-		"capacity_default", settings.CapacityDefault)
+		"capacity_default", settings.CapacityDefault,
+		"stand_settings", settings.Stand != nil)
+	s.capacityDefault = settings.CapacityDefault
+	st, err := s.startStand(ctx, settings)
+	if err != nil {
+		return err
+	}
+	b := s.startBehaviour(st)
+	if err := s.setOperators(b); err != nil {
+		return err
+	}
+	if st.mode == standLive {
+		s.m.settingsVersion.Set(float64(st.version))
+	}
+	s.setValues(simOf(b, settings.CapacityDefault))
 	if b.AcceptDelayMax >= settings.AcceptTimeout() {
 		s.logger.Warn("the longest accept delay is not shorter than the accept timeout, so some accepts come too late",
 			"accept_delay_max", b.AcceptDelayMax.String(), "accept_timeout", settings.AcceptTimeout().String())
@@ -200,7 +231,8 @@ func (s *Service) run(ctx context.Context) error {
 		return err
 	}
 
-	eng := newEngine(b, s.ids, settings.SpeedFactor, s.cfg.OutageLimit, s.clock, s.m, s.logger)
+	eng := newEngine(b, s.ids, s.langs, settings.SpeedFactor, s.cfg.OutageLimit, s.clock, s.m, s.logger)
+	s.eng = eng
 	cons, err := s.newConsumer(ends)
 	if err != nil {
 		return err
@@ -212,9 +244,13 @@ func (s *Service) run(ctx context.Context) error {
 	g, gctx := errgroup.WithContext(rctx)
 	g.Go(func() error { return s.consume(gctx, cons, eng) })
 
-	if err := s.forEachOperator(gctx, actionOffline, func(ctx context.Context, i int) (opapi.Result, error) {
+	err = s.forEachOperator(gctx, actionOffline, func(ctx context.Context, i int) (opapi.Result, error) {
 		return s.api.Offline(ctx, s.ids[i])
-	}); err != nil {
+	})
+	if err == nil {
+		err = s.offlineLeftovers(gctx, len(s.ids)+1)
+	}
+	if err != nil {
 		cancel()
 		// An error of the consumer is the cause when it stopped first.
 		if werr := g.Wait(); werr != nil {
@@ -242,6 +278,9 @@ func (s *Service) run(ctx context.Context) error {
 		g.Go(func() error { return s.work(gctx, eng, q) })
 	}
 	g.Go(func() error { return s.schedule(gctx, eng, queues) })
+	if st.mode != standInvalid {
+		g.Go(func() error { return s.pollStand(gctx, eng, st) })
+	}
 	s.running.Store(true)
 	return g.Wait()
 }
@@ -432,10 +471,15 @@ func (s *Service) forEachOperator(ctx context.Context, action string, call func(
 func (s *Service) offlineAtStop(parent context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), s.stopWait)
 	defer cancel()
+	ids := s.ids
+	if s.eng != nil {
+		// The operators that changes created too.
+		ids = s.eng.registeredIDs()
+	}
 	var left atomic.Int64
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, startParallel)
-	for i := range s.ids {
+	for i := range ids {
 		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
@@ -444,7 +488,7 @@ func (s *Service) offlineAtStop(parent context.Context) {
 				return
 			}
 			defer func() { <-sem }()
-			if !s.offlineOne(ctx, s.ids[i]) {
+			if !s.offlineOne(ctx, ids[i]) {
 				left.Add(1)
 			}
 		})
@@ -453,10 +497,86 @@ func (s *Service) offlineAtStop(parent context.Context) {
 	n := left.Load()
 	if n > 0 {
 		s.logger.Warn("some operators could not be put offline at stop; the router keeps them online until the next start",
-			"operators", len(s.ids), "left", n, "wait", s.stopWait.String())
+			"operators", len(ids), "left", n, "wait", s.stopWait.String())
 		return
 	}
-	s.logger.Info("every operator put offline at stop", "operators", len(s.ids))
+	s.logger.Info("every operator put offline at stop", "operators", len(ids))
+}
+
+// offlineLeftovers puts offline the operators that an earlier run left in
+// the router with numbers from first on. Every run registers the numbers
+// 1 to its count at start and creates later operators with the next free
+// number, so the registered numbers have no gap: the first number that the
+// router does not know (CodeOperatorNotFound) ends the search. Without this,
+// after an exit without the offline calls of a stop, such an operator would
+// stay online and keep its conversations. The first number is asked alone,
+// because usually nothing is left, then startParallel at a time.
+func (s *Service) offlineLeftovers(ctx context.Context, first int) error {
+	var outage outageClock
+	var left atomic.Int64
+	for from, size := first, 1; from <= MaxOperators; from, size = from+size, startParallel {
+		to := min(from+size-1, MaxOperators)
+		var end atomic.Bool
+		g, gctx := errgroup.WithContext(ctx)
+		for n := from; n <= to; n++ {
+			g.Go(func() error {
+				found, err := s.offlineLeftover(gctx, operatorID(n), &outage)
+				if found {
+					left.Add(1)
+				} else {
+					end.Store(true)
+				}
+				return err
+			})
+		}
+		if err := g.Wait(); err != nil {
+			return err
+		}
+		if end.Load() {
+			break
+		}
+	}
+	if n := left.Load(); n > 0 {
+		s.logger.Info("operators of an earlier run with higher numbers put offline", "from", operatorID(first), "operators", n)
+	}
+	return nil
+}
+
+// offlineLeftover puts one operator of an earlier run offline. It reports
+// false when the router does not know it, or when the router refused the
+// call, which is logged and ends the search.
+func (s *Service) offlineLeftover(ctx context.Context, id string, outage *outageClock) (bool, error) {
+	backoff := minBackoff
+	for {
+		res, err := s.api.Offline(ctx, id)
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+		label, code, out := classify(res, err)
+		s.m.calls.WithLabelValues(actionOffline, label).Inc()
+		switch {
+		case out == outcomeSuccess:
+			outage.reset()
+			return true, nil
+		case code == opapi.CodeOperatorNotFound:
+			outage.reset()
+			return false, nil
+		case out != outcomeRetry:
+			s.logger.Warn("operator of an earlier run not put offline", "operator_id", id, "error", err)
+			return false, nil
+		}
+		if failing := outage.failing(s.clock.Now()); failing >= s.cfg.OutageLimit {
+			return false, fmt.Errorf("%s %s: %w: no answer for %s (limit %s): %w",
+				actionOffline, id, ErrOutage, failing.Round(time.Millisecond), s.cfg.OutageLimit, err)
+		}
+		s.m.retries.WithLabelValues(actionOffline).Inc()
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case <-s.clock.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 // offlineOne puts one operator offline and reports whether the router

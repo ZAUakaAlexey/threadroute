@@ -307,9 +307,21 @@ func TestServiceOutageSkipsOfflineAtStop(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("Run did not stop after the outage limit")
 	}
-	if n := len(api.callsOf(actionOffline)); n != 3 {
-		t.Errorf("%d offline calls, want only the 3 of the start", n)
+	// The start also asks for sim-op-0004, a leftover of an earlier run,
+	// and gets CodeOperatorNotFound.
+	var offline []string
+	for _, cl := range api.callsOf(actionOffline) {
+		offline = append(offline, cl.op)
 	}
+	if want := []string{op1, operatorID(2), operatorID(3), operatorID(4)}; !slices.Equal(sortedCopy(offline), want) {
+		t.Errorf("offline calls %v, want only %v of the start", offline, want)
+	}
+}
+
+func sortedCopy(s []string) []string {
+	out := slices.Clone(s)
+	slices.Sort(out)
+	return out
 }
 
 // lockedBuffer is a bytes.Buffer that is safe for concurrent writes.

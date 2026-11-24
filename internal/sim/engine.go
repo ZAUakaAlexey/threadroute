@@ -18,6 +18,7 @@ import (
 // implements it.
 type API interface {
 	Settings(ctx context.Context) (opapi.Settings, error)
+	PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
 	PutOperator(ctx context.Context, operatorID string, req opapi.OperatorRequest) (opapi.OperatorResponse, error)
 	Online(ctx context.Context, operatorID string) (opapi.Result, error)
 	Offline(ctx context.Context, operatorID string) (opapi.Result, error)
@@ -58,6 +59,9 @@ const (
 	kindReply
 	kindResolve
 	kindPresence
+	// kindPut sends the operator again with its languages and a capacity
+	// (decision 0014).
+	kindPut
 )
 
 // task is one planned action. It sits in the heap until its time, then it
@@ -79,10 +83,15 @@ type task struct {
 	// at next. A presence retry is not a toggle.
 	toggle bool
 	next   time.Duration
-	// gen is the shift generation of a presence call. A retry of an older
+	// gen is the shift generation of a presence call. A call of an older
 	// generation is dropped.
-	gen     uint64
-	attempt int
+	gen uint64
+	// capacity and putGen belong to a put: the capacity to send, and the
+	// put generation of the operator. A put of an older generation is
+	// dropped, so only the newest capacity is sent.
+	capacity int
+	putGen   uint64
+	attempt  int
 }
 
 func (t *task) action() string {
@@ -93,6 +102,8 @@ func (t *task) action() string {
 		return actionReply
 	case kindResolve:
 		return actionResolve
+	case kindPut:
+		return actionPut
 	}
 	if t.online {
 		return actionOnline
@@ -136,14 +147,41 @@ func (h *taskHeap) Pop() any {
 // operator is one simulated operator.
 type operator struct {
 	id string
-	// idx is the 0-based index, used to pick the call worker.
+	// idx is the 0-based index, the number minus 1, used to pick the call
+	// worker.
 	idx int
-	// phase is the position in the shift cycle at the start, drawn once.
+	// lang is the language of the spread that the operator got when it was
+	// created. It never changes. langs is lang and event.LangUndetermined.
+	lang  string
+	langs []string
+	// phase is the position in the shift cycle at the model time base,
+	// drawn once. base is the start of the shifts for the operators of the
+	// start, and the time of the change that created the others.
 	phase time.Duration
-	// gen counts the shift changes.
+	base  time.Duration
+	// gen counts the shift changes and the presence calls of a change. A
+	// presence call of an older generation is dropped.
 	gen uint64
 	// online is the presence the router last confirmed.
 	online bool
+	// active is false while the operator is put aside: offline and out of
+	// the shift cycle (decision 0014).
+	active bool
+	// starting is set while an operator that joins the shift cycle waits
+	// for its put (waitPut) and, after it was put aside, for the answer to
+	// its offline call (waitOffline). Its shift is planned when it waits
+	// for neither. So an operator never comes back while the router may
+	// still hold conversations that the simulator dropped.
+	starting    bool
+	waitPut     bool
+	waitOffline bool
+	// registered is set once the router confirmed that the operator
+	// exists.
+	registered bool
+	// shift is the planned shift change, or nil.
+	shift *task
+	// putGen counts the planned puts.
+	putGen uint64
 }
 
 // offer is one offer or assignment of a simulated operator, with its
@@ -156,9 +194,10 @@ type offer struct {
 	task *task
 	// accepted is set when the "accepted" event was seen.
 	accepted bool
-	// resolveDelay is the model time from the reply to the resolve, drawn
-	// at the accept.
-	resolveDelay time.Duration
+	// resolveFactor is the factor of the time from the reply to the
+	// resolve, drawn at the accept. The resolve median in effect when the
+	// reply is done gives the time.
+	resolveFactor float64
 	// done is set when the offer was cancelled or finished. Its tasks are
 	// dropped.
 	done bool
@@ -188,12 +227,16 @@ type engine struct {
 	logger      *slog.Logger
 	outageLimit time.Duration
 
-	ops    map[string]*operator
+	ops map[string]*operator
+	// opList holds every operator the engine knows, in number order: the
+	// operators of the start, then the ones that changes created.
 	opList []*operator
-	offers map[string]*offer
-	byKey  map[string]*offer
-	seen   map[string]seenKey
-	events int
+	// nextNum is the number of the next operator a change creates.
+	nextNum int
+	offers  map[string]*offer
+	byKey   map[string]*offer
+	seen    map[string]seenKey
+	events  int
 
 	heap taskHeap
 	seq  uint64
@@ -208,9 +251,11 @@ type engine struct {
 	started     bool
 }
 
-// newEngine builds the engine for the operators ids. speed is the speed
-// factor of the router.
-func newEngine(b Behaviour, ids []string, speed float64, outageLimit time.Duration,
+// newEngine builds the engine for the operators ids, which are
+// operatorID(1) to operatorID(len(ids)) and exist in the router. langs
+// holds the languages of each operator, its spread language first. speed is
+// the speed factor of the router.
+func newEngine(b Behaviour, ids []string, langs [][]string, speed float64, outageLimit time.Duration,
 	clock Clock, m *metrics, logger *slog.Logger,
 ) *engine {
 	e := &engine{
@@ -228,13 +273,18 @@ func newEngine(b Behaviour, ids []string, speed float64, outageLimit time.Durati
 		byKey:       map[string]*offer{},
 		seen:        map[string]seenKey{},
 		wake:        make(chan struct{}, 1),
+		nextNum:     len(ids) + 1,
 	}
 	cycle := b.ShiftOnline + b.ShiftOffline
 	for i, id := range ids {
-		op := &operator{id: id, idx: i, phase: uniform(e.rng, 0, cycle-1)}
+		op := &operator{
+			id: id, idx: i, lang: langs[i][0], langs: langs[i],
+			phase: uniform(e.rng, 0, cycle-1), active: true, registered: true,
+		}
 		e.ops[id] = op
 		e.opList = append(e.opList, op)
 	}
+	e.countOperators()
 	return e
 }
 
@@ -250,15 +300,34 @@ func (e *engine) start() {
 	}
 	e.started = true
 	base := e.tl.model(e.clock.Now())
-	on, cycle := e.b.ShiftOnline, e.b.ShiftOnline+e.b.ShiftOffline
 	for _, op := range e.opList {
-		if op.phase < on {
-			e.push(&task{kind: kindPresence, op: op, online: true, toggle: true, at: base, next: base + on - op.phase})
-			continue
-		}
-		at := base + cycle - op.phase
-		e.push(&task{kind: kindPresence, op: op, online: true, toggle: true, at: at, next: at + on})
+		op.base = base
+		e.planShift(op, base)
 	}
+}
+
+// planShift plans the next shift change of an operator that joins the shift
+// cycle at the model time now, by the rule of the start: its position in
+// the cycle is its phase plus the time since its base. In the online part
+// it goes online at once and offline when that part ends; in the offline
+// part it goes online when that part ends. The caller holds e.mu.
+func (e *engine) planShift(op *operator, now time.Duration) {
+	on, cycle := e.b.ShiftOnline, e.b.ShiftOnline+e.b.ShiftOffline
+	pos := (op.phase + now - op.base) % cycle
+	if pos < 0 {
+		pos += cycle
+	}
+	if pos < on {
+		op.shift = e.push(&task{kind: kindPresence, op: op, online: true, toggle: true, at: now, next: now + on - pos})
+		return
+	}
+	if op.online {
+		// The router still has the operator online, for example after an
+		// offline call that failed without a retry.
+		e.push(&task{kind: kindPresence, op: op, gen: op.gen, at: now})
+	}
+	at := now + cycle - pos
+	op.shift = e.push(&task{kind: kindPresence, op: op, online: true, toggle: true, at: at, next: at + on})
 }
 
 // push plans a task.
@@ -303,13 +372,21 @@ func (e *engine) due(now time.Time) []*task {
 	for len(e.heap) > 0 && !e.tl.machine(e.heap[0].at).After(now) {
 		t := heap.Pop(&e.heap).(*task)
 		if t.toggle {
+			if t.op.shift == t {
+				t.op.shift = nil
+			}
+			if !t.op.active {
+				// Put aside: it left the shift cycle. Not reached, because
+				// putting aside removes the planned shift change.
+				continue
+			}
 			t.op.gen++
 			t.gen = t.op.gen
 			dur := e.b.ShiftOffline
 			if !t.online {
 				dur = e.b.ShiftOnline
 			}
-			e.push(&task{kind: kindPresence, op: t.op, online: !t.online, toggle: true, at: t.next, next: t.next + dur})
+			t.op.shift = e.push(&task{kind: kindPresence, op: t.op, online: !t.online, toggle: true, at: t.next, next: t.next + dur})
 		}
 		out = append(out, t)
 	}
@@ -352,6 +429,11 @@ func (e *engine) handle(ev event.Routing) {
 
 	nowM := e.tl.model(now)
 	op := e.ops[ev.OperatorID]
+	if op != nil && !op.active {
+		// Put aside: an offer or an accept read now was made before the
+		// offline call, which ends it in the router (decision 0010).
+		op = nil
+	}
 	// An event about another offer of a conversation that a simulated
 	// operator holds means the held offer has ended, even if its own end
 	// event was missed.
@@ -413,7 +495,7 @@ func (e *engine) accepted(key string, op *operator, offerID string, nowM time.Du
 	}
 	o.accepted = true
 	handling := logNormal(e.rng, e.b.HandlingMedian)
-	o.resolveDelay = logNormal(e.rng, e.b.ResolveMedian)
+	o.resolveFactor = tailFactor(e.rng)
 	// An accept that is still planned (a retry) is not needed any more.
 	e.remove(o.task)
 	o.task = e.push(&task{kind: kindReply, op: op, offer: o, at: nowM + handling})
@@ -480,6 +562,11 @@ func (e *engine) call(ctx context.Context, api API, t *task) (opapi.Result, erro
 		return api.Reply(ctx, t.op.id, t.offer.id, replyID)
 	case kindResolve:
 		return api.Resolve(ctx, t.op.id, t.offer.id)
+	case kindPut:
+		// The simulator sends no priority (decision 0010), so the router
+		// keeps 0. The languages never change.
+		resp, err := api.PutOperator(ctx, t.op.id, opapi.OperatorRequest{Languages: t.op.langs, Capacity: t.capacity})
+		return resp.Result, err
 	}
 	if t.online {
 		return api.Online(ctx, t.op.id)
@@ -490,8 +577,16 @@ func (e *engine) call(ctx context.Context, api API, t *task) (opapi.Result, erro
 // execute runs the call of a due task and applies the answer. It returns
 // an error that wraps ErrOutage when the router has not answered for
 // longer than the outage limit. A call cut short by the end of ctx is
-// ignored.
+// ignored. A task that became stale after it left the heap, for example
+// one of an operator put aside while the task waited for its worker, is
+// not called.
 func (e *engine) execute(ctx context.Context, api API, t *task) error {
+	e.mu.Lock()
+	skip := e.stale(t)
+	e.mu.Unlock()
+	if skip {
+		return nil
+	}
 	res, err := e.call(ctx, api, t)
 	if ctx.Err() != nil {
 		return nil
@@ -540,6 +635,27 @@ func (e *engine) complete(t *task, res opapi.Result, err error) error {
 	if out != outcomeRetry {
 		// The router answered.
 		e.outageSince = time.Time{}
+		if t.kind == kindPresence && !t.online && t.gen == t.op.gen && t.op.waitOffline {
+			// The router has taken the conversations back, or it never
+			// had the operator (404). Either way it holds nothing now.
+			t.op.waitOffline = false
+			defer e.maybeStart(t.op, now)
+		}
+		if t.kind == kindPut && out != outcomeSuccess && t.putGen == t.op.putGen && t.op.waitPut {
+			t.op.waitPut = false
+			if t.op.registered {
+				// The router refused the put of an operator it has: it
+				// comes back with the capacity it had.
+				defer e.maybeStart(t.op, now)
+			} else {
+				// A new operator the router does not have: it counts as
+				// put aside, so the next larger count tries it again and
+				// the numbers keep no gap.
+				t.op.active, t.op.starting = false, false
+				e.countOperators()
+				e.logger.Warn("new operator not created, put aside", "operator_id", t.op.id, "error", err)
+			}
+		}
 	}
 	switch out {
 	case outcomeSuccess:
@@ -557,12 +673,8 @@ func (e *engine) complete(t *task, res opapi.Result, err error) error {
 			e.forget(t.offer)
 		}
 	case outcomeRetry:
-		if e.outageSince.IsZero() {
-			e.outageSince = now
-		}
-		if failing := now.Sub(e.outageSince); failing >= e.outageLimit {
-			return fmt.Errorf("%w: no answer for %s (limit %s): %w",
-				ErrOutage, failing.Round(time.Millisecond), e.outageLimit, err)
+		if oerr := e.noAnswer(now, err); oerr != nil {
+			return oerr
 		}
 		if e.stale(t) {
 			return nil
@@ -580,12 +692,30 @@ func (e *engine) complete(t *task, res opapi.Result, err error) error {
 	return nil
 }
 
+// noAnswer records a call without an answer at now. It returns an error
+// that wraps ErrOutage when the router has not answered for the outage
+// limit. The caller holds e.mu.
+func (e *engine) noAnswer(now time.Time, err error) error {
+	if e.outageSince.IsZero() {
+		e.outageSince = now
+	}
+	if failing := now.Sub(e.outageSince); failing >= e.outageLimit {
+		return fmt.Errorf("%w: no answer for %s (limit %s): %w",
+			ErrOutage, failing.Round(time.Millisecond), e.outageLimit, err)
+	}
+	return nil
+}
+
 // stale reports whether a task is no longer wanted: its offer was
-// cancelled or moved on to another action, or a newer shift change
-// replaced the presence call.
+// cancelled or moved on to another action, a newer shift change or change
+// of the settings replaced the presence call, or a newer put replaced the
+// put.
 func (e *engine) stale(t *task) bool {
-	if t.offer != nil {
+	switch {
+	case t.offer != nil:
 		return t.offer.done || t.offer.task != t
+	case t.kind == kindPut:
+		return t.putGen != t.op.putGen
 	}
 	return t.gen != t.op.gen
 }
@@ -601,7 +731,8 @@ func (e *engine) succeeded(t *task, now time.Time) {
 	case kindReply:
 		e.m.replies.Inc()
 		if !o.done && o.task == t {
-			o.task = e.push(&task{kind: kindResolve, op: t.op, offer: o, at: e.tl.model(now) + o.resolveDelay})
+			delay := scaled(e.b.ResolveMedian, o.resolveFactor)
+			o.task = e.push(&task{kind: kindResolve, op: t.op, offer: o, at: e.tl.model(now) + delay})
 		}
 	case kindResolve:
 		e.m.resolves.Inc()
@@ -616,7 +747,27 @@ func (e *engine) succeeded(t *task, now time.Time) {
 			}
 			e.m.operatorsOnline.Set(float64(e.online))
 		}
+	case kindPut:
+		t.op.registered = true
+		if t.putGen == t.op.putGen && t.op.waitPut {
+			t.op.waitPut = false
+			e.maybeStart(t.op, now)
+		}
 	}
+}
+
+// registeredIDs returns the IDs of every operator the router confirmed, in
+// number order.
+func (e *engine) registeredIDs() []string {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	var out []string
+	for _, op := range e.opList {
+		if op.registered {
+			out = append(out, op.id)
+		}
+	}
+	return out
 }
 
 // pending returns the number of planned tasks, for tests.

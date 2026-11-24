@@ -50,6 +50,13 @@ type metrics struct {
 	eventsInvalid   prometheus.Counter
 	fetchErrors     prometheus.Counter
 	lag             prometheus.Gauge
+
+	// Stand settings (decision 0014).
+	settingsValue   *prometheus.GaugeVec
+	settingsVersion prometheus.Gauge
+	settingsChanges prometheus.Counter
+	operatorsActive prometheus.Gauge
+	operatorsAside  prometheus.Gauge
 }
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
@@ -101,11 +108,23 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			"Errors while fetching the routing topic."),
 		lag: gauge("consumer_lag_seconds",
 			"Machine time from the append of the last routing record read to the moment it was read."),
+		settingsValue: prometheus.NewGaugeVec(prometheus.GaugeOpts(opts("settings_value",
+			"Sim values in effect, by field name of the stand settings (decision 0014). Durations are microseconds of model time.")),
+			[]string{"name"}),
+		settingsVersion: gauge("settings_version",
+			"Version of the stand settings whose sim part is applied, 0 when the simulator runs from its environment."),
+		settingsChanges: counter("settings_changes_total",
+			"Changes of the sim values applied while the simulator runs."),
+		operatorsActive: gauge("operators_active",
+			"Simulated operators in the shift cycle."),
+		operatorsAside: gauge("operators_put_aside",
+			"Simulated operators put aside by a smaller operator count: registered, offline and out of the shift cycle."),
 	}
 	for _, c := range []prometheus.Collector{
 		m.operatorsOnline, m.offersSeen, m.accepts, m.offersMissed, m.replies, m.resolves,
 		m.calls, m.rejections, m.failures, m.retries, m.planned, m.dropped,
 		m.events, m.eventsSkipped, m.eventsInvalid, m.fetchErrors, m.lag,
+		m.settingsValue, m.settingsVersion, m.settingsChanges, m.operatorsActive, m.operatorsAside,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register sim metrics: %w", err)

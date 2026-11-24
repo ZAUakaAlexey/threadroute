@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,6 +21,8 @@ type fakeClock struct {
 	mu      sync.Mutex
 	now     time.Time
 	waiters []waiter
+	// added is signalled when a waiter is added.
+	added *sync.Cond
 }
 
 type waiter struct {
@@ -29,7 +32,21 @@ type waiter struct {
 
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
-func newFakeClock() *fakeClock { return &fakeClock{now: epoch} }
+func newFakeClock() *fakeClock {
+	c := &fakeClock{now: epoch}
+	c.added = sync.NewCond(&c.mu)
+	return c
+}
+
+// waitWaiters blocks until at least n waiters wait for a later time, so a
+// test moves the clock only once the code under test is waiting.
+func (c *fakeClock) waitWaiters(n int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for len(c.waiters) < n {
+		c.added.Wait()
+	}
+}
 
 func (c *fakeClock) Now() time.Time {
 	c.mu.Lock()
@@ -47,6 +64,7 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 		return ch
 	}
 	c.waiters = append(c.waiters, waiter{at: at, ch: ch})
+	c.added.Broadcast()
 	return ch
 }
 
@@ -75,6 +93,9 @@ type call struct {
 	action string
 	op     string
 	offer  string
+	// capacity and langs are the capacity and the languages of a put.
+	capacity int
+	langs    string
 	// model is the model time of the call, rounded to the millisecond.
 	model time.Duration
 }
@@ -95,17 +116,36 @@ type fakeAPI struct {
 	settings opapi.Settings
 	// settingsErr is returned by Settings when set.
 	settingsErr error
+	// settingsFn answers Settings when set, instead of the two fields.
+	settingsFn func() (opapi.Settings, error)
+	// simDefaults answers PutSimDefaults. nil answers CodeSettingsOff, as
+	// a router from before decision 0014.
+	simDefaults func(req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
+	// reports are the bodies of PutSimDefaults.
+	reports []opapi.SimSettings
+	// anyOperator makes Offline answer for an operator that was never put.
+	// Without it such a call gets CodeOperatorNotFound, as in the router.
+	anyOperator bool
+	// known are the operators that were put.
+	known map[string]bool
 }
 
 func (a *fakeAPI) record(action, op, offer string) (opapi.Result, error) {
+	return a.recordCall(call{action: action, op: op, offer: offer})
+}
+
+func (a *fakeAPI) recordCall(c call) (opapi.Result, error) {
 	a.mu.Lock()
-	c := call{action: action, op: op, offer: offer}
 	if a.tl != nil {
 		c.model = a.tl.model(a.clock.Now()).Round(time.Millisecond)
 	}
 	a.calls = append(a.calls, c)
 	answer := a.answer
+	unknown := c.action == actionOffline && !a.anyOperator && !a.known[c.op]
 	a.mu.Unlock()
+	if unknown {
+		return "", apiError(opapi.CodeOperatorNotFound)
+	}
 	if answer != nil {
 		if res, err := answer(c); res != "" || err != nil {
 			return res, err
@@ -115,14 +155,45 @@ func (a *fakeAPI) record(action, op, offer string) (opapi.Result, error) {
 }
 
 func (a *fakeAPI) Settings(context.Context) (opapi.Settings, error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.settingsFn != nil {
+		return a.settingsFn()
+	}
 	if a.settingsErr != nil {
 		return opapi.Settings{}, a.settingsErr
 	}
 	return a.settings, nil
 }
 
-func (a *fakeAPI) PutOperator(_ context.Context, id string, _ opapi.OperatorRequest) (opapi.OperatorResponse, error) {
-	res, err := a.record(actionPut, id, "")
+// setSettings changes the answer of Settings.
+func (a *fakeAPI) setSettings(s opapi.Settings, err error) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.settings, a.settingsErr = s, err
+}
+
+func (a *fakeAPI) PutSimDefaults(_ context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
+	a.mu.Lock()
+	a.reports = append(a.reports, req.Sim)
+	f := a.simDefaults
+	a.mu.Unlock()
+	if f == nil {
+		return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeSettingsOff)
+	}
+	return f(req)
+}
+
+func (a *fakeAPI) PutOperator(_ context.Context, id string, req opapi.OperatorRequest) (opapi.OperatorResponse, error) {
+	res, err := a.recordCall(call{action: actionPut, op: id, capacity: req.Capacity, langs: strings.Join(req.Languages, ",")})
+	if err == nil {
+		a.mu.Lock()
+		if a.known == nil {
+			a.known = map[string]bool{}
+		}
+		a.known[id] = true
+		a.mu.Unlock()
+	}
 	return opapi.OperatorResponse{Result: res}, err
 }
 
@@ -166,6 +237,12 @@ func apiError(code opapi.ErrorCode) error {
 	return &opapi.Error{Status: code.Status(), ErrorResponse: opapi.ErrorResponse{Code: code, Message: "test"}}
 }
 
+func settingsError(code opapi.ErrorCode, fields ...opapi.FieldError) error {
+	return &opapi.SettingsError{Status: code.Status(), SettingsErrorResponse: opapi.SettingsErrorResponse{
+		ErrorResponse: opapi.ErrorResponse{Code: code, Message: "test"}, Fields: fields,
+	}}
+}
+
 // harness drives an engine synchronously: events by hand, the fake clock
 // moved to each task time, and the calls run inline.
 type harness struct {
@@ -199,11 +276,19 @@ func newHarness(t *testing.T, b Behaviour, speed float64, operators int) *harnes
 	}
 	clock := newFakeClock()
 	ids := make([]string, operators)
+	langs := make([][]string, operators)
+	if scaled, err := b.Languages.Scale(operators); err == nil {
+		langs = operatorLangs(scaled)
+	} else {
+		for i := range langs {
+			langs[i] = []string{"en", event.LangUndetermined}
+		}
+	}
 	for i := range ids {
 		ids[i] = operatorID(i + 1)
 	}
-	e := newEngine(b, ids, speed, time.Minute, clock, m, slog.New(slog.DiscardHandler))
-	api := &fakeAPI{clock: clock, tl: &e.tl}
+	e := newEngine(b, ids, langs, speed, time.Minute, clock, m, slog.New(slog.DiscardHandler))
+	api := &fakeAPI{clock: clock, tl: &e.tl, anyOperator: true}
 	return &harness{t: t, clock: clock, api: api, e: e, m: m, reg: reg, seq: map[string]uint64{}}
 }
 

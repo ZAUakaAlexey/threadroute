@@ -67,8 +67,20 @@ const (
 // logNormal draws a log-normal duration with the given median, capped at
 // tailCap times the median.
 func logNormal(rng *rand.Rand, median time.Duration) time.Duration {
-	f := math.Exp(tailSigma * rng.NormFloat64())
-	return time.Duration(float64(median) * min(f, tailCap))
+	return scaled(median, tailFactor(rng))
+}
+
+// tailFactor draws the factor of a log-normal duration: the duration is the
+// median times this factor. Drawing the factor apart from the median lets
+// the simulator draw it at a fixed point and apply the median that is in
+// effect when the step is planned (decision 0014).
+func tailFactor(rng *rand.Rand) float64 {
+	return min(math.Exp(tailSigma*rng.NormFloat64()), tailCap)
+}
+
+// scaled returns the median times a factor of tailFactor.
+func scaled(median time.Duration, f float64) time.Duration {
+	return time.Duration(float64(median) * f)
 }
 
 // uniform draws a duration in [lo, hi].
