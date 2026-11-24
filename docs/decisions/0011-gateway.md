@@ -74,6 +74,10 @@ Not a fork, but the scope:
 
 The gateway decides what a client may get from the identity it checked itself (decision 0012), never from what the client asks for.
 
+## Choices confirmed by the project owner
+
+On 2026-11-24 the project owner chose the recommended option in points 2 to 5: text is read from Redis through the `conv` package (2A), `conv` publishes a "message removed" event (3A), a slow browser gets the current state of changed keys without a queue (4B), and the library is `coder/websocket` (5). Point 1, where the current state comes from, is still open, so this decision stays proposed.
+
 ## Details that follow
 
 - **One gateway process now.** It reads all partitions of both topics without a consumer group, from the beginning. A second process would do the same and hold the same view, so more processes can be added later behind the web server.

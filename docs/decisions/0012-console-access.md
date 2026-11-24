@@ -1,6 +1,6 @@
 # 0012. Console access: sign-in, roles and the human operator
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-24
 
 ## Context
@@ -66,6 +66,16 @@ Recommendation: **B**. Rules that follow:
 
 Recommendation: **C**. Nothing secret is in a URL, and no extra endpoint is needed.
 
+## Choices confirmed by the project owner
+
+On 2026-11-24 the project owner chose the recommended option in every point:
+
+- **Token check:** the gateway asks the site API who the caller is (1B).
+- **Text and author IDs:** only for users the owner allows (2B). The owner grants this in the site's admin panel, as a role or permission of the user. The gateway reads it from the answer of the site API, and the name of that role or permission is a setting of the gateway. So the list is not kept in the gateway.
+- **Trying the operator role:** anyone, without signing in and without text, with a limit (3C).
+- **Human operator:** an operator of their own (4B).
+- **Token transport:** the first message after the connection opens (5C).
+
 ## Access levels that result
 
 | Level | Who | Sees | Can do |
@@ -84,5 +94,5 @@ Recommendation: **C**. Nothing secret is in a URL, and no extra endpoint is need
 ## Consequences
 
 - The gateway depends on the site's API for sign-in (option 1B).
-- The owner keeps a list of user IDs in the configuration. It is not in the repository.
+- Who may see text is managed in the site, not in this project. The gateway only knows the name of the role or permission to look for.
 - Anonymous demo operators are a way for strangers to cause load. The limits above bound it, and the load test of stage 5 includes it.

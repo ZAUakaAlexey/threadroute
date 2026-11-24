@@ -1,6 +1,6 @@
 # 0013. Console: screens and the public page
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-24
 
 ## Context
@@ -62,6 +62,10 @@ Recommendation: **A**. The two kinds of data have different rules: a live view t
 - **B. A ready component kit.**
 
 Recommendation: **A**. A few screens do not need a kit, and the primitives give keyboard and screen reader support that is easy to get wrong by hand.
+
+## Choices confirmed by the project owner
+
+On 2026-11-24 the project owner chose the recommended option in every point: a cached HTTP snapshot for the public page (1B), a separate static application from `web/` (2A), one store for the live view with TanStack Query for plain HTTP reads (3A), and Tailwind with unstyled accessible primitives (4A).
 
 ## Details that follow
 
