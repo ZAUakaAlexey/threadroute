@@ -1,0 +1,8 @@
+{
+  "type": "result",
+  "request_id": "req-settings-3",
+  "outcome": "rejected",
+  "code": "settings_too_soon",
+  "message": "one change per 10 seconds",
+  "retry_after_ms": 6800
+}

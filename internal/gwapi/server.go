@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/event"
+	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 )
 
 // ServerType is the "type" of a server message.
@@ -18,14 +19,20 @@ const (
 	TypeMessages       ServerType = "messages"
 	TypeMessageRemoved ServerType = "message_removed"
 	TypeResult         ServerType = "result"
+	// TypeSettings and TypeTrend are the types of SettingsUpdate and
+	// TrendUpdate (decision 0014).
+	TypeSettings ServerType = "settings"
+	TypeTrend    ServerType = "trend"
 )
 
 // ServerMessage is a message from the gateway to the browser: Welcome,
-// Status, State, Messages, MessageRemoved or Result.
+// Status, State, Messages, MessageRemoved, Result, SettingsUpdate or
+// TrendUpdate.
 //
 // Order on one connection: Welcome first, then Status, then a State
 // snapshot. After that State messages (at most one per Tick), Status on
-// every change, and Messages, MessageRemoved and Result as they happen.
+// every change, and Messages, MessageRemoved, Result, SettingsUpdate and
+// TrendUpdate as they happen.
 type ServerMessage interface {
 	// ServerType returns the "type" of the message.
 	ServerType() ServerType
@@ -66,6 +73,16 @@ type Welcome struct {
 	TickMS int `json:"tick_ms"`
 	// Limits are the limits of this connection.
 	Limits Limits `json:"limits"`
+	// Settings is the stand settings block (decision 0014), for every
+	// view. It is optional: absent when the gateway has no stand settings
+	// to show (an older gateway, or a router that does not offer them).
+	// The console shows settings and sends ChangeSettings only when it is
+	// set.
+	Settings *Settings `json:"settings,omitempty"`
+	// Trend is the trend history (decision 0014). The gateway sends it to
+	// ViewSupervisor connections only. It is optional: an older gateway
+	// does not send it.
+	Trend *Trend `json:"trend,omitempty"`
 }
 
 // Limits are the limits the server enforces on one connection.
@@ -130,6 +147,12 @@ func (w Welcome) Validate(a Audience) error {
 	l := w.Limits
 	if l.MaxMessageBytes <= 0 || l.ActionsPerSecond <= 0 || l.ActionBurst <= 0 || l.MaxWatched <= 0 {
 		errs.invalid("limits", "every limit must be positive")
+	}
+	if w.Settings != nil {
+		errs.within("settings", func(e *fieldErrors) { w.Settings.validate(e, a) })
+	}
+	if w.Trend != nil {
+		errs.within("trend", w.Trend.validate)
 	}
 	return errs.join()
 }
@@ -371,9 +394,9 @@ const (
 	OutcomeRejected Outcome = "rejected"
 )
 
-// Result answers one request (Action, Watch or Unwatch). Every request
-// gets exactly one Result with its RequestID. Results can come in another
-// order than the requests.
+// Result answers one request (Action, Watch, Unwatch or ChangeSettings).
+// Every request gets exactly one Result with its RequestID. Results can
+// come in another order than the requests.
 type Result struct {
 	RequestID string  `json:"request_id"`
 	Outcome   Outcome `json:"outcome"`
@@ -382,6 +405,16 @@ type Result struct {
 	// Message is for people and logs, only for OutcomeRejected. It never
 	// holds post text, a token or an author ID.
 	Message string `json:"message,omitempty"`
+	// Fields lists the invalid fields of a ChangeSettings, with
+	// CodeInvalidRequest only. Field names are those of
+	// opapi.SettingsFields, and opapi.FieldSim for the sim part as a
+	// whole.
+	Fields []opapi.FieldError `json:"fields,omitempty"`
+	// RetryAfterMS is how long to wait before the next ChangeSettings, in
+	// whole milliseconds of machine time, from 1 to
+	// opapi.SettingsChangeInterval. It is set with CodeSettingsTooSoon,
+	// and only then.
+	RetryAfterMS int64 `json:"retry_after_ms,omitempty"`
 }
 
 // ServerType implements ServerMessage.
@@ -407,6 +440,21 @@ func (r Result) Validate(Audience) error {
 		errs.missing("outcome")
 	default:
 		errs.invalid("outcome", "%q is not a known outcome", r.Outcome)
+	}
+	if len(r.Fields) > 0 && (r.Outcome != OutcomeRejected || r.Code != CodeInvalidRequest) {
+		errs.invalid("fields", "only with code %q", CodeInvalidRequest)
+	}
+	for i, f := range r.Fields {
+		if f.Field == "" || f.Reason == "" {
+			errs.invalid(fmt.Sprintf("fields[%d]", i), "field and reason must be set")
+		}
+	}
+	maxWait := opapi.SettingsChangeInterval.Milliseconds()
+	switch {
+	case r.Code == CodeSettingsTooSoon && (r.RetryAfterMS < 1 || r.RetryAfterMS > maxWait):
+		errs.invalid("retry_after_ms", "%d is not between 1 and %d", r.RetryAfterMS, maxWait)
+	case r.Code != CodeSettingsTooSoon && r.RetryAfterMS != 0:
+		errs.invalid("retry_after_ms", "only with code %q", CodeSettingsTooSoon)
 	}
 	return errs.join()
 }
@@ -449,6 +497,10 @@ func DecodeServer(b []byte, a Audience) (ServerMessage, error) {
 		m, err = decodeAs[MessageRemoved](b)
 	case TypeResult:
 		m, err = decodeAs[Result](b)
+	case TypeSettings:
+		m, err = decodeAs[SettingsUpdate](b)
+	case TypeTrend:
+		m, err = decodeAs[TrendUpdate](b)
 	case "":
 		return nil, fmt.Errorf("decode server message: type is not set")
 	default:

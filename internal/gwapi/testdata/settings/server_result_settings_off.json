@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "request_id": "req-settings-5",
+  "outcome": "rejected",
+  "code": "settings_off",
+  "message": "the router does not offer stand settings"
+}

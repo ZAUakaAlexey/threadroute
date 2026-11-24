@@ -1,6 +1,6 @@
 # Gateway protocol, version 1
 
-This document describes how the console in `web/` talks to the `gateway` service. It follows decisions [0011](decisions/0011-gateway.md), [0012](decisions/0012-console-access.md) and [0013](decisions/0013-console-screens.md). The Go types are in `internal/gwapi`, and the examples in `internal/gwapi/testdata/` are checked by the Go tests. The console tests should load the same files, so that both sides stay in line.
+This document describes how the console in `web/` talks to the `gateway` service. It follows decisions [0011](decisions/0011-gateway.md), [0012](decisions/0012-console-access.md), [0013](decisions/0013-console-screens.md) and [0014](decisions/0014-console-settings.md). The Go types are in `internal/gwapi`, and the examples in `internal/gwapi/testdata/` are checked by the Go tests. The console tests should load the same files, so that both sides stay in line.
 
 If this document and the Go code disagree, the Go code and its tests win, and this document has a bug.
 
@@ -13,7 +13,7 @@ If this document and the Go code disagree, the Go code and its tests win, and th
 
 Default ports of the gateway: `:9472` for both paths, `:9471` for `/metrics`, `/healthz` and `/debug/pprof/` (like every other service). In production the site's web server forwards the two paths.
 
-Nothing secret is ever put into a URL. The site token goes into the first WebSocket message.
+Nothing secret is ever put into a URL. The gateway learns who the caller is from the site cookie of the WebSocket opening request, or from a site token in the first WebSocket message (see "Who the caller is").
 
 ## Common rules
 
@@ -22,6 +22,7 @@ Nothing secret is ever put into a URL. The site token goes into the first WebSoc
 - A server message with an unknown `type` is skipped by the client. A client message with an unknown `type` closes the connection (`4400`).
 - Times are integers: unix microseconds in fields that end in `_us`. They are below 2^53, so JavaScript numbers hold them exactly.
 - Fields that end in `_at_us` or `_due_us` are times on the machine clock of the server. Fields that end in `_source_us` or are named `source_us` are source times of posts. Other `_us` fields are durations in **model time**: machine time multiplied by `speed_factor`. The SLA targets are model time too.
+- Fields that end in `_ms` (`tick_ms`, `interval_ms`, `retry_after_ms`) are durations in whole milliseconds of **machine time**.
 - Languages are 2 or 3 lower case letters. `und` is the general queue.
 - A request ID is chosen by the client: 1 to 64 characters from `A-Z a-z 0-9 . _ -`.
 - Errors never contain post text or a token.
@@ -34,7 +35,19 @@ Nothing secret is ever put into a URL. The site token goes into the first WebSoc
 | `demo` | anyone, with or without sign-in | no post text; every conversation ID, company, customer and message ID is a pseudonym |
 | `full` | users the owner allowed in the site | text and real IDs |
 
-The server decides the level from the token it checked with the site. The client never asks for a level.
+The server decides the level from the sign-in it checked with the site (see "Who the caller is"). The client never asks for a level.
+
+The right to **change stand settings** is separate from the level (decision 0014, point 6). The gateway has two lists of site roles: the roles that get the `full` level, and the roles that may change settings. A connection can have either right, both or none. `welcome.settings.may_change` tells the console which one applies.
+
+## Who the caller is
+
+Decision 0014 (point 7) changed how the gateway learns who the caller is. None of this changes a message:
+
+- **Site cookie.** The gateway reads the sign-in cookie of the site from the WebSocket opening request (`GET /v1/ws`) and checks it with the site API, as it checked a token before. The name of the cookie is a setting of the gateway. This works when the console and the gateway are served under the site's domain. Page code never reads the cookie. Because a browser sends a cookie without any action of the page, the origin check of decision 0011 stays required.
+- **Local role.** On a laptop there is no site cookie. A gateway setting can give every connection one site role (for example `guest`). The gateway accepts this setting only when every allowed origin is a loopback address (for example `http://127.0.0.1:5173`), and refuses to start with it otherwise, so a public stand cannot run with it.
+- **`hello.token`** is still accepted, as before. A console that has no token sends no `token`.
+
+Which sign-in counts when a request has more than one is a rule of the gateway, not of the protocol. The client sees only the result: `welcome.level` and `welcome.settings.may_change`.
 
 **Pseudonyms** look like `ps-` followed by 12 characters from `a-z` and `2-7`, for example `ps-k2m3n4p5q6r7`. The same ID gives the same pseudonym everywhere on one day, so a company in a team row and in a conversation row has the same label. The key behind them changes every day; on that change the server sends a new state snapshot (see below).
 
@@ -51,13 +64,16 @@ client                                 server
   |  <--------------  state (snapshot: true, seq 1)
   |  <--------------  state (snapshot: false), at most every 250 ms
   |  action / watch / unwatch  --------> |
+  |  change_settings  -----------------> |
   |  <------------------  result (same request_id)
   |  <------------------  messages / message_removed (watched conversations)
+  |  <------------------  settings (a new set, to every connection)
+  |  <------------------  trend (supervisor view, every 10 seconds)
 ```
 
 1. The client opens the WebSocket and sends `hello` as its first message.
 2. If no valid `hello` arrives within **5 seconds**, the server closes with `4408`.
-3. The server checks the token (if any) with the site, decides the level, and for the operator view creates an operator. Then it sends `welcome`, `status`, and a `state` snapshot.
+3. The server checks the sign-in (cookie or token, if any) with the site, decides the level and the right to change settings, and for the operator view creates an operator. Then it sends `welcome`, `status`, and a `state` snapshot.
 4. From then on the server sends `state` updates, `status` changes, and the answers to requests.
 5. A second `hello` on the same connection closes it with `4400`.
 
@@ -102,6 +118,8 @@ There is one number, `version`, now `1`. The client sends it in `hello`; the ser
 - Removing or changing the meaning of a field, or a new rule that an old client would break, raises the version.
 - A `hello` with another version (or without one) is answered with close code `4426` and no `welcome`. The close reason is `unsupported_version`, like every close reason. The console should then ask the user to reload the page, because a newer console was deployed.
 - **Enum values.** Fields with a fixed set of values (`state`, `kind`, `presence`, `level`, `view`, `outcome`, `code`, `reason`, `direction`) only ever hold the values this document lists. A new value needs a new version. The console treats an unknown value as a broken frame: it closes the connection and reconnects. So the server never sends a value the version does not define.
+- **One exception: answers to a new request.** A new value that the server sends only in the answer to a new client message does not need a new version, because an older console never sends that message. The codes `settings_conflict`, `settings_too_soon` and `settings_off` are such values: they answer `change_settings` only.
+- **New client messages.** An older gateway closes the connection with `4400` on a client message type it does not know. So the console sends `change_settings` only when `welcome` carried `settings`, which an older gateway never sends.
 
 ## Client messages
 
@@ -115,11 +133,13 @@ There is one number, `version`, now `1`. The client sends it in `hello`; the ser
 |---|---|---|
 | `version` | integer | must be `1` |
 | `view` | `"operator"` or `"supervisor"` | the screen of this connection; it does not change later |
-| `token` | string, optional | the site token of a signed-in user, at most 2048 bytes |
+| `token` | string, optional | the site token of a signed-in user, at most 2048 bytes. Optional since the gateway also reads the site cookie (see "Who the caller is") |
 | `resume_token` | string, optional | from an earlier `welcome`; operator view only |
 | `languages` | list of languages | operator view only, and required there: 1 to 32 values, no duplicates, any order |
 
-For the operator view the gateway creates an operator with these languages and a capacity of 2. The new operator is **offline**; send the `online` action to start getting offers.
+For the operator view the gateway creates an operator with these languages, a capacity of 2 and an operator priority of 1. The new operator is **offline**; send the `online` action to start getting offers.
+
+The priority comes from decision 0009 ("An operator priority"): among the operators that pass every rule, the router prefers the previous operator of the conversation, then the lowest load, then the highest priority. Simulated operators have priority 0, so a person gets an offer before a simulated operator with the same load. The protocol does not carry the priority; the gateway sends it to the router.
 
 A browser that wants both screens opens two connections.
 
@@ -162,9 +182,49 @@ For `reply` the request ID is also the reply ID. If the answer was lost, send th
 
 The `result` only says whether the action was applied. The new state (for example the conversation moving from `offered` to `assigned`) arrives in a later `state` message.
 
+### `change_settings`
+
+```json
+{
+  "type": "change_settings", "request_id": "req-settings-1", "base_version": 3,
+  "settings": {
+    "teams": {"form_load": 30, "release_load": 8, "release_after_us": 900000000, "min_size": 2, "max_size": 20, "max_share": 0.3},
+    "sim": {"operators": 200, "capacity": 6, "handling_median_us": 45000000, "resolve_median_us": 180000000, "missed_offer_share": 0.03}
+  }
+}
+```
+
+Asks for a change of the stand settings (decision 0014). Send it only when `welcome.settings` is present and `may_change` is true.
+
+| Field | Type | Rule |
+|---|---|---|
+| `request_id` | string | as for every request |
+| `base_version` | integer, 0 or more | the `version` of the settings block the set was built from |
+| `settings` | set | the **whole** new set, in the form of `settings.current` (see "Stand settings"). `sim` must be present when `settings.current.sim` is, and absent when it is absent. "Reset to defaults" sends `settings.defaults` |
+
+The gateway checks the right, the bounds and the version before it asks the router. Values outside the bounds do not break the message: the answer is a `result` that lists the fields, and the connection stays open. A wrong JSON form does break it (`4400`): a fraction or an exponent in a count, or a string instead of a number.
+
+The answer is one `result` with the same `request_id`:
+
+| Outcome, code | Meaning | Extra fields of the `result` |
+|---|---|---|
+| `done` | applied. A `settings` message with the new version arrived **before** this `result` | |
+| `already_done` | the set is the current set at the current version; nothing changed | |
+| `rejected`, `invalid_request` | values break the bounds or the rules between fields, or `sim` is missing or must be absent | `fields` |
+| `rejected`, `settings_conflict` | `base_version` is not the current version: someone changed the set first. A `settings` message with the current set arrived before this `result`. Show the new values and let the user decide again | |
+| `rejected`, `settings_too_soon` | the last change of the stand was less than 10 seconds ago | `retry_after_ms` |
+| `rejected`, `not_allowed` | this connection may not change settings | |
+| `rejected`, `settings_off` | this stand has no stand settings (the router does not offer them) | |
+| `rejected`, `unavailable` | the router did not answer; retry later | |
+| `rejected`, `rate_limited` or `internal` | as for every request | |
+
+`fields` is a list of `{"field": "teams.release_load", "reason": "30 is not below teams.form_load (30)"}`. `field` is a field name of the set (see "Stand settings"), or `sim` for the sim part as a whole. `reason` is plain English for people.
+
+`retry_after_ms` is from 1 to 10000.
+
 ### Rate limit
 
-Requests (`action`, `watch`, `unwatch`) of one connection are limited by a token bucket: 10 at once, refilled with 5 per second. A request over the limit gets a `result` with code `rate_limited`; the connection stays open.
+Requests (`action`, `watch`, `unwatch`, `change_settings`) of one connection are limited by a token bucket: 10 at once, refilled with 5 per second. A request over the limit gets a `result` with code `rate_limited`; the connection stays open. Stand settings have a second limit for the whole stand: one change per 10 seconds (`settings_too_soon`).
 
 ## Server messages
 
@@ -192,6 +252,103 @@ Requests (`action`, `watch`, `unwatch`) of one connection are limited by a token
 | `accept_timeout_us`, `assignment_target_us`, `first_response_target_us` | model time |
 | `tick_ms` | the shortest time between two `state` messages |
 | `limits` | the limits of this connection |
+| `settings` | optional: the stand settings block (see "Stand settings"), for both views. Absent when the stand has no stand settings or the gateway is older; then show no settings and never send `change_settings` |
+| `trend` | optional, supervisor view only: the trend history (see `trend` below) |
+
+### Stand settings
+
+The stand settings are the numbers that a person may change while the stand runs (decision 0014). `welcome.settings` and the `settings` message carry the same block:
+
+```json
+{
+  "version": 3,
+  "current": {
+    "teams": {"form_load": 30, "release_load": 8, "release_after_us": 900000000, "min_size": 2, "max_size": 20, "max_share": 0.5},
+    "sim": {"operators": 200, "capacity": 6, "handling_median_us": 45000000, "resolve_median_us": 180000000, "missed_offer_share": 0.03}
+  },
+  "defaults": {"teams": {"...": "..."}, "sim": {"...": "..."}},
+  "bounds": {
+    "teams": {
+      "form_load": {"min": 2, "max": 500, "integer": true},
+      "release_load": {"min": 1, "max": 499, "integer": true, "below": "teams.form_load"},
+      "min_size": {"min": 1, "max": 50, "integer": true, "not_above": "teams.max_size"},
+      "max_share": {"min": 0.05, "max": 1, "integer": false},
+      "...": "..."
+    },
+    "sim": {"...": "..."}
+  },
+  "changes": [
+    {"changed_at_us": 1767323040000001, "version": 3, "by": "guest", "fields": [{"field": "teams.form_load", "old": 20, "new": 30}]},
+    {"changed_at_us": 1767319500000001, "version": 1, "by": "simulator", "fields": [{"field": "sim.operators", "new": 200}, {"...": "..."}]}
+  ],
+  "may_change": true
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `version` | the version of `current`. 0 means that nothing is stored yet: `current` holds the starting values of the router, without `sim`. Every change adds 1 |
+| `current` | the set in use |
+| `defaults` | the starting values of the services, for "reset to defaults". They have no version: a simulator that starts with other values changes them without a new version |
+| `bounds` | the rule of every value. Never hard-code a number in the console |
+| `changes` | the newest changes, at most 20, newest first, never `null` |
+| `may_change` | this connection may send `change_settings` |
+
+**The set.** Two parts. `sim` is absent in `current` and in `defaults` until a simulator has reported its values; it is then present in both.
+
+| Field name | Part | Meaning | Unit | Bounds |
+|---|---|---|---|---|
+| `teams.form_load` | router | the load of a company that forms a team | integer | 2 to 500 |
+| `teams.release_load` | router | a team is released when the load stays below this | integer | 1 to `form_load` minus 1 |
+| `teams.release_after_us` | router | how long the load must stay below `release_load` | model time, whole microseconds | 1 minute to 2 hours |
+| `teams.min_size`, `teams.max_size` | router | the size of a team | integer | 1 to 50, `min_size` not above `max_size` |
+| `teams.max_share` | router | the share of the online operators that teams may hold; 1 turns the cap off | number | 0.05 to 1 |
+| `sim.operators` | simulator | simulated operators | integer | 10 to 500 |
+| `sim.capacity` | simulator | capacity of a simulated operator | integer | 1 to 20 |
+| `sim.handling_median_us` | simulator | median time from accept to reply | model time, whole microseconds | 5 seconds to 10 minutes |
+| `sim.resolve_median_us` | simulator | median time from reply to resolve | model time, whole microseconds | 10 seconds to 30 minutes |
+| `sim.missed_offer_share` | simulator | share of offers left to time out | number | 0 to 0.5 |
+
+Every field is always present in its part, also when it is 0. Integers are written without a fraction or an exponent (`20`, never `20.0`). A share is compared with its bounds as a double, bounds included, so `0.05` is valid for `max_share`.
+
+**Bounds.** Each bound has `min` and `max` (both included) and `integer`. Durations in bounds are whole microseconds of model time, like the values. `below` names a field that the value must be below; `not_above` names a field that the value must not be above. Both name fields of the same set.
+
+**Changes.** Each entry has `changed_at_us` (the machine clock of the router), `version` (the version after the change), `by` and `fields`: the changed values, each with `field`, `old` and `new`. `old` is absent when the set had no value before: the first report of a simulator, whose `by` is `simulator`. Use `changed_at_us` to mark the changes on the trend strip.
+
+**`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level.
+
+**How fast a change acts.** A team number that goes down does not force teams to shrink (decision 0014, point 4): teams above it stop growing and shrink as members leave. The console says "acts gradually" for those numbers.
+
+### `settings`
+
+```json
+{"type": "settings", "settings": {"version": 4, "current": {"...": "..."}, "defaults": {"...": "..."}, "bounds": {"...": "..."}, "changes": [], "may_change": false}}
+```
+
+Sent to every connection, both views and every level, when the block changed: a new current set (a new `version`) or new defaults. It replaces the whole block the console holds. The rules of `by` and `may_change` are as in `welcome`. Only a gateway that sent `welcome.settings` sends it.
+
+### `trend`
+
+```json
+{
+  "type": "trend",
+  "point": {"sampled_at_us": 1767323110000001, "waiting": 141, "longest_wait_us": 125000000, "resolved_last_minute": 95, "teams": 4, "operators_in_teams": 64, "operators_online": 180}
+}
+```
+
+One new point of the trend strip, every 10 seconds (machine time), to supervisor connections only, at every level. `welcome.trend` carries the history: `{"interval_ms": 10000, "points": [...]}`, the points of the last 60 minutes (at most 360), oldest first, never `null`. The gateway keeps the history in memory, so after a gateway restart it starts empty.
+
+| Field | Meaning |
+|---|---|
+| `sampled_at_us` | the machine clock of the gateway when it took the point |
+| `waiting` | conversations in a queue without an offer, like `totals.conversations.waiting` |
+| `longest_wait_us` | how long the conversation that has waited longest (waiting or offered) has waited, model time; 0 when none waits |
+| `resolved_last_minute` | resolves in the last 60 seconds of machine time |
+| `teams` | dedicated teams |
+| `operators_in_teams` | members of all teams |
+| `operators_online` | online operators, like `totals.operators_online` |
+
+A point holds counts only, so every level gets it.
 
 ### `status`
 
@@ -384,9 +541,12 @@ The author deleted the post (`deleted`) or was removed (`author_removed`). Drop 
 ```json
 {"type": "result", "request_id": "req-accept", "outcome": "done"}
 {"type": "result", "request_id": "req-accept", "outcome": "rejected", "code": "offer_expired", "message": "accept: the offer is expired"}
+{"type": "result", "request_id": "req-settings-3", "outcome": "rejected", "code": "settings_too_soon", "message": "one change per 10 seconds", "retry_after_ms": 6800}
 ```
 
 Every request gets exactly one `result` with its `request_id`. Results can arrive in another order than the requests.
+
+Two optional fields answer `change_settings` only: `fields` (with `invalid_request`) and `retry_after_ms` (with `settings_too_soon`, and always there). See `change_settings`.
 
 | `outcome` | Meaning |
 |---|---|
@@ -409,19 +569,22 @@ Codes from the router's operator API, passed on as they are:
 | `assignment_ended` | the assignment ended before the call |
 | `unavailable` | the router cannot answer now; retry later |
 | `internal` | unexpected error |
+| `settings_conflict` | `change_settings` only: the base version is not the current version |
+| `settings_too_soon` | `change_settings` only: one change per 10 seconds for the whole stand; retry after `retry_after_ms` |
+| `settings_off` | `change_settings` only: the stand has no stand settings |
 
 Codes of the gateway:
 
 | Code | Meaning |
 |---|---|
-| `not_allowed` | not allowed for this view or level, for example an action on a supervisor connection |
+| `not_allowed` | not allowed for this view, level or right, for example an action on a supervisor connection, or `change_settings` without the right |
 | `rate_limited` | over the request limit; retry later |
 | `unknown_offer` | the offer is not a live offer or assignment of this operator in the gateway's view |
 | `stale_connection` | see below |
 | `unknown_conversation` | `watch` for a conversation that is not in this view, or that this connection may not watch |
 | `too_many_watched` | `watch` with 4 conversations already watched |
 
-Only `unavailable` and `rate_limited` mean "the same request may work later". The others need a change first (for example a new offer).
+Only `unavailable`, `rate_limited` and `settings_too_soon` mean "the same request may work later". The others need a change first (for example a new offer).
 
 `stale_connection` has two causes, and the `message` names the one that applies:
 
@@ -469,7 +632,11 @@ A Go test compares the full field set of this object with an allow-list, so a fi
 | `state` messages | at most one per 250 ms |
 | demo operators at the same time | 5 (then close code `4503`) |
 | capacity of a human operator | 2 |
+| operator priority of a human operator | 1 (simulated operators: 0) |
 | operator stays online after a close | 15 seconds |
+| stand settings changes | at most one per 10 seconds, for the whole stand |
+| changes in the settings block | the newest 20 |
+| trend points | one per 10 seconds; history of 60 minutes (360 points) |
 
 ## Examples
 
@@ -508,5 +675,24 @@ Every file is listed with its purpose, level and view in `internal/gwapi/testdat
 | `server_result_rejected_router.json` | `result` | demo, operator | rejected by the router |
 | `server_result_rejected_gateway.json` | `result` | demo, operator | rejected by the gateway (rate limit) |
 | `public_snapshot.json` | public snapshot | | answer of `/v1/public/snapshot` |
+
+The examples of decision 0014 are in `internal/gwapi/testdata/settings/`, with their own `index.json`. Its entries have one more field, `may_change_settings`: the right of the connection the example is for. They live apart so that the tests that read `testdata/index.json` keep passing until the gateway and the console handle the new messages; the tests then move them into `testdata/index.json`.
+
+| File | Message | Level, view, right | Purpose |
+|---|---|---|---|
+| `client_change_settings.json` | `change_settings` | | change the share of operators in teams, with both parts |
+| `client_change_settings_teams_only.json` | `change_settings` | | a change before any simulator reported: no `sim` |
+| `server_welcome_supervisor_settings_demo.json` | `welcome` | demo, supervisor, no right | settings without `by`, and the trend history |
+| `server_welcome_supervisor_settings_full_may_change.json` | `welcome` | full, supervisor, right | settings with `by` |
+| `server_welcome_operator_settings_demo.json` | `welcome` | demo, operator, no right | settings and no trend |
+| `server_settings_update_demo.json` | `settings` | demo, supervisor, no right | a new current set |
+| `server_settings_update_may_change_demo.json` | `settings` | demo, supervisor, right | the same set for a demo connection whose role may change settings |
+| `server_settings_first_start_demo.json` | `settings` | demo, operator, no right | version 0, no `sim` yet |
+| `server_trend_demo.json` | `trend` | demo, supervisor | one new point |
+| `server_result_settings_invalid.json` | `result` | demo, supervisor, right | invalid values with `fields` |
+| `server_result_settings_conflict.json` | `result` | demo, supervisor, right | someone changed the set first |
+| `server_result_settings_too_soon.json` | `result` | demo, supervisor, right | `retry_after_ms` |
+| `server_result_settings_not_allowed.json` | `result` | demo, supervisor, no right | no right to change |
+| `server_result_settings_off.json` | `result` | demo, supervisor, right | the stand has no stand settings |
 
 All data in the examples is synthetic.

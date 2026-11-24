@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "request_id": "req-settings-4",
+  "outcome": "rejected",
+  "code": "not_allowed",
+  "message": "this connection may not change settings"
+}

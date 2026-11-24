@@ -12,28 +12,70 @@ import (
 	"testing"
 )
 
-// fixture is one entry of testdata/index.json. The console tests read the
-// same index, so both sides check the same examples.
+// fixture is one entry of testdata/index.json or of
+// testdata/settings/index.json. The console tests read the same index, so
+// both sides check the same examples.
+//
+// testdata/settings holds the examples of decision 0014 (stand settings and
+// trends) in its own index, so that the tests of the gateway and of the
+// console that read testdata/index.json keep passing until they handle the
+// new messages. Its entries have MayChangeSettings, the right of the
+// audience.
 type fixture struct {
-	File      string `json:"file"`
-	Direction string `json:"direction"`
-	Type      string `json:"type"`
-	Level     Level  `json:"level"`
-	View      View   `json:"view"`
-	Purpose   string `json:"purpose"`
+	File              string `json:"file"`
+	Direction         string `json:"direction"`
+	Type              string `json:"type"`
+	Level             Level  `json:"level"`
+	View              View   `json:"view"`
+	MayChangeSettings bool   `json:"may_change_settings"`
+	Purpose           string `json:"purpose"`
+
+	// dir is the directory of the index; it is not in the JSON.
+	dir string
 }
 
-func loadIndex(t *testing.T) []fixture {
+// Fixture directories.
+const (
+	fixtureDir         = "testdata"
+	settingsFixtureDir = "testdata/settings"
+)
+
+func (f fixture) audience() Audience {
+	return Audience{Level: f.Level, View: f.View, MayChangeSettings: f.MayChangeSettings}
+}
+
+func (f fixture) read(t *testing.T) []byte {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("testdata", "index.json"))
+	b, err := os.ReadFile(filepath.Join(f.dir, f.File))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// loadIndex returns the entries of testdata/index.json.
+func loadIndex(t *testing.T) []fixture { return loadIndexIn(t, fixtureDir) }
+
+func loadIndexIn(t *testing.T, dir string) []fixture {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(dir, "index.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	var idx []fixture
 	if err := json.Unmarshal(b, &idx); err != nil {
-		t.Fatalf("index.json: %v", err)
+		t.Fatalf("%s/index.json: %v", dir, err)
+	}
+	for i := range idx {
+		idx[i].dir = dir
 	}
 	return idx
+}
+
+// allFixtures returns the entries of both indexes.
+func allFixtures(t *testing.T) []fixture {
+	t.Helper()
+	return append(loadIndex(t), loadIndexIn(t, settingsFixtureDir)...)
 }
 
 func readFixture(t *testing.T, name string) []byte {
@@ -59,27 +101,34 @@ func sameJSON(t *testing.T, a, b []byte) bool {
 }
 
 func TestFixturesAreIndexed(t *testing.T) {
-	idx := loadIndex(t)
-	files, err := filepath.Glob(filepath.Join("testdata", "*.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var onDisk, listed []string
-	for _, f := range files {
-		if base := filepath.Base(f); base != "index.json" {
-			onDisk = append(onDisk, base)
+	var listed []string
+	for _, dir := range []string{fixtureDir, settingsFixtureDir} {
+		files, err := filepath.Glob(filepath.Join(dir, "*.json"))
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	for _, f := range idx {
-		listed = append(listed, f.File)
-		if f.Purpose == "" || !strings.HasPrefix(f.File, f.Direction+"_") {
-			t.Errorf("%s: purpose is empty or the name does not start with %q", f.File, f.Direction+"_")
+		var onDisk, inDir []string
+		for _, f := range files {
+			if base := filepath.Base(f); base != "index.json" {
+				onDisk = append(onDisk, base)
+			}
 		}
+		for _, f := range loadIndexIn(t, dir) {
+			inDir = append(inDir, f.File)
+			if f.Purpose == "" || !strings.HasPrefix(f.File, f.Direction+"_") {
+				t.Errorf("%s: purpose is empty or the name does not start with %q", f.File, f.Direction+"_")
+			}
+			if f.MayChangeSettings && dir == fixtureDir {
+				t.Errorf("%s: may_change_settings belongs in %s", f.File, settingsFixtureDir)
+			}
+		}
+		slices.Sort(inDir)
+		if !slices.Equal(onDisk, inDir) {
+			t.Errorf("files on disk %v, listed in %s/index.json %v", onDisk, dir, inDir)
+		}
+		listed = append(listed, inDir...)
 	}
-	slices.Sort(listed)
-	if !slices.Equal(onDisk, listed) {
-		t.Errorf("files on disk %v, listed in index.json %v", onDisk, listed)
-	}
+	idx := allFixtures(t)
 
 	// Every message type has at least one example.
 	have := map[string]bool{}
@@ -87,10 +136,11 @@ func TestFixturesAreIndexed(t *testing.T) {
 		have[f.Direction+":"+f.Type] = true
 	}
 	var want []string
-	for _, c := range []ClientType{TypeHello, TypeWatch, TypeUnwatch, TypeAction} {
+	for _, c := range []ClientType{TypeHello, TypeWatch, TypeUnwatch, TypeAction, TypeChangeSettings} {
 		want = append(want, "client:"+string(c))
 	}
-	for _, s := range []ServerType{TypeWelcome, TypeStatus, TypeState, TypeMessages, TypeMessageRemoved, TypeResult} {
+	for _, s := range []ServerType{TypeWelcome, TypeStatus, TypeState, TypeMessages, TypeMessageRemoved, TypeResult,
+		TypeSettings, TypeTrend} {
 		want = append(want, "server:"+string(s))
 	}
 	want = append(want, "public:public_snapshot")
@@ -109,9 +159,9 @@ func TestFixturesAreIndexed(t *testing.T) {
 // TestFixturesRoundTrip decodes every fixture, encodes it again, and
 // compares the JSON values.
 func TestFixturesRoundTrip(t *testing.T) {
-	for _, f := range loadIndex(t) {
+	for _, f := range allFixtures(t) {
 		t.Run(f.File, func(t *testing.T) {
-			raw := readFixture(t, f.File)
+			raw := f.read(t)
 			var out []byte
 			switch f.Direction {
 			case "client":
@@ -126,7 +176,7 @@ func TestFixturesRoundTrip(t *testing.T) {
 					t.Fatalf("EncodeClient() error = %v", err)
 				}
 			case "server":
-				a := Audience{Level: f.Level, View: f.View}
+				a := f.audience()
 				m, err := DecodeServer(raw, a)
 				if err != nil {
 					t.Fatalf("DecodeServer() error = %v", err)
@@ -162,11 +212,11 @@ func TestFixturesRoundTrip(t *testing.T) {
 // fixture holds no text and no ID of a person or a company, and a full
 // fixture that holds them is refused for a demo audience.
 func TestFixturesDemoLevel(t *testing.T) {
-	for _, f := range loadIndex(t) {
+	for _, f := range allFixtures(t) {
 		if f.Direction == "client" {
 			continue
 		}
-		raw := readFixture(t, f.File)
+		raw := f.read(t)
 		if f.Level != LevelFull {
 			for _, s := range []string{"did:", `"text"`, "synthetic customer", "synthetic company"} {
 				if bytes.Contains(raw, []byte(s)) {
@@ -175,7 +225,7 @@ func TestFixturesDemoLevel(t *testing.T) {
 			}
 		}
 		if f.Level == LevelFull && f.Direction == "server" && f.Type != string(TypeWelcome) {
-			demo := Audience{Level: LevelDemo, View: f.View}
+			demo := Audience{Level: LevelDemo, View: f.View, MayChangeSettings: f.MayChangeSettings}
 			if _, err := DecodeServer(raw, demo); err == nil {
 				t.Errorf("%s: DecodeServer() for a demo audience error = nil, want an error", f.File)
 			}

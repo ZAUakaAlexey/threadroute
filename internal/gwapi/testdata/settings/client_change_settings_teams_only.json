@@ -1,0 +1,15 @@
+{
+  "type": "change_settings",
+  "request_id": "req-settings-6",
+  "base_version": 0,
+  "settings": {
+    "teams": {
+      "form_load": 20,
+      "release_load": 8,
+      "release_after_us": 900000000,
+      "min_size": 2,
+      "max_size": 20,
+      "max_share": 0.3
+    }
+  }
+}

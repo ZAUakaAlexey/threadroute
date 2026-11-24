@@ -1,0 +1,22 @@
+{
+  "type": "change_settings",
+  "request_id": "req-settings-1",
+  "base_version": 3,
+  "settings": {
+    "teams": {
+      "form_load": 30,
+      "release_load": 8,
+      "release_after_us": 900000000,
+      "min_size": 2,
+      "max_size": 20,
+      "max_share": 0.3
+    },
+    "sim": {
+      "operators": 200,
+      "capacity": 6,
+      "handling_median_us": 45000000,
+      "resolve_median_us": 180000000,
+      "missed_offer_share": 0.03
+    }
+  }
+}

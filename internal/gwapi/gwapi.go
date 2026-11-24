@@ -10,17 +10,20 @@
 //
 // Every WebSocket message is one text frame with one JSON object. The field
 // "type" names the message. The client sends ClientMessage values (Hello,
-// Watch, Unwatch, Action) and the server sends ServerMessage values
-// (Welcome, Status, State, Messages, MessageRemoved, Result). Readers ignore
-// unknown fields. Times are unix microseconds in fields that end in "_us",
-// as in the event package.
+// Watch, Unwatch, Action, ChangeSettings) and the server sends
+// ServerMessage values (Welcome, Status, State, Messages, MessageRemoved,
+// Result, SettingsUpdate, TrendUpdate). Readers ignore unknown fields.
+// Times are unix microseconds in fields that end in "_us", as in the event
+// package.
 //
 // # Privacy
 //
 // A server message is checked against the Audience it is sent to before it
 // is encoded: at LevelDemo it may hold no post text, no conversation key,
 // no company ID and no customer ID, only pseudonyms (decision 0012). The
-// public snapshot holds totals only (decision 0013).
+// public snapshot holds totals only (decision 0013). The "by" label of a
+// stand settings change goes only to a connection that may change settings
+// (decision 0014), whatever its level.
 package gwapi
 
 import (
@@ -73,7 +76,16 @@ const (
 	PublicSnapshotEvery = time.Second
 	// PublicPollEvery is how often the public page asks for the snapshot.
 	PublicPollEvery = 2 * time.Second
+	// TrendInterval is the machine time between two trend points
+	// (decision 0014, point 5).
+	TrendInterval = 10 * time.Second
+	// TrendHistory is how far back the trend points of a Welcome go.
+	TrendHistory = time.Hour
 )
+
+// MaxTrendPoints is the most points of Trend.Points: one hour of
+// points every 10 seconds.
+const MaxTrendPoints = int(TrendHistory / TrendInterval)
 
 // Limits. The server enforces them; a client that knows them can avoid the
 // errors.
@@ -147,12 +159,19 @@ const (
 func (l Level) valid() bool { return l == LevelDemo || l == LevelFull }
 
 // Audience is who a server message is for: the level and the view of the
-// connection. Server messages are validated against it. An audience with
-// an unknown level or view is refused, and the privacy rules treat every
-// level other than LevelFull like LevelDemo.
+// connection, and its right to change the stand settings. Server messages
+// are validated against it. An audience with an unknown level or view is
+// refused, and the privacy rules treat every level other than LevelFull
+// like LevelDemo.
 type Audience struct {
 	Level Level
 	View  View
+	// MayChangeSettings is the right of the connection to change the stand
+	// settings (decision 0014, point 6). It does not depend on Level: the
+	// gateway has one list of roles for each. The zero value, false, is
+	// the safe one: such a connection never gets the "by" label of a
+	// change, which may hold a user ID of the site.
+	MayChangeSettings bool
 }
 
 func (a Audience) validate(errs *fieldErrors) {

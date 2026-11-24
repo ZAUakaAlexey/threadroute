@@ -320,7 +320,8 @@ func TestErrorCodes(t *testing.T) {
 	if len(Codes) != len(opapi.Codes)+6 {
 		t.Errorf("%d codes, want the %d of the operator API and 6 of the gateway", len(Codes), len(opapi.Codes))
 	}
-	if !CodeRateLimited.Retry() || !CodeUnavailable.Retry() || CodeOfferExpired.Retry() {
+	if !CodeRateLimited.Retry() || !CodeUnavailable.Retry() || !CodeSettingsTooSoon.Retry() ||
+		CodeOfferExpired.Retry() || CodeSettingsConflict.Retry() || CodeSettingsOff.Retry() {
 		t.Error("Retry() is wrong")
 	}
 }
@@ -412,11 +413,11 @@ func TestDefaultLimits(t *testing.T) {
 // for an audience the package does not know, so a bug in the gateway that
 // loses the level cannot send text or IDs.
 func TestAudienceFailsClosed(t *testing.T) {
-	for _, f := range loadIndex(t) {
+	for _, f := range allFixtures(t) {
 		if f.Direction != "server" {
 			continue
 		}
-		raw := readFixture(t, f.File)
+		raw := f.read(t)
 		for _, a := range []Audience{{}, {Level: "public", View: f.View}, {Level: f.Level, View: "admin"}} {
 			if _, err := DecodeServer(raw, a); err == nil || !strings.Contains(err.Error(), "audience") {
 				t.Errorf("%s for audience %+v: error = %v, want an audience error", f.File, a, err)

@@ -1,0 +1,91 @@
+{
+  "type": "settings",
+  "settings": {
+    "version": 0,
+    "current": {
+      "teams": {
+        "form_load": 20,
+        "release_load": 8,
+        "release_after_us": 900000000,
+        "min_size": 2,
+        "max_size": 20,
+        "max_share": 0.5
+      }
+    },
+    "defaults": {
+      "teams": {
+        "form_load": 20,
+        "release_load": 8,
+        "release_after_us": 900000000,
+        "min_size": 2,
+        "max_size": 20,
+        "max_share": 0.5
+      }
+    },
+    "bounds": {
+      "teams": {
+        "form_load": {
+          "min": 2,
+          "max": 500,
+          "integer": true
+        },
+        "release_load": {
+          "min": 1,
+          "max": 499,
+          "integer": true,
+          "below": "teams.form_load"
+        },
+        "release_after_us": {
+          "min": 60000000,
+          "max": 7200000000,
+          "integer": true
+        },
+        "min_size": {
+          "min": 1,
+          "max": 50,
+          "integer": true,
+          "not_above": "teams.max_size"
+        },
+        "max_size": {
+          "min": 1,
+          "max": 50,
+          "integer": true
+        },
+        "max_share": {
+          "min": 0.05,
+          "max": 1,
+          "integer": false
+        }
+      },
+      "sim": {
+        "operators": {
+          "min": 10,
+          "max": 500,
+          "integer": true
+        },
+        "capacity": {
+          "min": 1,
+          "max": 20,
+          "integer": true
+        },
+        "handling_median_us": {
+          "min": 5000000,
+          "max": 600000000,
+          "integer": true
+        },
+        "resolve_median_us": {
+          "min": 10000000,
+          "max": 1800000000,
+          "integer": true
+        },
+        "missed_offer_share": {
+          "min": 0,
+          "max": 0.5,
+          "integer": false
+        }
+      }
+    },
+    "changes": [],
+    "may_change": false
+  }
+}

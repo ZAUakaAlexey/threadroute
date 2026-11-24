@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "request_id": "req-settings-2",
+  "outcome": "rejected",
+  "code": "settings_conflict",
+  "message": "base version 3 is not the current version 4"
+}

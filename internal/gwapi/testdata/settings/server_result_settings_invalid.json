@@ -1,0 +1,17 @@
+{
+  "type": "result",
+  "request_id": "req-settings-1",
+  "outcome": "rejected",
+  "code": "invalid_request",
+  "message": "the settings are not valid",
+  "fields": [
+    {
+      "field": "teams.release_load",
+      "reason": "30 is not below teams.form_load (30)"
+    },
+    {
+      "field": "sim.capacity",
+      "reason": "25 is not between 1 and 20"
+    }
+  ]
+}

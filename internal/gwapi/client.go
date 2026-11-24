@@ -16,10 +16,12 @@ const (
 	TypeWatch   ClientType = "watch"
 	TypeUnwatch ClientType = "unwatch"
 	TypeAction  ClientType = "action"
+	// TypeChangeSettings is the type of ChangeSettings (decision 0014).
+	TypeChangeSettings ClientType = "change_settings"
 )
 
 // ClientMessage is a message from the browser to the gateway: Hello, Watch,
-// Unwatch or Action.
+// Unwatch, Action or ChangeSettings.
 type ClientMessage interface {
 	// ClientType returns the "type" of the message.
 	ClientType() ClientType
@@ -37,7 +39,11 @@ type Hello struct {
 	View View `json:"view"`
 	// Token is the site token of a signed-in user, or empty. The gateway
 	// checks it with the site API and decides the level from the answer
-	// (decision 0012). It is never put into a URL.
+	// (decision 0012). It is never put into a URL. Since decision 0014
+	// (point 7) the gateway also reads the site sign-in from a cookie of
+	// the WebSocket opening request, and a local stand may give every
+	// connection one role; both are gateway behaviour and change nothing
+	// here. A token in Hello is still accepted.
 	Token string `json:"token,omitempty"`
 	// ResumeToken is the ResumeToken of an earlier Welcome, or empty. With
 	// ViewOperator it gives the connection the same operator again while
@@ -295,6 +301,8 @@ func DecodeClient(b []byte) (ClientMessage, error) {
 		m, err = decodeAs[Unwatch](b)
 	case TypeAction:
 		m, err = decodeAs[Action](b)
+	case TypeChangeSettings:
+		m, err = decodeAs[ChangeSettings](b)
 	case "":
 		return nil, fmt.Errorf("decode client message: type is not set")
 	default:

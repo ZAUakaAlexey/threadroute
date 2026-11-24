@@ -1,0 +1,128 @@
+[
+  {
+    "file": "client_change_settings.json",
+    "direction": "client",
+    "type": "change_settings",
+    "level": "",
+    "view": "",
+    "may_change_settings": false,
+    "purpose": "change the share of operators in teams, with both parts"
+  },
+  {
+    "file": "client_change_settings_teams_only.json",
+    "direction": "client",
+    "type": "change_settings",
+    "level": "",
+    "view": "",
+    "may_change_settings": false,
+    "purpose": "a change before any simulator reported: no sim part"
+  },
+  {
+    "file": "server_result_settings_conflict.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "someone changed the set first"
+  },
+  {
+    "file": "server_result_settings_invalid.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "a change with values that break the bounds"
+  },
+  {
+    "file": "server_result_settings_not_allowed.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": false,
+    "purpose": "a change from a connection without the right"
+  },
+  {
+    "file": "server_result_settings_off.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "the stand has no stand settings"
+  },
+  {
+    "file": "server_result_settings_too_soon.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "the last change was less than 10 seconds ago"
+  },
+  {
+    "file": "server_settings_first_start_demo.json",
+    "direction": "server",
+    "type": "settings",
+    "level": "demo",
+    "view": "operator",
+    "may_change_settings": false,
+    "purpose": "nothing stored and no simulator report yet: no sim part, version 0"
+  },
+  {
+    "file": "server_settings_update_demo.json",
+    "direction": "server",
+    "type": "settings",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": false,
+    "purpose": "a new current set, to a connection without the right to change"
+  },
+  {
+    "file": "server_settings_update_may_change_demo.json",
+    "direction": "server",
+    "type": "settings",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "the same new set to a demo connection whose role may change settings"
+  },
+  {
+    "file": "server_trend_demo.json",
+    "direction": "server",
+    "type": "trend",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": false,
+    "purpose": "one new trend point"
+  },
+  {
+    "file": "server_welcome_operator_settings_demo.json",
+    "direction": "server",
+    "type": "welcome",
+    "level": "demo",
+    "view": "operator",
+    "may_change_settings": false,
+    "purpose": "operator Welcome with the settings block and no trend history"
+  },
+  {
+    "file": "server_welcome_supervisor_settings_demo.json",
+    "direction": "server",
+    "type": "welcome",
+    "level": "demo",
+    "view": "supervisor",
+    "may_change_settings": false,
+    "purpose": "supervisor Welcome at the demo level without the right to change: settings without by labels, and the trend history"
+  },
+  {
+    "file": "server_welcome_supervisor_settings_full_may_change.json",
+    "direction": "server",
+    "type": "welcome",
+    "level": "full",
+    "view": "supervisor",
+    "may_change_settings": true,
+    "purpose": "supervisor Welcome of a user who may change settings: by labels are shown"
+  }
+]

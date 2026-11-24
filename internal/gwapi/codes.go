@@ -132,13 +132,20 @@ const (
 	CodeAssignmentEnded  = ErrorCode(opapi.CodeAssignmentEnded)
 	CodeUnavailable      = ErrorCode(opapi.CodeUnavailable)
 	CodeInternal         = ErrorCode(opapi.CodeInternal)
+	// CodeSettingsConflict, CodeSettingsTooSoon and CodeSettingsOff answer
+	// ChangeSettings only (decision 0014). A client older than decision
+	// 0014 never sends ChangeSettings, so it never gets them.
+	CodeSettingsConflict = ErrorCode(opapi.CodeSettingsConflict)
+	CodeSettingsTooSoon  = ErrorCode(opapi.CodeSettingsTooSoon)
+	CodeSettingsOff      = ErrorCode(opapi.CodeSettingsOff)
 )
 
 // Error codes of the gateway.
 const (
-	// CodeNotAllowed: the request is not allowed for the view or level of
-	// the connection, for example an operator action on a supervisor
-	// connection.
+	// CodeNotAllowed: the request is not allowed for the view, the level or
+	// the rights of the connection, for example an operator action on a
+	// supervisor connection, or ChangeSettings without the right to change
+	// settings.
 	CodeNotAllowed ErrorCode = "not_allowed"
 	// CodeRateLimited: the connection sent more requests than
 	// ActionsPerSecond allows. Retry later.
@@ -166,6 +173,7 @@ var Codes = []ErrorCode{
 	CodeInvalidRequest, CodeOperatorNotFound, CodeOfferNotFound, CodeOfferExpired,
 	CodeOfferRefused, CodeOfferAccepted, CodeOfferEnded, CodeOfferNotAccepted,
 	CodeAssignmentEnded, CodeUnavailable, CodeInternal,
+	CodeSettingsConflict, CodeSettingsTooSoon, CodeSettingsOff,
 	CodeNotAllowed, CodeRateLimited, CodeUnknownOffer, CodeStaleConnection,
 	CodeUnknownConversation, CodeTooManyWatched,
 }
@@ -181,9 +189,11 @@ func (c ErrorCode) Valid() bool {
 }
 
 // Retry reports whether the same request may succeed later without a
-// change: the router or the gateway was busy, or the rate limit applied.
+// change: the router or the gateway was busy, or a rate limit applied
+// (the request limit of the connection, or the interval between two stand
+// settings changes).
 func (c ErrorCode) Retry() bool {
-	return c == CodeUnavailable || c == CodeRateLimited
+	return c == CodeUnavailable || c == CodeRateLimited || c == CodeSettingsTooSoon
 }
 
 // FromOpapi returns the gwapi code of an operator API code.

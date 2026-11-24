@@ -1,0 +1,201 @@
+{
+  "type": "welcome",
+  "version": 1,
+  "level": "demo",
+  "view": "supervisor",
+  "server_time_us": 1767323100000001,
+  "speed_factor": 1,
+  "accept_timeout_us": 20000000,
+  "assignment_target_us": 60000000,
+  "first_response_target_us": 120000000,
+  "tick_ms": 250,
+  "limits": {
+    "max_message_bytes": 4096,
+    "actions_per_second": 5,
+    "action_burst": 10,
+    "max_watched": 4
+  },
+  "settings": {
+    "version": 3,
+    "current": {
+      "teams": {
+        "form_load": 30,
+        "release_load": 8,
+        "release_after_us": 900000000,
+        "min_size": 2,
+        "max_size": 20,
+        "max_share": 0.5
+      },
+      "sim": {
+        "operators": 200,
+        "capacity": 6,
+        "handling_median_us": 45000000,
+        "resolve_median_us": 180000000,
+        "missed_offer_share": 0.03
+      }
+    },
+    "defaults": {
+      "teams": {
+        "form_load": 20,
+        "release_load": 8,
+        "release_after_us": 900000000,
+        "min_size": 2,
+        "max_size": 20,
+        "max_share": 0.5
+      },
+      "sim": {
+        "operators": 200,
+        "capacity": 4,
+        "handling_median_us": 45000000,
+        "resolve_median_us": 180000000,
+        "missed_offer_share": 0.03
+      }
+    },
+    "bounds": {
+      "teams": {
+        "form_load": {
+          "min": 2,
+          "max": 500,
+          "integer": true
+        },
+        "release_load": {
+          "min": 1,
+          "max": 499,
+          "integer": true,
+          "below": "teams.form_load"
+        },
+        "release_after_us": {
+          "min": 60000000,
+          "max": 7200000000,
+          "integer": true
+        },
+        "min_size": {
+          "min": 1,
+          "max": 50,
+          "integer": true,
+          "not_above": "teams.max_size"
+        },
+        "max_size": {
+          "min": 1,
+          "max": 50,
+          "integer": true
+        },
+        "max_share": {
+          "min": 0.05,
+          "max": 1,
+          "integer": false
+        }
+      },
+      "sim": {
+        "operators": {
+          "min": 10,
+          "max": 500,
+          "integer": true
+        },
+        "capacity": {
+          "min": 1,
+          "max": 20,
+          "integer": true
+        },
+        "handling_median_us": {
+          "min": 5000000,
+          "max": 600000000,
+          "integer": true
+        },
+        "resolve_median_us": {
+          "min": 10000000,
+          "max": 1800000000,
+          "integer": true
+        },
+        "missed_offer_share": {
+          "min": 0,
+          "max": 0.5,
+          "integer": false
+        }
+      }
+    },
+    "changes": [
+      {
+        "changed_at_us": 1767323040000001,
+        "version": 3,
+        "fields": [
+          {
+            "field": "teams.form_load",
+            "old": 20,
+            "new": 30
+          }
+        ]
+      },
+      {
+        "changed_at_us": 1767322500000001,
+        "version": 2,
+        "fields": [
+          {
+            "field": "sim.capacity",
+            "old": 4,
+            "new": 6
+          }
+        ]
+      },
+      {
+        "changed_at_us": 1767319500000001,
+        "version": 1,
+        "fields": [
+          {
+            "field": "sim.operators",
+            "new": 200
+          },
+          {
+            "field": "sim.capacity",
+            "new": 4
+          },
+          {
+            "field": "sim.handling_median_us",
+            "new": 45000000
+          },
+          {
+            "field": "sim.resolve_median_us",
+            "new": 180000000
+          },
+          {
+            "field": "sim.missed_offer_share",
+            "new": 0.03
+          }
+        ]
+      }
+    ],
+    "may_change": false
+  },
+  "trend": {
+    "interval_ms": 10000,
+    "points": [
+      {
+        "sampled_at_us": 1767323080000001,
+        "waiting": 120,
+        "longest_wait_us": 95000000,
+        "resolved_last_minute": 98,
+        "teams": 4,
+        "operators_in_teams": 61,
+        "operators_online": 180
+      },
+      {
+        "sampled_at_us": 1767323090000001,
+        "waiting": 127,
+        "longest_wait_us": 105000000,
+        "resolved_last_minute": 97,
+        "teams": 4,
+        "operators_in_teams": 62,
+        "operators_online": 180
+      },
+      {
+        "sampled_at_us": 1767323100000001,
+        "waiting": 134,
+        "longest_wait_us": 115000000,
+        "resolved_last_minute": 96,
+        "teams": 4,
+        "operators_in_teams": 63,
+        "operators_online": 180
+      }
+    ]
+  }
+}
