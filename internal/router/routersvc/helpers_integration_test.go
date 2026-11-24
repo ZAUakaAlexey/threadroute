@@ -16,11 +16,10 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/testcontainers/testcontainers-go"
-	"github.com/testcontainers/testcontainers-go/wait"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/bus"
+	"github.com/ZAUakaAlexey/threadroute/internal/bus/kafkatest"
 	"github.com/ZAUakaAlexey/threadroute/internal/event"
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg"
@@ -28,70 +27,11 @@ import (
 	"github.com/ZAUakaAlexey/threadroute/internal/router/opclient"
 )
 
-// kafkaImage is the same broker as in deploy/compose.yaml.
-const kafkaImage = "apache/kafka:4.4.0"
-
-const (
-	kafkaHostPort  = "19092/tcp"
-	advertisedFile = "/tmp/advertised-listeners"
-)
-
-// startKafka starts one Apache Kafka node in KRaft combined mode and
-// returns its bootstrap address. It is the same setup as in
-// internal/conv/integration_test.go.
+// startKafka starts one Apache Kafka node and returns its bootstrap
+// address.
 func startKafka(t *testing.T) string {
 	t.Helper()
-	ctx := t.Context()
-	ctr, err := testcontainers.Run(ctx, kafkaImage,
-		testcontainers.WithExposedPorts(kafkaHostPort),
-		testcontainers.WithEnv(map[string]string{
-			"KAFKA_NODE_ID":                                  "1",
-			"KAFKA_PROCESS_ROLES":                            "broker,controller",
-			"KAFKA_LISTENERS":                                "INTERNAL://:9092,CONTROLLER://:9093,HOST://:19092",
-			"KAFKA_LISTENER_SECURITY_PROTOCOL_MAP":           "INTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT,HOST:PLAINTEXT",
-			"KAFKA_INTER_BROKER_LISTENER_NAME":               "INTERNAL",
-			"KAFKA_CONTROLLER_LISTENER_NAMES":                "CONTROLLER",
-			"KAFKA_CONTROLLER_QUORUM_VOTERS":                 "1@localhost:9093",
-			"KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR":         "1",
-			"KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR": "1",
-			"KAFKA_TRANSACTION_STATE_LOG_MIN_ISR":            "1",
-			"KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS":         "0",
-			"KAFKA_AUTO_CREATE_TOPICS_ENABLE":                "false",
-			"KAFKA_HEAP_OPTS":                                "-Xmx512m -Xms512m",
-		}),
-		testcontainers.WithEntrypoint("sh", "-c",
-			"while [ ! -f "+advertisedFile+" ]; do sleep 0.1; done; "+
-				`export KAFKA_ADVERTISED_LISTENERS="$(cat `+advertisedFile+`)"; `+
-				"exec /etc/kafka/docker/run"),
-		testcontainers.WithLifecycleHooks(testcontainers.ContainerLifecycleHooks{
-			PostStarts: []testcontainers.ContainerHook{
-				func(ctx context.Context, c testcontainers.Container) error {
-					if err := wait.ForMappedPort(kafkaHostPort).WaitUntilReady(ctx, c); err != nil {
-						return err
-					}
-					endpoint, err := c.PortEndpoint(ctx, kafkaHostPort, "HOST")
-					if err != nil {
-						return err
-					}
-					listeners := "INTERNAL://localhost:9092," + endpoint
-					if err := c.CopyToContainer(ctx, []byte(listeners), advertisedFile, 0o644); err != nil {
-						return err
-					}
-					return wait.ForLog("Kafka Server started").
-						WithStartupTimeout(2*time.Minute).WaitUntilReady(ctx, c)
-				},
-			},
-		}),
-	)
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start %s: %v", kafkaImage, err)
-	}
-	addr, err := ctr.PortEndpoint(ctx, kafkaHostPort, "")
-	if err != nil {
-		t.Fatalf("kafka endpoint: %v", err)
-	}
-	return addr
+	return kafkatest.Start(t)
 }
 
 // harness is one Kafka and one PostgreSQL shared by the scenarios.

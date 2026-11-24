@@ -3,9 +3,10 @@
 // Package pgtest starts a real PostgreSQL for integration tests through
 // Testcontainers. It is built only with the integration build tag.
 //
-// The other integration helpers of this project (startKafka, startRedis)
+// Most other integration helpers of this project (startKafka, startRedis)
 // are copied into each package that needs them, because they are short.
-// This one is a package instead, because it must stay in step with the
+// The router service and the simulator share internal/bus/kafkatest. This
+// one is a package, because it must stay in step with the
 // migrations in internal/pg, and the router and later services all need a
 // migrated database.
 //
