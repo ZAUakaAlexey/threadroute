@@ -493,9 +493,15 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       }
       case 'teams': {
         // Many dedicated teams, for the layout of the teams panel.
-        world.addTeams(typeof body.count === 'number' ? body.count : 60, now);
+        world.addTeams(typeof body.count === 'number' ? body.count : 60, now, typeof body.size === 'number' ? body.size : undefined);
         for (const conn of connections) sendState(conn, false);
         return { ok: true, teams: world.teams.size };
+      }
+      case 'languages': {
+        // Empty queues for many languages, for the layout of the queues panel.
+        world.addLanguages(typeof body.count === 'number' ? body.count : 30);
+        for (const conn of connections) sendState(conn, false);
+        return { ok: true, queues: world.queueRows().length };
       }
       case 'rekey':
         world.rekey();

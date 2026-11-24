@@ -6,6 +6,11 @@ import { createHmac } from 'node:crypto';
 import type { Rng } from './rng.ts';
 
 export const LANGUAGES = ['en', 'de', 'es', 'ja', 'pt', 'und'] as const;
+/** Languages of the empty queues that the "languages" control adds. */
+export const EXTRA_LANGUAGES: readonly string[] = [
+  'fr', 'nl', 'it', 'pl', 'sv', 'da', 'fi', 'nb', 'cs', 'el', 'hu', 'tr', 'uk', 'ar', 'ko',
+  'vi', 'th', 'ca', 'ga', 'is', 'cy', 'sr', 'ro', 'bg', 'hr', 'sk', 'sl', 'et', 'lv', 'lt',
+];
 const LANGUAGE_WEIGHTS = [44, 12, 12, 14, 8, 10];
 
 export function pickLanguage(rng: Rng): string {

@@ -3,7 +3,8 @@
 // they stand still. They have role "timer", which screen readers do not
 // announce on every change.
 
-import { formatDuration, formatShortDuration, spokenDuration } from '../lib/format.ts';
+import { formatDuration, spokenDuration } from '../lib/format.ts';
+import { ShortDuration } from '../ui/short-duration.tsx';
 import { useElapsedUs, useRemainingUs } from './hooks.ts';
 
 type TimerTone = 'neutral' | 'wait' | 'late' | 'done' | 'accent';
@@ -29,9 +30,18 @@ interface ElapsedProps extends TimerProps {
 
 export function Elapsed({ sinceUs, label, className = '', format = 'clock' }: ElapsedProps) {
   const elapsed = useElapsedUs(sinceUs);
+  const spoken = `${label}: ${spokenDuration(elapsed)}`;
+  if (format === 'short') {
+    // Only the number is mono, so the space before the unit has its normal width.
+    return (
+      <span role="timer" aria-label={spoken} className={`whitespace-nowrap ${className}`}>
+        <ShortDuration us={elapsed} />
+      </span>
+    );
+  }
   return (
-    <span role="timer" aria-label={`${label}: ${spokenDuration(elapsed)}`} className={`font-mono tnum ${className}`}>
-      {format === 'clock' ? formatDuration(elapsed) : formatShortDuration(elapsed)}
+    <span role="timer" aria-label={spoken} className={`font-mono tnum ${className}`}>
+      {formatDuration(elapsed)}
     </span>
   );
 }

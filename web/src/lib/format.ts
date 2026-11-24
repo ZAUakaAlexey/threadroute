@@ -30,12 +30,27 @@ export function spokenDuration(us: number): string {
   return parts.join(' ');
 }
 
+export interface DurationParts {
+  readonly value: string;
+  readonly unit: 's' | 'min' | 'h';
+}
+
+/**
+ * The number and the unit of a short duration, apart. The screens show the
+ * number in the mono font and the unit in the text font: a space inside a
+ * mono element is as wide as a digit and looks like two spaces.
+ */
+export function shortDurationParts(us: number): DurationParts {
+  const seconds = us / US_PER_SECOND;
+  if (seconds < 90) return { value: Math.round(seconds).toString(), unit: 's' };
+  if (seconds < 5400) return { value: trim(seconds / 60), unit: 'min' };
+  return { value: trim(seconds / 3600), unit: 'h' };
+}
+
 /** Short duration for totals: "8 s", "41 s", "2.5 min", "1.2 h". */
 export function formatShortDuration(us: number): string {
-  const seconds = us / US_PER_SECOND;
-  if (seconds < 90) return `${Math.round(seconds)} s`;
-  if (seconds < 5400) return `${trim(seconds / 60)} min`;
-  return `${trim(seconds / 3600)} h`;
+  const { value, unit } = shortDurationParts(us);
+  return `${value} ${unit}`;
 }
 
 export function formatRate(perSecond: number): string {

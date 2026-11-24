@@ -1,5 +1,5 @@
 import { Shell } from '../../app/shell.tsx';
-import { formatCount, formatRate, formatShortDuration, totalOpen } from '../../lib/format.ts';
+import { formatCount, formatRate, formatShortDuration, shortDurationParts, totalOpen } from '../../lib/format.ts';
 import { useLive } from '../../live/hooks.ts';
 import { LiveSessionProvider } from '../../live/provider.tsx';
 import { ConnectionBanner, LiveStatus, NoticeLine } from '../../live/status-bar.tsx';
@@ -46,6 +46,7 @@ function FlowPanel() {
     return <p className="rounded-lg border border-line bg-panel px-4 py-6 text-sm text-ink-3">Waiting for the first numbers.</p>;
   }
   const missed = totals.missed_assignment + totals.missed_first_response;
+  const medianWait = shortDurationParts(totals.wait_p50_us);
   return (
     <section aria-label="Flow" className="flex flex-col gap-3">
       <StatGrid label="Flow totals">
@@ -61,7 +62,8 @@ function FlowPanel() {
         />
         <Stat
           label="Wait, median"
-          value={formatShortDuration(totals.wait_p50_us)}
+          value={medianWait.value}
+          unit={medianWait.unit}
           detail={`90th percentile ${formatShortDuration(totals.wait_p90_us)}`}
         />
       </StatGrid>

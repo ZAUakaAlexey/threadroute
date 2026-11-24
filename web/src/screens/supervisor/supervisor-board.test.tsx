@@ -7,6 +7,13 @@ import { SupervisorBoard } from './supervisor-screen.tsx';
 
 const ALICE_BOB = 'did:plc:testalice0000000000000000|did:plc:testbob000000000000000000';
 
+/** The rows of the teams list, without the member lists inside them. */
+function teamRows(list: HTMLElement): HTMLElement[] {
+  return within(list)
+    .getAllByRole('listitem')
+    .filter((li) => li.parentElement === list);
+}
+
 function start() {
   const h = renderLive('supervisor', <SupervisorBoard />);
   h.push(readFixture('server_state_supervisor_snapshot_full.json'));
@@ -60,7 +67,8 @@ describe('supervisor board', () => {
   it('says operator and conversation in the singular for one and in the plural otherwise', () => {
     const h = start();
     const list = screen.getByRole('list', { name: 'Dedicated teams' });
-    expect(within(list).getByRole('listitem')).toHaveTextContent('2 operators, 21 active conversations');
+    expect(teamRows(list)).toHaveLength(1);
+    expect(teamRows(list)[0]).toHaveTextContent('2 operators, 21 active conversations');
     h.push({
       type: 'state',
       seq: 2,
@@ -73,7 +81,7 @@ describe('supervisor board', () => {
         ],
       },
     });
-    const [one, none] = within(list).getAllByRole('listitem');
+    const [one, none] = teamRows(list);
     expect(one).toHaveTextContent('1 operator, 1 active conversation');
     expect(one).not.toHaveTextContent('operators');
     expect(none).toHaveTextContent('0 operators, 0 active conversations');
@@ -92,5 +100,50 @@ describe('supervisor board', () => {
     expect(screen.getByText('1 company')).toBeInTheDocument();
     h.push({ type: 'state', seq: 2, snapshot: false, server_time_us: Date.now() * 1000, teams: { remove: ['did:plc:testalice0000000000000000'] } });
     expect(screen.getByText('No company has a dedicated team right now.')).toBeInTheDocument();
+  });
+
+  it('shows the age of a team with one normal space before the unit', () => {
+    const h = start();
+    // The welcome of the fixture has speed factor 50: 4.2 h of model time
+    // are 302.4 s of machine time.
+    const formed = (Date.now() - (4.2 * 3600 * 1000) / 50) * 1000;
+    h.push({
+      type: 'state',
+      seq: 2,
+      snapshot: false,
+      server_time_us: Date.now() * 1000,
+      teams: { set: [{ id: 'did:plc:testalice0000000000000000', members: ['sim-op-0001'], active_load: 1, formed_at_us: formed }] },
+    });
+    const timer = screen.getByRole('timer', { name: /^Team age/ });
+    expect(timer.textContent).toBe('4.2 h');
+    // Only the number is in the mono font; the space and the unit are not.
+    const mono = timer.querySelector('.font-mono');
+    expect(mono?.textContent).toBe('4.2');
+    expect(timer.closest('span:not([role])')?.textContent).toBe('formed 4.2 h ago');
+  });
+
+  it('bounds the member list of a large team and opens the full list on request', async () => {
+    const h = start();
+    const members = Array.from({ length: 20 }, (_, i) => `sim-op-${(i + 1).toString().padStart(4, '0')}`);
+    h.push({
+      type: 'state',
+      seq: 2,
+      snapshot: false,
+      server_time_us: Date.now() * 1000,
+      teams: { set: [{ id: 'did:plc:testalice0000000000000000', members, active_load: 191, formed_at_us: Date.now() * 1000 }] },
+    });
+    const list = screen.getByRole('list', { name: 'Dedicated teams' });
+    expect(teamRows(list)[0]).toHaveTextContent('20 operators, 191 active conversations');
+    const memberList = screen.getByRole('list', { name: 'Members of did:plc:testalice0000000000000000' });
+    const more = within(memberList).getByRole('button', { name: '+15 more members of did:plc:testalice0000000000000000' });
+    expect(more).toHaveAttribute('aria-expanded', 'false');
+    expect(within(memberList).queryByText('sim-op-0006')).not.toBeInTheDocument();
+
+    await userEvent.click(more);
+    expect(within(memberList).getByText('sim-op-0020')).toBeInTheDocument();
+    const fewer = within(memberList).getByRole('button', { name: /^show fewer/ });
+    expect(fewer).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(fewer);
+    expect(within(memberList).queryByText('sim-op-0020')).not.toBeInTheDocument();
   });
 });

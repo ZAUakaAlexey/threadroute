@@ -5,29 +5,44 @@ import { Elapsed } from '../../live/timers.tsx';
 import { languageName } from '../../ui/lang.ts';
 import { Panel } from '../../ui/panel.tsx';
 
+// The table stops at 420px (the column header and about ten and a half rows,
+// the same cap as the operators table) and scrolls under its sticky column
+// header. At 1400 x 900 the panel then ends above the bottom of the window.
+// The half row at the bottom shows that there is more. With few languages the
+// table is only as high as its rows. The teams panel next to it takes this
+// height.
+// The focus ring sits just outside the area: inside it, the sticky column
+// header would cover its top edge.
+const SCROLL = 'max-h-[420px] overflow-auto focus-visible:outline-offset-0';
+// The line under the column header is a shadow: a border of a sticky cell
+// scrolls away with the collapsed table borders.
+const HEAD = 'eyebrow sticky top-0 bg-panel px-4 py-2 font-normal shadow-[inset_0_-1px_0_var(--line)]';
+
 export function QueuesPanel() {
   const queues = useLive(selectQueues);
   const target = useLive((s) => s.welcome?.assignment_target_us ?? null);
 
   return (
     <Panel title="Queues by language" meta={target === null ? undefined : `assignment target ${Math.round(target / 1_000_000)} s`}>
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[520px] text-sm">
+      {/* The region is focusable so that a keyboard can scroll it. */}
+      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
+      <div role="group" aria-label="Queues by language, scrollable" tabIndex={0} className={SCROLL}>
+        <table aria-label="Queues by language" className="w-full min-w-[520px] text-sm">
           <thead>
-            <tr className="border-b border-line text-left">
-              <th scope="col" className="eyebrow px-4 py-2 font-normal">
+            <tr className="text-left">
+              <th scope="col" className={HEAD}>
                 Language
               </th>
-              <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
+              <th scope="col" className={`${HEAD} text-right`}>
                 Waiting
               </th>
-              <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
+              <th scope="col" className={`${HEAD} text-right`}>
                 Offered
               </th>
-              <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
+              <th scope="col" className={`${HEAD} text-right`}>
                 Oldest wait
               </th>
-              <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
+              <th scope="col" className={`${HEAD} text-right`}>
                 Missed
               </th>
             </tr>

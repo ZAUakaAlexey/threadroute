@@ -32,14 +32,28 @@ for (const colorScheme of ['light', 'dark'] as const) {
       await expectNoViolations(page);
     });
 
-    test('supervisor view with a long, scrolling teams list', async ({ page }) => {
+    test('supervisor view with long, scrolling queues and teams lists', async ({ page }) => {
       await page.setViewportSize({ width: 1400, height: 900 });
       await page.goto('#/supervisor');
+      await control('teams', { count: 1, size: 20 });
       await control('teams', { count: 60 });
-      await expect(page.getByText('62 companies')).toBeVisible();
+      await control('languages', { count: 30 });
+      await expect(page.getByText('63 companies')).toBeVisible();
+      await expect(page.getByRole('table', { name: 'Queues by language' }).getByRole('row')).toHaveCount(37);
       await expect(page.getByRole('table', { name: 'Conversations' }).getByRole('row').nth(3)).toBeVisible();
       await expectNoViolations(page);
       await page.getByLabel('Filter by language').focus();
+      await expectNoViolations(page);
+      // The scroll areas are reachable with the keyboard and keep their names.
+      const queues = page.getByRole('group', { name: 'Queues by language, scrollable' });
+      await queues.focus();
+      await expect(queues).toBeFocused();
+      await page.keyboard.press('End');
+      await expectNoViolations(page);
+      const more = page.getByRole('button', { name: /^\+15 more members of/ });
+      await more.focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('button', { name: /^show fewer members of/ })).toBeFocused();
       await expectNoViolations(page);
     });
 

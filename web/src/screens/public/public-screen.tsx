@@ -4,11 +4,12 @@ import { useState } from 'react';
 import { ROUTES } from '../../app/route.ts';
 import { Shell } from '../../app/shell.tsx';
 import { loadConfig, type ConsoleConfig } from '../../config.ts';
-import { formatCount, formatRate, formatShortDuration, totalOpen } from '../../lib/format.ts';
+import { formatCount, formatRate, formatShortDuration, shortDurationParts, totalOpen } from '../../lib/format.ts';
 import type { PublicSnapshot } from '../../protocol/types.ts';
 import { AlertIcon, ArrowRightIcon } from '../../ui/icons.tsx';
 import { languageName } from '../../ui/lang.ts';
 import { Panel } from '../../ui/panel.tsx';
+import { ShortDuration } from '../../ui/short-duration.tsx';
 import { Meter, Stat, StatGrid, StateBar } from '../../ui/stats.tsx';
 import { publicSnapshotQuery } from './snapshot-query.ts';
 
@@ -95,6 +96,7 @@ function Intro() {
 
 function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
   const t = snapshot.totals;
+  const typicalWait = shortDurationParts(t.wait_p50_us);
   return (
     <>
       <StatGrid label="Totals">
@@ -107,7 +109,12 @@ function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
           unit={`/ ${formatCount(t.slots_capacity)}`}
           detail={<Meter value={t.slots_used} max={Math.max(1, t.slots_capacity)} label="Slots in use against capacity" />}
         />
-        <Stat label="Typical wait" value={formatShortDuration(t.wait_p50_us)} detail={`90 percent within ${formatShortDuration(t.wait_p90_us)}`} />
+        <Stat
+          label="Typical wait"
+          value={typicalWait.value}
+          unit={typicalWait.unit}
+          detail={`90 percent within ${formatShortDuration(t.wait_p90_us)}`}
+        />
         <Stat
           label="Missed targets"
           value={formatCount(t.missed_assignment + t.missed_first_response)}
@@ -152,7 +159,9 @@ function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
                     </th>
                     <td className={`px-4 py-2 text-right font-mono tnum ${q.waiting > 0 ? 'text-wait' : 'text-ink-3'}`}>{formatCount(q.waiting)}</td>
                     <td className="px-4 py-2 text-right font-mono tnum">{formatCount(q.offered)}</td>
-                    <td className="px-4 py-2 text-right font-mono tnum">{q.oldest_wait_us === 0 ? '-' : formatShortDuration(q.oldest_wait_us)}</td>
+                    <td className="px-4 py-2 text-right whitespace-nowrap">
+                      {q.oldest_wait_us === 0 ? <span className="font-mono">-</span> : <ShortDuration us={q.oldest_wait_us} />}
+                    </td>
                     <td className={`px-4 py-2 text-right font-mono tnum ${q.missed_assignment > 0 ? 'font-medium text-late' : 'text-ink-3'}`}>
                       {formatCount(q.missed_assignment)}
                     </td>
