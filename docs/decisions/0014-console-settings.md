@@ -144,10 +144,10 @@ Point 7A replaces "the first message after the connection opens" (point 5C of de
 
 ## Details that follow
 
-- **The environment gives the defaults, the store gives the current values.** The team values of the router environment and the values the simulator reports are the defaults. Until the first change the environment values are in effect. After it the stored set wins, also over a new environment value at a restart. "Reset to defaults" in the console brings the environment values back.
+- **The environment gives the defaults, the store gives the current values.** The team values of the router environment and the values the simulator reports are the defaults. While nothing is stored, the environment values are in effect. The first report of the simulator already stores the whole set, so in practice this happens at the first start. From then on the stored set wins, also over a new environment value at a restart: a new value in the environment only becomes the new default. "Reset to defaults" in the console brings the environment values back.
 - **A router whose environment values are outside the bounds** runs with them as before and does not offer the settings to the console.
 - **The change log keeps the changed fields** with the old and the new value, the time and a short label of who changed them. The label is shown only to connections that may change settings.
-- **Everyone sees the current values** on both screens. The trends are on the supervisor screen.
+- **Everyone sees the current values** in the settings panel of the supervisor screen. The trends are on the same screen. The help texts of both screens use the current values.
 
 ## Protocol changes
 
