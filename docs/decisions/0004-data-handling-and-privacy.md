@@ -19,6 +19,7 @@ This project is a personal, non-commercial demo. It does not need post text for 
 | `events` topic | normalised message events with post text and author IDs | 6 hours (decision 0006) |
 | `events.control` topic | deletions and author removals: IDs only, no text | 6 hours |
 | `conversations` topic | conversation events: IDs, language, counters and times, no text | 24 hours |
+| `routing` topic | routing events: author IDs, operator IDs (synthetic), language, times and counters, no text | 24 hours (decision 0009) |
 | Redis | open conversations and recent message text | until the conversation closes plus 10 minutes (decision 0007), removed at once on a deletion event |
 | PostgreSQL | conversation and routing metadata, no post text | kept for statistics |
 | Recordings for load tests | source events with post text and author IDs | private, 14 days, see below |

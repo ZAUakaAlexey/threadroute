@@ -17,6 +17,13 @@ The router exposes an HTTP API for operator actions: go online or offline, accep
 - Every action is checked against the current state in the database, so a late or repeated call cannot break it: accepting an expired offer fails cleanly, resolving twice does nothing.
 - The API is not reachable from the internet in stage 3. Authentication with the site's tokens is added with the gateway in stage 4.
 
+### Details fixed before implementation
+
+- **Offer identity.** Every offer has its own ID. Accept, refuse, reply and resolve name the operator and the offer ID, so a late call about an old offer can never act on a newer one. After an accept the same ID names the assignment.
+- **Three outcomes.** A call answers "done", "already done" (a repeat, nothing changed) or a rejection with a reason code (the state moved on, for example the offer expired or the conversation was closed). Resolving a conversation that `conv` has already closed is a rejection, not "already done", because the operator did not end it.
+- **Replies.** A reply marker carries an ID chosen by the caller, so a repeated call does not record a second reply.
+- **Operators.** The simulator creates its operators through the API at start. A new operator is offline.
+
 ### How operators learn about offers
 
 Operators are told through the `routing` topic (decision 0009). The simulator consumes it. In stage 4 the gateway consumes it and pushes to browsers.
