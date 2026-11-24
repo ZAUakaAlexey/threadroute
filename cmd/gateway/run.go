@@ -23,9 +23,14 @@ import (
 // Order: metrics server (not ready), then the gateway service, which
 // listens at once, reads the router settings, reads both topics from the
 // beginning and reports ready when it has caught up.
+//
+// The local role is logged as a warning once here: every connection gets
+// it. Config validation already refused it unless every allowed origin is
+// a loopback origin.
 func run(ctx context.Context, cfg gateway.Config, logger *slog.Logger, reg *prometheus.Registry) error {
 	// The Redis password, the site API URL query and tokens are never
-	// logged; the site API is named by its host only.
+	// logged; the site API is named by its host only. The name of the site
+	// cookie is logged, its value never.
 	siteHost := ""
 	if u, err := url.Parse(cfg.SiteAPIURL); err == nil {
 		siteHost = u.Host
@@ -40,6 +45,9 @@ func run(ctx context.Context, cfg gateway.Config, logger *slog.Logger, reg *prom
 		"router_url", cfg.RouterURL,
 		"site_api_host", siteHost,
 		"full_roles", len(cfg.FullRoles),
+		"settings_roles", len(cfg.SettingsRoles),
+		"site_cookie", cfg.SiteCookie,
+		"local_role", cfg.LocalRole != "",
 		"allowed_origins", cfg.AllowedOrigins,
 		"trust_proxy", cfg.TrustProxy,
 		"demo_operators", cfg.DemoOperators,
@@ -49,7 +57,12 @@ func run(ctx context.Context, cfg gateway.Config, logger *slog.Logger, reg *prom
 		"offline_grace", cfg.OfflineGrace.String(),
 		"forget_after", cfg.ForgetAfter.String(),
 	)
-	if cfg.SiteAPIURL == "" {
+	switch {
+	case cfg.LocalRole != "":
+		// Decision 0014, point L1: only for a stand on a developer machine.
+		logger.Warn("local role is set: every connection gets this role, the site API is not asked",
+			"role", cfg.LocalRole, "allowed_origins", cfg.AllowedOrigins)
+	case cfg.SiteAPIURL == "":
 		logger.Warn("no site API URL: every connection gets the demo level")
 	}
 
@@ -77,11 +90,12 @@ func run(ctx context.Context, cfg gateway.Config, logger *slog.Logger, reg *prom
 	if err != nil {
 		return err
 	}
-	api, err := opclient.New(cfg.RouterURL, opclient.WithTimeout(cfg.RouterTimeout))
+	api, err := opclient.New(cfg.RouterURL, opclient.WithTimeout(cfg.RouterTimeout), opclient.WithLogger(logger))
 	if err != nil {
 		return err
 	}
-	auth := gateway.NewSiteChecker(cfg.SiteAPIURL, cfg.FullRoles, cfg.SiteAPITimeout, cfg.SiteAPICache, nil, nil)
+	roles := gateway.Roles{Full: cfg.FullRoles, Settings: cfg.SettingsRoles}
+	auth := gateway.NewSiteChecker(cfg.SiteAPIURL, roles, cfg.SiteAPITimeout, cfg.SiteAPICache, nil, nil)
 
 	svc, err := gateway.NewService(ctx, gateway.ServiceOptions{
 		Config: cfg, API: api, Auth: auth, Text: text, Logger: logger, Registerer: reg,

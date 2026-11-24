@@ -15,7 +15,10 @@
 //   - registry: the human operators this gateway created through the
 //     router API (decision 0012, point 4B).
 //   - SiteChecker: the token check with the site API (decision 0012, point
-//     1B).
+//     1B). identify decides who the caller is (decision 0014, point 7).
+//   - settings.go: the router settings with the stand settings block, and
+//     change_settings (decision 0014).
+//   - trend.go: the trend strip (decision 0014, point 5A).
 //
 // # Privacy
 //
@@ -72,7 +75,26 @@ type Gateway struct {
 	ops    *registry
 	limits *connLimits
 
+	// roles give the level and the right of the local role.
+	roles Roles
+	// originPatterns are Config.AllowedOrigins as patterns of
+	// coder/websocket.
+	originPatterns []string
+
+	// settings are the router settings with the stand block, swapped in
+	// one step (see settings.go).
 	settings atomic.Pointer[opapi.Settings]
+	// settingsSeq numbers the reads of the router settings.
+	settingsSeq atomic.Uint64
+
+	// pushMu orders the swaps of the settings, the trend points, the
+	// pushes of both and the registration of a client.
+	pushMu sync.Mutex
+	// appliedSeq is the number of the last swapped settings.
+	appliedSeq uint64
+	// trend holds the trend points, oldest first.
+	trend []gwapi.TrendPoint
+
 	// conns owns the goroutine of every connection.
 	conns sync.WaitGroup
 }
@@ -102,14 +124,13 @@ func New(d Deps) (*Gateway, error) {
 	g := &Gateway{
 		cfg: d.Config, view: d.View, api: d.API, auth: d.Auth, text: d.Text, clock: d.Clock,
 		logger: d.Logger, m: m, ps: ps, hub: newHub(d.View, ps, m),
-		limits: newConnLimits(d.Config.MaxConnections, d.Config.MaxConnsPerAddr),
+		limits:         newConnLimits(d.Config.MaxConnections, d.Config.MaxConnsPerAddr),
+		roles:          Roles{Full: d.Config.FullRoles, Settings: d.Config.SettingsRoles},
+		originPatterns: originPatterns(d.Config),
 	}
 	g.ops = newRegistry(d.API, d.Clock, d.Config.OfflineGrace, d.Config.DemoOperators, d.Logger, m)
 	return g, nil
 }
-
-// SetSettings stores the router settings.
-func (g *Gateway) SetSettings(s opapi.Settings) { g.settings.Store(&s) }
 
 // timing returns what the view needs of the router settings.
 func (g *Gateway) timing() Timing {
@@ -173,7 +194,52 @@ func (g *Gateway) Status() gwapi.Status { return g.hub.currentStatus() }
 // Serve runs one WebSocket connection until it ends. ctx ends every
 // connection with "going away". addr is the client address for the
 // limits; Serve releases it at the end.
-func (g *Gateway) Serve(ctx context.Context, conn Conn, addr string) {
+func (g *Gateway) Serve(ctx context.Context, conn Conn, addr string) { g.serve(ctx, conn, addr, "") }
+
+// identity sources, the label of identities_total.
+const (
+	sourceLocal  = "local"
+	sourceCookie = "cookie"
+	sourceToken  = "token"
+	sourceNone   = "none"
+)
+
+// identify decides who the caller is (decision 0014, point 7). The first
+// rule that applies wins:
+//
+//  1. The local role (Config.LocalRole): every connection gets it, the
+//     site API is not called, and the cookie and Hello.Token are not read.
+//  2. The site cookie of the opening request, when it is set and not
+//     empty. A cookie that the site does not confirm gives the demo level;
+//     Hello.Token is not tried then. A cookie longer than
+//     gwapi.MaxTokenBytes is not sent to the site and gives the demo level.
+//  3. Hello.Token.
+//  4. Nothing: anonymous, the demo level.
+//
+// The level and the right are decided here once for the life of the
+// connection.
+func (g *Gateway) identify(ctx context.Context, cookie, token string) (Identity, CheckOutcome, string) {
+	switch {
+	case g.cfg.LocalRole != "":
+		id := g.roles.identity(0, g.cfg.LocalRole)
+		id.Local = true
+		return id, CheckLocal, sourceLocal
+	case cookie != "":
+		if len(cookie) > gwapi.MaxTokenBytes {
+			return Anonymous, CheckMalformed, sourceCookie
+		}
+		id, outcome := g.auth.Check(ctx, cookie)
+		return id, outcome, sourceCookie
+	case token != "":
+		id, outcome := g.auth.Check(ctx, token)
+		return id, outcome, sourceToken
+	}
+	return Anonymous, CheckNoToken, sourceNone
+}
+
+// serve is Serve with the value of the site cookie of the opening request,
+// "" when there is none. The caller has checked the origin.
+func (g *Gateway) serve(ctx context.Context, conn Conn, addr, cookie string) {
 	defer g.limits.release(addr)
 	ok, code, reason := g.limits.check(addr)
 	if !ok {
@@ -188,9 +254,10 @@ func (g *Gateway) Serve(ctx context.Context, conn Conn, addr string) {
 		return
 	}
 
-	ident, outcome := g.auth.Check(ctx, hello.Token)
+	ident, outcome, source := g.identify(ctx, cookie, hello.Token)
 	g.m.siteCalls.WithLabelValues(string(outcome)).Inc()
-	aud := gwapi.Audience{Level: ident.Level, View: hello.View}
+	g.m.identities.WithLabelValues(source).Inc()
+	aud := gwapi.Audience{Level: ident.Level, View: hello.View, MayChangeSettings: ident.MayChangeSettings}
 	welcome, ok := g.welcome(aud)
 	if !ok {
 		g.m.closed.WithLabelValues(reasonTryLater).Inc()
@@ -222,10 +289,18 @@ func (g *Gateway) Serve(ctx context.Context, conn Conn, addr string) {
 		defer g.ops.Detach(ar.sess, c)
 	}
 
-	// Registered before the snapshot is read, so no change is lost.
+	// Registered before the snapshot is read, so no change is lost. The
+	// stand block and the trend history are taken at the registration, so
+	// every later push reaches the client.
 	c.needSnap = true
-	status := g.hub.add(c)
+	status, stand, points := g.register(c)
 	defer g.hub.remove(c)
+	if stand != nil {
+		welcome.Settings = settingsBlock(stand, aud.MayChangeSettings)
+	}
+	if aud.View == gwapi.ViewSupervisor {
+		welcome.Trend = &gwapi.Trend{IntervalMS: trendIntervalMS, Points: points}
+	}
 	if !c.writeMsg(welcome) || !c.writeMsg(status) || !c.flushState() {
 		c.closeWith(gwapi.CloseGoingAway, reasonGone)
 		c.wg.Wait()

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"net/url"
 	"path"
 	"strconv"
@@ -37,6 +38,9 @@ const (
 	EnvSiteAPITimeout    = Prefix + "GATEWAY_SITE_API_TIMEOUT"
 	EnvSiteAPICache      = Prefix + "GATEWAY_SITE_API_CACHE"
 	EnvFullRoles         = Prefix + "GATEWAY_FULL_ROLES"
+	EnvSettingsRoles     = Prefix + "GATEWAY_SETTINGS_ROLES"
+	EnvSiteCookie        = Prefix + "GATEWAY_SITE_COOKIE"
+	EnvLocalRole         = Prefix + "GATEWAY_LOCAL_ROLE"
 	EnvAllowedOrigins    = Prefix + "GATEWAY_ALLOWED_ORIGINS"
 	EnvTrustProxy        = Prefix + "GATEWAY_TRUST_PROXY"
 	EnvDemoOperators     = Prefix + "GATEWAY_DEMO_OPERATORS"
@@ -129,6 +133,20 @@ type Config struct {
 	SiteAPICache time.Duration
 	// FullRoles are the role names of the site that get the full level.
 	FullRoles []string
+	// SettingsRoles are the role names of the site that may change the
+	// stand settings (decision 0014, point 6B). The list does not depend on
+	// FullRoles: a role can be in either list, in both or in none.
+	SettingsRoles []string
+	// SiteCookie is the name of the sign-in cookie of the site (decision
+	// 0014, point 7A). When it is set and the WebSocket opening request
+	// carries the cookie, its value is checked as the site token, before
+	// Hello.Token. Empty turns the cookie off. The value is never logged.
+	SiteCookie string
+	// LocalRole gives every connection this site role, without the site API
+	// (decision 0014, point L1), for a stand on a developer machine. It is
+	// valid only when every allowed origin is an exact loopback origin (see
+	// checkLoopbackOrigin). Empty turns it off.
+	LocalRole string
 	// AllowedOrigins are host patterns (path.Match syntax, with an
 	// optional "scheme://") of browser origins that may open the
 	// WebSocket. The host of the gateway itself is always allowed.
@@ -217,6 +235,19 @@ func (c Config) Validate() error {
 			add("allowed origin %q: %v", p, err)
 		}
 	}
+	if err := checkCookieName(c.SiteCookie); c.SiteCookie != "" && err != nil {
+		add("site cookie: %v", err)
+	}
+	if c.LocalRole != "" {
+		if strings.ContainsRune(c.LocalRole, ',') {
+			add("local role %q holds a comma", c.LocalRole)
+		}
+		for _, p := range c.AllowedOrigins {
+			if err := checkLoopbackOrigin(p); err != nil {
+				add("local role needs loopback origins only: allowed origin %q: %v", p, err)
+			}
+		}
+	}
 	for _, d := range []struct {
 		name string
 		v    time.Duration
@@ -274,6 +305,9 @@ func Load(lookup LookupFunc) (Config, error) {
 		SiteAPITimeout:    r.duration(EnvSiteAPITimeout, d.SiteAPITimeout),
 		SiteAPICache:      r.duration(EnvSiteAPICache, d.SiteAPICache),
 		FullRoles:         r.list(EnvFullRoles, ""),
+		SettingsRoles:     r.list(EnvSettingsRoles, ""),
+		SiteCookie:        r.cookieName(EnvSiteCookie),
+		LocalRole:         r.word(EnvLocalRole),
 		AllowedOrigins:    r.list(EnvAllowedOrigins, DefaultAllowedOrigins),
 		TrustProxy:        r.boolean(EnvTrustProxy, false),
 		DemoOperators:     r.intBetween(EnvDemoOperators, d.DemoOperators, 0, 10000),
@@ -355,6 +389,24 @@ func (r *reader) list(key, def string) []string {
 		v = def
 	}
 	return splitList(v)
+}
+
+// word returns the trimmed value, or "" when it is unset.
+func (r *reader) word(key string) string {
+	v, _ := r.get(key)
+	return v
+}
+
+func (r *reader) cookieName(key string) string {
+	v, ok := r.get(key)
+	if !ok {
+		return ""
+	}
+	if err := checkCookieName(v); err != nil {
+		r.fail(key, err)
+		return ""
+	}
+	return v
 }
 
 func (r *reader) hostPort(key, def string) string {
@@ -507,4 +559,63 @@ func checkPathPrefix(v string) error {
 		return fmt.Errorf("%q is not a clean path such as /console", v)
 	}
 	return nil
+}
+
+// checkCookieName checks a cookie name: a token of RFC 6265, 1 to 256
+// characters.
+func checkCookieName(v string) error {
+	if v == "" || len(v) > 256 {
+		return fmt.Errorf("%q is not 1 to 256 characters", v)
+	}
+	for i := range len(v) {
+		c := v[i]
+		if c <= 0x20 || c >= 0x7f || strings.IndexByte(`()<>@,;:\"/[]?={}`, c) >= 0 {
+			return fmt.Errorf("%q is not a cookie name", v)
+		}
+	}
+	return nil
+}
+
+// checkLoopbackOrigin accepts exactly one form of an allowed origin for the
+// local role: scheme http or https, a host that is "localhost", an IPv4
+// address in 127.0.0.0/8 or "[::1]", an optional numeric port, and nothing
+// else. A pattern character (other than the brackets of "[::1]"), a path, a
+// user, a query or a fragment is refused, so a pattern can never let a
+// public origin in.
+func checkLoopbackOrigin(p string) error {
+	u, err := url.Parse(p)
+	if err != nil {
+		return errors.New("is not an origin such as http://127.0.0.1:5173")
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Opaque != "" || u.User != nil || u.Path != "" ||
+		u.RawPath != "" || u.ForceQuery || u.RawQuery != "" || u.Fragment != "" || u.Host == "" {
+		return errors.New("is not an origin such as http://127.0.0.1:5173")
+	}
+	if u.Scheme+"://"+u.Host != p {
+		return errors.New("is not written in its plain form, such as http://127.0.0.1:5173")
+	}
+	if port := u.Port(); strings.HasSuffix(u.Host, ":") || port != "" {
+		n, err := strconv.Atoi(port)
+		if err != nil || n < 1 || n > 65535 || strconv.Itoa(n) != port {
+			return errors.New("has an invalid port")
+		}
+	}
+	if !loopbackHost(u.Hostname(), strings.HasPrefix(u.Host, "[")) {
+		return errors.New("is not a loopback host (localhost, 127.0.0.0/8 or [::1])")
+	}
+	return nil
+}
+
+// loopbackHost reports whether host (without port and brackets) is
+// "localhost", an IPv4 address in 127.0.0.0/8 in dotted decimal, or "::1"
+// written in brackets.
+func loopbackHost(host string, bracketed bool) bool {
+	switch {
+	case host == "localhost":
+		return !bracketed
+	case bracketed:
+		return host == "::1"
+	}
+	a, err := netip.ParseAddr(host)
+	return err == nil && a.Is4() && a.IsLoopback() && a.String() == host
 }

@@ -250,6 +250,7 @@ func (s *stack) startGateway() *running {
 	cfg.RouterURL = s.routerURL
 	cfg.SiteAPIURL = s.siteURL
 	cfg.FullRoles = []string{"reviewer"}
+	cfg.SettingsRoles = []string{"reviewer"}
 	cfg.OfflineGrace = itGrace
 	cfg.LogLevel = slog.LevelWarn
 	api, err := opclient.New(cfg.RouterURL, opclient.WithTimeout(5*time.Second))
@@ -263,7 +264,7 @@ func (s *stack) startGateway() *running {
 	ctx, cancel := context.WithCancel(context.WithoutCancel(s.t.Context()))
 	svc, err := NewService(ctx, ServiceOptions{
 		Config: cfg, API: api, Text: text, Logger: itLogger(), Registerer: prometheus.NewRegistry(),
-		Auth: NewSiteChecker(cfg.SiteAPIURL, cfg.FullRoles, time.Second, time.Minute, nil, nil),
+		Auth: NewSiteChecker(cfg.SiteAPIURL, Roles{Full: cfg.FullRoles, Settings: cfg.SettingsRoles}, time.Second, time.Minute, nil, nil),
 	})
 	if err != nil {
 		s.t.Fatal(err)
@@ -322,7 +323,7 @@ func (s *stack) dial(r *running, h gwapi.Hello) *wsClient {
 	if err := json.Unmarshal(b, &cl.w); err != nil || cl.w.Version != 1 {
 		s.t.Fatalf("welcome %s: %v", b, err)
 	}
-	cl.aud = gwapi.Audience{Level: cl.w.Level, View: cl.w.View}
+	cl.aud = audOf(cl.w)
 	return cl
 }
 
@@ -545,6 +546,54 @@ func TestIntegration(t *testing.T) {
 		wantDone(t, "offline", again.action("off", gwapi.ActionOffline, ""))
 	})
 
+	t.Run("StandSettingsWithTheRealRouter", func(t *testing.T) {
+		sup := s.dial(gw, gwapi.Hello{View: gwapi.ViewSupervisor, Token: "full-token"})
+		other := s.dial(gw, gwapi.Hello{View: gwapi.ViewSupervisor})
+		ws := sup.w.Settings
+		if ws == nil || !ws.MayChange || other.w.Settings == nil || other.w.Settings.MayChange {
+			t.Fatalf("welcome settings %+v / %+v", ws, other.w.Settings)
+		}
+		// No simulator runs here: version 0, no sim part, nothing logged.
+		if ws.Version != 0 || ws.Current.Sim != nil || len(ws.Changes) != 0 {
+			t.Fatalf("first settings %+v", ws)
+		}
+		next := cloneSet(ws.Current)
+		next.Teams.MaxShare = 0.3
+		sup.send(gwapi.ChangeSettings{RequestID: "set-1", BaseVersion: 0, Settings: next})
+		var pushed *gwapi.Settings
+		res := sup.until("result set-1", func(m gwapi.ServerMessage) bool {
+			if u, ok := m.(gwapi.SettingsUpdate); ok {
+				pushed = &u.Settings
+			}
+			r, ok := m.(gwapi.Result)
+			return ok && r.RequestID == "set-1"
+		}).(gwapi.Result)
+		if res.Outcome != gwapi.OutcomeDone || pushed == nil || pushed.Version != 1 ||
+			len(pushed.Changes) != 1 || pushed.Changes[0].By != "user:7" || pushed.Current.Teams.MaxShare != 0.3 {
+			t.Fatalf("result %+v after settings %+v", res, pushed)
+		}
+		u := other.until("settings push", func(m gwapi.ServerMessage) bool { _, ok := m.(gwapi.SettingsUpdate); return ok }).(gwapi.SettingsUpdate)
+		if u.Settings.Version != 1 || u.Settings.Changes[0].By != "" {
+			t.Fatalf("push %+v", u.Settings)
+		}
+		// The same set again changes nothing; an old base is a conflict.
+		sup.send(gwapi.ChangeSettings{RequestID: "set-2", BaseVersion: 1, Settings: next})
+		if r := sup.result("set-2"); r.Outcome != gwapi.OutcomeAlreadyDone {
+			t.Fatalf("repeat %+v", r)
+		}
+		sup.send(gwapi.ChangeSettings{RequestID: "set-3", BaseVersion: 0, Settings: next})
+		if r := sup.result("set-3"); r.Code != gwapi.CodeSettingsConflict {
+			t.Fatalf("old base %+v", r)
+		}
+		// One change per 10 seconds for the whole stand.
+		again := cloneSet(next)
+		again.Teams.MaxShare = 0.4
+		sup.send(gwapi.ChangeSettings{RequestID: "set-4", BaseVersion: 1, Settings: again})
+		if r := sup.result("set-4"); r.Code != gwapi.CodeSettingsTooSoon || r.RetryAfterMS < 1 || r.RetryAfterMS > 10000 {
+			t.Fatalf("too soon %+v", r)
+		}
+	})
+
 	t.Run("RestartRebuildsTheView", func(t *testing.T) {
 		s.message(itCompany, itCust3, "it-msg-3", "synthetic question three")
 		waitUntil(t, 30*time.Second, "third conversation in the view", func() bool {
@@ -595,4 +644,150 @@ func TestIntegration(t *testing.T) {
 			return off
 		})
 	})
+}
+
+// TestIntegrationSettingsAndTrend runs the gateway service on a real Kafka
+// with a fake router that offers stand settings (no router package): the
+// trend strip starts only after the view caught up, and a change of the
+// settings over a real WebSocket reaches the other connection at once.
+func TestIntegrationSettingsAndTrend(t *testing.T) {
+	brokers := []string{kafkatest.Start(t)}
+	ctx := context.WithoutCancel(t.Context())
+	prod, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(prod.Close)
+	if err := bus.EnsureTopics(ctx, prod, nil, bus.ConversationsTopicSpec(), bus.RoutingTopicSpec()); err != nil {
+		t.Fatal(err)
+	}
+	// History before the start: 40 operators online, one team of two.
+	const online = 40
+	var recs []*kgo.Record
+	for i := range online {
+		id := fmt.Sprintf("sim-op-%04d", i)
+		b, err := event.MarshalRouting(opEv(event.TypeOperatorOnline, id, 1, time.Now(), event.PresenceOnline))
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs = append(recs, &kgo.Record{Topic: bus.TopicRouting, Key: event.OperatorKey(id), Value: b})
+	}
+	team, err := event.MarshalRouting(teamEv(event.TypeTeamFormed, itCompany, 1, time.Now(), "sim-op-0000", "sim-op-0001"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recs = append(recs, &kgo.Record{Topic: bus.TopicRouting, Key: event.CompanyKey(itCompany), Value: team})
+	if err := prod.ProduceSync(ctx, recs...).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
+
+	api := newFakeAPI()
+	router := newFakeRouter(t, routerStand, api.settings, testStand())
+	api.router = router
+	cfg := DefaultConfig()
+	cfg.KafkaBrokers = brokers
+	cfg.HTTPAddr = "127.0.0.1:0"
+	cfg.LogLevel = slog.LevelWarn
+	svc, err := NewService(ctx, ServiceOptions{
+		Config: cfg, API: api, Auth: fakeAuth{}, Text: &fakeText{}, Logger: itLogger(), Registerer: prometheus.NewRegistry(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	svc.trendEvery = 100 * time.Millisecond
+	runInBackground(t, "gateway", svc.Run)
+	waitUntil(t, 60*time.Second, "gateway ready", svc.Ready)
+	waitUntil(t, 10*time.Second, "trend points", func() bool { return len(svc.g.trendHistory()) >= 3 })
+	for _, p := range svc.g.trendHistory() {
+		if p.OperatorsOnline != online || p.Teams != 1 || p.OperatorsInTeams != 2 {
+			t.Fatalf("a point before the view caught up: %+v", p)
+		}
+	}
+	waitUntil(t, 10*time.Second, "stand settings", func() bool {
+		s := svc.g.settings.Load()
+		return s != nil && s.Stand != nil
+	})
+
+	url := "ws://" + svc.Addr() + gwapi.WebSocketPath
+	type conn struct {
+		c   *websocket.Conn
+		aud gwapi.Audience
+	}
+	open := func(h gwapi.Hello) conn {
+		t.Helper()
+		c, _, err := websocket.Dial(t.Context(), url, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.CloseNow() })
+		c.SetReadLimit(16 << 20)
+		h.Version = gwapi.ProtocolVersion
+		b, _ := gwapi.EncodeClient(h)
+		if err := c.Write(t.Context(), websocket.MessageText, b); err != nil {
+			t.Fatal(err)
+		}
+		_, b, err = c.Read(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var w gwapi.Welcome
+		if err := json.Unmarshal(b, &w); err != nil || w.Settings == nil || w.Trend == nil || len(w.Trend.Points) == 0 {
+			t.Fatalf("welcome %s: %v", b, err)
+		}
+		return conn{c: c, aud: audOf(w)}
+	}
+	// until reads frames, each checked, until fn returns true.
+	until := func(x conn, what string, fn func(m gwapi.ServerMessage) bool) []gwapi.ServerMessage {
+		t.Helper()
+		rctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+		defer cancel()
+		var seen []gwapi.ServerMessage
+		for {
+			_, b, err := x.c.Read(rctx)
+			if err != nil {
+				t.Fatalf("%s: %v", what, err)
+			}
+			m, err := gwapi.DecodeServer(b, x.aud)
+			if err != nil {
+				t.Fatalf("frame %s: %v", b, err)
+			}
+			if fn(m) {
+				return seen
+			}
+			seen = append(seen, m)
+		}
+	}
+	asker := open(gwapi.Hello{View: gwapi.ViewSupervisor, Token: settingsToken})
+	other := open(gwapi.Hello{View: gwapi.ViewSupervisor})
+	until(other, "a trend point", func(m gwapi.ServerMessage) bool { _, ok := m.(gwapi.TrendUpdate); return ok })
+
+	req := change("it-settings", testStand(), func(s *opapi.StandSettings) { s.Teams.MaxShare = 0.3 })
+	b, _ := gwapi.EncodeClient(req)
+	if err := asker.c.Write(t.Context(), websocket.MessageText, b); err != nil {
+		t.Fatal(err)
+	}
+	var res gwapi.Result
+	before := until(asker, "result", func(m gwapi.ServerMessage) bool {
+		r, ok := m.(gwapi.Result)
+		res = r
+		return ok && r.RequestID == "it-settings"
+	})
+	if res.Outcome != gwapi.OutcomeDone {
+		t.Fatalf("result %+v", res)
+	}
+	if ups := settingsUpdates(before); len(ups) != 1 || ups[0].Settings.Version != 4 || ups[0].Settings.Changes[0].By != "user:9" {
+		t.Fatalf("settings before the result: %+v", ups)
+	}
+	var got gwapi.SettingsUpdate
+	until(other, "settings push", func(m gwapi.ServerMessage) bool {
+		u, ok := m.(gwapi.SettingsUpdate)
+		got = u
+		return ok
+	})
+	if got.Settings.Version != 4 || got.Settings.MayChange || got.Settings.Changes[0].By != "" {
+		t.Fatalf("push %+v", got.Settings)
+	}
+	if v := router.version(); v != 4 {
+		t.Fatalf("router version %d", v)
+	}
 }

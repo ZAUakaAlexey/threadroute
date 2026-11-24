@@ -24,6 +24,10 @@ func TestSiteChecker(t *testing.T) {
 			Identity{Level: gwapi.LevelFull, UserID: 42}, CheckFull},
 		{"role not in the list", answer(200, `{"user":{"id":43},"role":{"name":"user"}}`),
 			Identity{Level: gwapi.LevelDemo, UserID: 43}, CheckSignedIn},
+		{"role that may change settings only", answer(200, `{"user":{"id":44},"role":{"name":"guest"}}`),
+			Identity{Level: gwapi.LevelDemo, UserID: 44, MayChangeSettings: true}, CheckSignedIn},
+		{"role in both lists", answer(200, `{"user":{"id":45},"role":{"name":"admin"}}`),
+			Identity{Level: gwapi.LevelFull, UserID: 45, MayChangeSettings: true}, CheckFull},
 		{"rejected", answer(401, `{"error":"x"}`), Anonymous, CheckRejected},
 		{"forbidden", answer(403, ``), Anonymous, CheckRejected},
 		{"server error", answer(500, ``), Anonymous, CheckUnavailable},
@@ -49,7 +53,7 @@ func TestSiteChecker(t *testing.T) {
 				tt.handler(w, r)
 			}))
 			defer srv.Close()
-			c := NewSiteChecker(srv.URL+"/api/v1/users/me", []string{"reviewer", "admin"}, 200*time.Millisecond, time.Minute, nil, nil)
+			c := NewSiteChecker(srv.URL+"/api/v1/users/me", Roles{Full: []string{"reviewer", "admin"}, Settings: []string{"guest", "admin"}}, 200*time.Millisecond, time.Minute, nil, nil)
 			id, outcome := c.Check(t.Context(), siteToken)
 			if id != tt.want || outcome != tt.outcome {
 				t.Errorf("Check() = %+v, %s; want %+v, %s", id, outcome, tt.want, tt.outcome)
@@ -79,7 +83,7 @@ func TestSiteCheckerCache(t *testing.T) {
 	}))
 	defer srv.Close()
 	now := t0
-	c := NewSiteChecker(srv.URL, []string{"reviewer"}, time.Second, time.Minute, nil, func() time.Time { return now })
+	c := NewSiteChecker(srv.URL, Roles{Full: []string{"reviewer"}}, time.Second, time.Minute, nil, func() time.Time { return now })
 	for range 3 {
 		if id, _ := c.Check(t.Context(), siteToken); id.Level != gwapi.LevelFull {
 			t.Fatal("not full")
@@ -115,7 +119,7 @@ func TestSiteCheckerCache(t *testing.T) {
 }
 
 func TestSiteCheckerWithoutURL(t *testing.T) {
-	c := NewSiteChecker("", []string{"admin"}, time.Second, time.Minute, nil, nil)
+	c := NewSiteChecker("", Roles{Full: []string{"admin"}}, time.Second, time.Minute, nil, nil)
 	if id, o := c.Check(t.Context(), siteToken); id != Anonymous || o != CheckDisabled {
 		t.Fatalf("%+v %s", id, o)
 	}

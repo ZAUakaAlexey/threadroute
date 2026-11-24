@@ -44,10 +44,21 @@ The right to **change stand settings** is separate from the level (decision 0014
 Decision 0014 (point 7) changed how the gateway learns who the caller is. None of this changes a message:
 
 - **Site cookie.** The gateway reads the sign-in cookie of the site from the WebSocket opening request (`GET /v1/ws`) and checks it with the site API, as it checked a token before. The name of the cookie is a setting of the gateway. This works when the console and the gateway are served under the site's domain. Page code never reads the cookie. Because a browser sends a cookie without any action of the page, the origin check of decision 0011 stays required.
-- **Local role.** On a laptop there is no site cookie. A gateway setting can give every connection one site role (for example `guest`). The gateway accepts this setting only when every allowed origin is a loopback address (for example `http://127.0.0.1:5173`), and refuses to start with it otherwise, so a public stand cannot run with it.
+- **Local role.** On a laptop there is no site cookie. A gateway setting can give every connection one site role (for example `guest`). The gateway accepts this setting only when every allowed origin is a loopback origin (for example `http://127.0.0.1:5173`), and refuses to start with it otherwise, so a public stand cannot run with it.
 - **`hello.token`** is still accepted, as before. A console that has no token sends no `token`.
 
-Which sign-in counts when a request has more than one is a rule of the gateway, not of the protocol. The client sees only the result: `welcome.level` and `welcome.settings.may_change`.
+When a request has more than one sign-in, the first of these rules that applies wins:
+
+1. The local role, when the gateway has one. The site API is not asked, and the cookie and `hello.token` are not read.
+2. The site cookie, when the opening request has it with a value that is not empty. A cookie that the site does not confirm gives the `demo` level; the gateway does not try `hello.token` then. A cookie value longer than 2048 bytes is not sent to the site and gives the `demo` level.
+3. `hello.token`.
+4. Nothing: the `demo` level, without the right to change settings.
+
+The level and the right are decided once, when the connection opens. A change of the role on the site counts from the next connection.
+
+A **loopback origin** is written exactly as `http://` or `https://`, then a host, then an optional port: the host is `localhost`, an IPv4 address in `127.0.0.0/8` in dotted decimal (for example `127.0.0.1`), or `[::1]`. Nothing else is allowed in it: no path (not even `/`), no pattern character such as `*`, no user, no query. The gateway with a local role also refuses (HTTP 403) every opening request whose own `Origin` header is not a loopback origin, also a request without `Origin`, and also when the page comes from the host of the gateway itself.
+
+The client sees only the result: `welcome.level` and `welcome.settings.may_change`.
 
 **Pseudonyms** look like `ps-` followed by 12 characters from `a-z` and `2-7`, for example `ps-k2m3n4p5q6r7`. The same ID gives the same pseudonym everywhere on one day, so a company in a team row and in a conversation row has the same label. The key behind them changes every day; on that change the server sends a new state snapshot (see below).
 
@@ -315,7 +326,7 @@ Every field is always present in its part, also when it is 0. Integers are writt
 
 **Changes.** Each entry has `changed_at_us` (the machine clock of the router), `version` (the version after the change), `by` and `fields`: the changed values, each with `field`, `old` and `new`. `old` is absent when the set had no value before: the first report of a simulator, whose `by` is `simulator`. Use `changed_at_us` to mark the changes on the trend strip.
 
-**`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level.
+**`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level. The gateway writes it, never the console: `user:` and the site user ID for a site user (for example `user:42`), and `local` for the local role. The router writes `simulator` for the first report of a simulator. Show it as it is.
 
 **How fast a change acts.** A team number that goes down does not force teams to shrink (decision 0014, point 4): teams above it stop growing and shrink as members leave. The console says "acts gradually" for those numbers.
 
@@ -325,7 +336,7 @@ Every field is always present in its part, also when it is 0. Integers are writt
 {"type": "settings", "settings": {"version": 4, "current": {"...": "..."}, "defaults": {"...": "..."}, "bounds": {"...": "..."}, "changes": [], "may_change": false}}
 ```
 
-Sent to every connection, both views and every level, when the block changed: a new current set (a new `version`) or new defaults. It replaces the whole block the console holds. The rules of `by` and `may_change` are as in `welcome`. Only a gateway that sent `welcome.settings` sends it.
+Sent to every connection, both views and every level, when the block changed: a new current set (a new `version`) or new defaults. It replaces the whole block the console holds. The rules of `by` and `may_change` are as in `welcome`. Only a gateway that sent `welcome.settings` sends it. When the router stops offering stand settings, no message says so; a `change_settings` is then answered `settings_off`.
 
 ### `trend`
 
@@ -337,6 +348,8 @@ Sent to every connection, both views and every level, when the block changed: a 
 ```
 
 One new point of the trend strip, every 10 seconds (machine time), to supervisor connections only, at every level. `welcome.trend` carries the history: `{"interval_ms": 10000, "points": [...]}`, the points of the last 60 minutes (at most 360), oldest first, never `null`. The gateway keeps the history in memory, so after a gateway restart it starts empty.
+
+The gateway takes a point only while its data is fresh (`status.stale` is false). So the history starts after the gateway caught up with the topics, and has a gap while the data is stale. Draw the points by `sampled_at_us`, not by their index.
 
 | Field | Meaning |
 |---|---|

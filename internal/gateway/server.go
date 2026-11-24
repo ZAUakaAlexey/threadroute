@@ -69,12 +69,23 @@ func (g *Gateway) serveWS(ctx context.Context, w http.ResponseWriter, r *http.Re
 		return
 	}
 	addr := clientAddr(r, g.cfg.TrustProxy)
+	// The local role goes to every connection, so it needs more than the
+	// origin check of the library, which lets in a request without an
+	// Origin and one whose Origin host is the Host of the request. Only a
+	// page of a loopback origin gets it (decision 0014, point L1).
+	if g.cfg.LocalRole != "" && checkLoopbackOrigin(r.Header.Get("Origin")) != nil {
+		g.logger.Debug("websocket upgrade refused: the local role needs a loopback origin")
+		http.Error(w, "origin not allowed", http.StatusForbidden)
+		return
+	}
 	// The HTTP server deadlines stay on the connection after the upgrade;
 	// a WebSocket lives longer than any of them.
 	rc := http.NewResponseController(w)
 	_ = rc.SetReadDeadline(time.Time{})
 	_ = rc.SetWriteDeadline(time.Time{})
-	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: g.cfg.AllowedOrigins})
+	// Accept checks the origin (decision 0011) before anything else reads
+	// the request; a refused origin never gets to the cookie below.
+	c, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: g.originPatterns})
 	if err != nil {
 		// Accept has written the HTTP error. The error can name the
 		// origin, which is not personal data.
@@ -86,7 +97,38 @@ func (g *Gateway) serveWS(ctx context.Context, w http.ResponseWriter, r *http.Re
 	c.SetReadLimit(gwapi.MaxClientMessageBytes + 1)
 	g.conns.Add(1)
 	defer g.conns.Done()
-	g.Serve(ctx, wsConn{c: c}, addr)
+	g.serve(ctx, wsConn{c: c}, addr, g.siteCookie(r))
+}
+
+// siteCookie returns the value of the sign-in cookie of the site in the
+// opening request (decision 0014, point 7A), or "" when the cookie is off,
+// the local role is set, or the request has no such cookie. The value is a
+// token: it is never logged.
+func (g *Gateway) siteCookie(r *http.Request) string {
+	if g.cfg.SiteCookie == "" || g.cfg.LocalRole != "" {
+		return ""
+	}
+	ck, err := r.Cookie(g.cfg.SiteCookie)
+	if err != nil {
+		return ""
+	}
+	return ck.Value
+}
+
+// originPatterns returns the allowed origins as patterns of
+// coder/websocket. With the local role every allowed origin is an exact
+// origin (checkLoopbackOrigin), so its brackets are escaped: in
+// "http://[::1]:5173" they are an IPv6 address, not a character class.
+func originPatterns(cfg Config) []string {
+	if cfg.LocalRole == "" {
+		return cfg.AllowedOrigins
+	}
+	esc := strings.NewReplacer("[", `\[`, "]", `\]`)
+	out := make([]string, len(cfg.AllowedOrigins))
+	for i, p := range cfg.AllowedOrigins {
+		out[i] = esc.Replace(p)
+	}
+	return out
 }
 
 // clientAddr returns the client address for the limits: the right-most

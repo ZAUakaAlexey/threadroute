@@ -29,6 +29,10 @@ type OperatorAPI interface {
 	Reply(ctx context.Context, operatorID, offerID, replyID string) (opapi.Result, error)
 	Resolve(ctx context.Context, operatorID, offerID string) (opapi.Result, error)
 	Settings(ctx context.Context) (opapi.Settings, error)
+	// SettingsWithChanges and PutSettings read and change the stand
+	// settings (decision 0014).
+	SettingsWithChanges(ctx context.Context) (opapi.Settings, error)
+	PutSettings(ctx context.Context, req opapi.SettingsChangeRequest) (opapi.SettingsChangeResponse, error)
 }
 
 // Clock is the machine clock and its timers. Tests use a fake one.

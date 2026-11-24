@@ -46,6 +46,11 @@ type metrics struct {
 	offlinePuts  *prometheus.CounterVec
 	tickDuration prometheus.Histogram
 	fetchErrors  prometheus.Counter
+
+	identities      *prometheus.CounterVec
+	settingsChanges *prometheus.CounterVec
+	standVersion    prometheus.Gauge
+	trendPoints     prometheus.Counter
 }
 
 func newMetrics(reg prometheus.Registerer) (*metrics, error) {
@@ -64,7 +69,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		closed: prometheus.NewCounterVec(prometheus.CounterOpts(opts("clients_closed_total",
 			"Closed connections by reason.")), []string{"reason"}),
 		actions: prometheus.NewCounterVec(prometheus.CounterOpts(opts("requests_total",
-			"Client requests (actions, watch, unwatch) by type and result code.")), []string{"type", "result"}),
+			"Client requests (actions, watch, unwatch, change_settings) by type and result code.")), []string{"type", "result"}),
 		viewRows: prometheus.NewGaugeVec(prometheus.GaugeOpts(opts("view_rows",
 			"Rows of the in-memory view by kind.")), []string{"kind"}),
 		events: prometheus.NewCounterVec(prometheus.CounterOpts(opts("events_total",
@@ -74,7 +79,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		stale: prometheus.NewGaugeVec(prometheus.GaugeOpts(opts("stale",
 			"1 for the current stale reason of the data, fresh when it is current.")), []string{"reason"}),
 		siteCalls: prometheus.NewCounterVec(prometheus.CounterOpts(opts("site_api_checks_total",
-			"Token checks with the site API by outcome.")), []string{"outcome"}),
+			"Identity checks by outcome: the token checks with the site API, and local for the local role.")), []string{"outcome"}),
 		textReads: prometheus.NewCounterVec(prometheus.CounterOpts(opts("text_reads_total",
 			"Reads of message text from Redis by kind and result.")), []string{"kind", "result"}),
 		offlinePuts: prometheus.NewCounterVec(prometheus.CounterOpts(opts("operators_put_offline_total",
@@ -86,10 +91,22 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		}),
 		fetchErrors: prometheus.NewCounter(prometheus.CounterOpts(opts("fetch_errors_total",
 			"Fetch errors of the topic consumer."))),
+		identities: prometheus.NewCounterVec(prometheus.CounterOpts(opts("identities_total",
+			"Connections by what decided who the caller is: local (the local role), cookie (the site cookie), "+
+				"token (hello.token) or none.")), []string{"source"}),
+		settingsChanges: prometheus.NewCounterVec(prometheus.CounterOpts(opts("settings_changes_total",
+			"Stand settings changes asked by clients, by outcome: done, already_done or the code of the rejection.")),
+			[]string{"outcome"}),
+		standVersion: prometheus.NewGauge(prometheus.GaugeOpts(opts("stand_settings_version",
+			"Version of the stand settings the gateway holds, -1 when the router offers none."))),
+		trendPoints: prometheus.NewCounter(prometheus.CounterOpts(opts("trend_points_total",
+			"Trend points recorded."))),
 	}
+	m.standVersion.Set(-1)
 	for _, c := range []prometheus.Collector{
 		m.connections, m.sent, m.sentBytes, m.slowTicks, m.closed, m.actions, m.viewRows, m.events,
 		m.lag, m.stale, m.siteCalls, m.textReads, m.offlinePuts, m.tickDuration, m.fetchErrors,
+		m.identities, m.settingsChanges, m.standVersion, m.trendPoints,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register gateway metrics: %w", err)

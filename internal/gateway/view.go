@@ -275,7 +275,10 @@ type View struct {
 	// companies counts the supervisor-visible rows per company.
 	companies map[string]int
 
-	buckets      [16]struct{ sec, n int64 }
+	buckets [16]struct{ sec, n int64 }
+	// resolves count the resolves per second of router machine time, for
+	// the trend strip. More buckets than resolveWindow seconds.
+	resolves     [64]struct{ sec, n int64 }
 	missedAssign []int64
 	missedFirst  []int64
 	waits        []waitSample
@@ -604,6 +607,7 @@ func (v *View) applyRouting(ev event.Routing, ts time.Time) ApplyResult {
 		case event.TypeResolved:
 			r.phase = phaseResolved
 			r.operatorID, r.offerID, r.acceptByUS = "", "", 0
+			v.countResolve(at)
 		case event.TypeSLAMissed:
 			if ev.SLATarget == event.SLAAssignment {
 				r.assignmentMissed = true

@@ -168,13 +168,16 @@ func (c *fakeClock) Advance(d time.Duration) {
 	}
 }
 
-// fakeAPI is the router API.
+// fakeAPI is the router API. The stand settings calls go to router when
+// it is set, through the real opclient; without it the API is a router
+// from before decision 0014.
 type fakeAPI struct {
 	mu       sync.Mutex
 	calls    []string
 	err      error
 	result   opapi.Result
 	settings opapi.Settings
+	router   *fakeRouter
 }
 
 func newFakeAPI() *fakeAPI {
@@ -227,14 +230,57 @@ func (f *fakeAPI) Resolve(_ context.Context, id, offer string) (opapi.Result, er
 }
 func (f *fakeAPI) Settings(context.Context) (opapi.Settings, error) { return f.settings, nil }
 
-// fakeAuth gives the full level to the token "full-token" and demo to
-// every other one.
+func (f *fakeAPI) stand() (*fakeRouter, opapi.Settings) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.router, f.settings
+}
+
+func (f *fakeAPI) SettingsWithChanges(ctx context.Context) (opapi.Settings, error) {
+	r, s := f.stand()
+	if r != nil {
+		return r.client.SettingsWithChanges(ctx)
+	}
+	return s, nil
+}
+
+func (f *fakeAPI) PutSettings(ctx context.Context, req opapi.SettingsChangeRequest) (opapi.SettingsChangeResponse, error) {
+	if r, _ := f.stand(); r != nil {
+		return r.client.PutSettings(ctx, req)
+	}
+	f.record("put settings")
+	return opapi.SettingsChangeResponse{}, &opapi.SettingsError{Status: 405, SettingsErrorResponse: opapi.SettingsErrorResponse{
+		ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeSettingsOff},
+	}}
+}
+
+// Tokens of fakeAuth.
+const (
+	// fullToken gives the full level, user 7.
+	fullToken = "full-token"
+	// settingsToken gives the demo level with the right to change
+	// settings, user 9.
+	settingsToken = "settings-token"
+	// fullSettingsToken gives the full level and the right, user 10.
+	fullSettingsToken = "full-settings-token"
+	// rejectedToken is a token the site rejects.
+	rejectedToken = "rejected-token"
+)
+
+// fakeAuth gives the identities of the tokens above, and demo to every
+// other token.
 type fakeAuth struct{}
 
 func (fakeAuth) Check(_ context.Context, token string) (Identity, CheckOutcome) {
 	switch token {
-	case "full-token":
+	case fullToken:
 		return Identity{Level: gwapi.LevelFull, UserID: 7}, CheckFull
+	case settingsToken:
+		return Identity{Level: gwapi.LevelDemo, UserID: 9, MayChangeSettings: true}, CheckSignedIn
+	case fullSettingsToken:
+		return Identity{Level: gwapi.LevelFull, UserID: 10, MayChangeSettings: true}, CheckFull
+	case rejectedToken:
+		return Anonymous, CheckRejected
 	case "":
 		return Anonymous, CheckNoToken
 	}
@@ -402,6 +448,12 @@ type env struct {
 
 func newEnv(t *testing.T, mutate ...func(*Config)) *env {
 	t.Helper()
+	return newEnvAuth(t, fakeAuth{}, mutate...)
+}
+
+// newEnvAuth is newEnv with another token checker.
+func newEnvAuth(t *testing.T, auth TokenChecker, mutate ...func(*Config)) *env {
+	t.Helper()
 	cfg := DefaultConfig()
 	cfg.OfflineGrace = 15 * time.Second
 	for _, m := range mutate {
@@ -409,7 +461,7 @@ func newEnv(t *testing.T, mutate ...func(*Config)) *env {
 	}
 	e := &env{t: t, clock: newFakeClock(t0), api: newFakeAPI(), text: &fakeText{}, reg: prometheus.NewRegistry()}
 	g, err := New(Deps{
-		Config: cfg, API: e.api, Auth: fakeAuth{}, Text: e.text, Clock: e.clock,
+		Config: cfg, API: e.api, Auth: auth, Text: e.text, Clock: e.clock,
 		Logger: slog.New(slog.DiscardHandler), Registerer: e.reg,
 	})
 	if err != nil {

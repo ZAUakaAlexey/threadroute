@@ -13,6 +13,7 @@ import (
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/gwapi"
+	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 )
 
 // HTTP server timeouts of the WebSocket and snapshot server. A WebSocket
@@ -27,10 +28,9 @@ const (
 	// operators offline at stop. Together they stay under the stop grace
 	// period of a container.
 	stopWait = 10 * time.Second
-	// settingsPause and settingsRefresh are the waits between two reads of
-	// the router settings: before the first success, and after it.
-	settingsPause   = 2 * time.Second
-	settingsRefresh = time.Minute
+	// settingsPause is the wait between two reads of the router settings
+	// before the first success; after it, opapi.SettingsPollInterval.
+	settingsPause = 2 * time.Second
 	// orphanSweepEvery is how often online human operators without a
 	// session are put offline.
 	orphanSweepEvery = time.Minute
@@ -63,6 +63,8 @@ type Service struct {
 	logger *slog.Logger
 	ln     net.Listener
 	sweep  chan struct{}
+	// trendEvery is gwapi.TrendInterval; tests make it shorter.
+	trendEvery time.Duration
 }
 
 // NewService builds the service and listens on Config.HTTPAddr, so a busy
@@ -76,7 +78,7 @@ func NewService(ctx context.Context, o ServiceOptions) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new gateway service: %w", err)
 	}
-	s := &Service{cfg: o.Config, g: g, logger: g.logger, sweep: make(chan struct{}, 1)}
+	s := &Service{cfg: o.Config, g: g, logger: g.logger, sweep: make(chan struct{}, 1), trendEvery: gwapi.TrendInterval}
 	s.src = g.NewSource(SourceOptions{
 		Brokers: o.Config.KafkaBrokers, ConversationsTopic: o.ConversationsTopic, RoutingTopic: o.RoutingTopic,
 		ConsumerOpts: o.ConsumerOpts,
@@ -129,6 +131,7 @@ func (s *Service) Run(ctx context.Context) error {
 	})
 	wg.Go(func() { s.settingsLoop(ctx) })
 	wg.Go(func() { s.tickLoop(ctx) })
+	wg.Go(func() { s.trendLoop(ctx) })
 	wg.Go(func() { s.pub.Run(ctx) })
 	wg.Go(func() { s.orphanLoop(ctx) })
 
@@ -168,21 +171,22 @@ func (s *Service) stop(srv *http.Server) {
 	s.logger.Info("gateway stopped")
 }
 
+// settingsLoop reads the router settings with the change log every
+// opapi.SettingsPollInterval, and every settingsPause until the first
+// read worked.
 func (s *Service) settingsLoop(ctx context.Context) {
 	pause := settingsPause
 	failing := false
 	for {
 		actx, cancel := context.WithTimeout(ctx, s.cfg.RouterTimeout)
-		st, err := s.g.api.Settings(actx)
+		_, err := s.g.RefreshSettings(actx)
 		cancel()
 		switch {
 		case err == nil:
-			if old := s.g.settings.Load(); old == nil || *old != st {
-				s.logger.Info("router settings read", "speed_factor", st.SpeedFactor,
-					"accept_timeout", st.AcceptTimeout().String())
+			if failing {
+				s.logger.Info("router settings read again")
 			}
-			s.g.SetSettings(st)
-			pause, failing = settingsRefresh, false
+			pause, failing = opapi.SettingsPollInterval, false
 		case ctx.Err() == nil && !failing:
 			// Logged once per outage; new hellos get 1013 until the first
 			// read.
@@ -193,6 +197,21 @@ func (s *Service) settingsLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-time.After(pause):
+		}
+	}
+}
+
+// trendLoop takes a trend point every trendEvery. It runs apart from the
+// tick loop, so a point never delays a state message.
+func (s *Service) trendLoop(ctx context.Context) {
+	t := time.NewTicker(s.trendEvery)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.g.RecordTrend(s.g.clock.Now())
 		}
 	}
 }

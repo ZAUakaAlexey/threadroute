@@ -224,7 +224,14 @@ func TestFixtureConformance(t *testing.T) {
 			if err != nil || !sameJSON(t, got, again) {
 				t.Fatalf("round trip %s / %s: %v", got, again, err)
 			}
-			if gs, ws := shape(t, got), shape(t, want); !slices.Equal(gs, ws) {
+			gs, ws := shape(t, got), shape(t, want)
+			if f.Type == string(gwapi.TypeWelcome) && f.View == gwapi.ViewSupervisor {
+				// Every supervisor Welcome carries the trend history now
+				// (decision 0014). The examples of this index are older
+				// and have none; testdata/settings has the ones with it.
+				gs = slices.DeleteFunc(gs, func(p string) bool { return strings.HasPrefix(p, ".trend") })
+			}
+			if !slices.Equal(gs, ws) {
 				t.Errorf("shape\n got %v\nwant %v\nframe %s", gs, ws, got)
 			}
 		})

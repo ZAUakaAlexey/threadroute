@@ -16,15 +16,60 @@ import (
 )
 
 // Identity is who the caller of a connection is, as the gateway
-// established it (decision 0012). Everything a client may see or do is
-// decided from it, never from client input.
+// established it (decisions 0012 and 0014). Everything a client may see or
+// do is decided from it, never from client input. It is decided once per
+// connection, at the hello.
 type Identity struct {
-	// Level is LevelFull only after the site API named a role from the
-	// configured list.
+	// Level is LevelFull only for a role of Roles.Full.
 	Level gwapi.Level
 	// UserID is the site user ID, or 0 for an anonymous caller (no token,
-	// or a token the site did not confirm).
+	// or a token the site did not confirm) and for the local role.
 	UserID int64
+	// MayChangeSettings is true only for a role of Roles.Settings.
+	MayChangeSettings bool
+	// Local reports that the identity is the local role of the gateway
+	// (Config.LocalRole), not a site user.
+	Local bool
+}
+
+// ByLocal is the "by" label of a change made with the local role.
+const ByLocal = "local"
+
+// by returns the "by" label of a stand settings change made by this
+// identity (opapi.SettingsChangeRequest.By): "local" for the local role and
+// "user:<site user id>" for a site user. It is built here, never from client
+// input, and is "" for an identity without a user.
+func (id Identity) by() string {
+	switch {
+	case id.Local:
+		return ByLocal
+	case id.UserID > 0:
+		return fmt.Sprintf("user:%d", id.UserID)
+	}
+	return ""
+}
+
+// Roles are the two lists of site roles (decision 0014, point 6B). They
+// are independent: a role can be in either, in both or in none.
+type Roles struct {
+	// Full are the roles that get the full level.
+	Full []string
+	// Settings are the roles that may change the stand settings.
+	Settings []string
+}
+
+// identity returns the identity of a confirmed site user, or of the local
+// role when userID is 0.
+func (r Roles) identity(userID int64, role string) Identity {
+	id := Identity{Level: gwapi.LevelDemo, UserID: userID}
+	if role == "" {
+		return id
+	}
+	if slices.Contains(r.Full, role) {
+		id.Level = gwapi.LevelFull
+	}
+	id.MayChangeSettings = slices.Contains(r.Settings, role)
+	return id
 }
 
 // Anonymous is the identity of a caller without a confirmed token.
@@ -50,8 +95,12 @@ const (
 	CheckRejected CheckOutcome = "rejected"
 	// CheckUnavailable: no answer in time, a network error or a 5xx.
 	CheckUnavailable CheckOutcome = "unavailable"
-	// CheckMalformed: any other answer.
+	// CheckMalformed: any other answer, and a site cookie that is longer
+	// than gwapi.MaxTokenBytes, which is not sent to the site.
 	CheckMalformed CheckOutcome = "malformed"
+	// CheckLocal: the local role of the gateway gave the identity; the site
+	// API was not called.
+	CheckLocal CheckOutcome = "local"
 )
 
 // TokenChecker checks a site token.
@@ -70,10 +119,11 @@ const cacheMax = 10_000
 // answer is JSON with at least {"user":{"id":<number>},"role":{"name":
 // "<string>"}}; nothing else of it is read. A successful answer is cached
 // for a short time under the SHA-256 of the token, never the token. The
-// token is never logged or stored.
+// token is never logged or stored. A token from the site cookie and one
+// from Hello.Token are the same kind of token, checked the same way.
 type SiteChecker struct {
 	url     string
-	roles   []string
+	roles   Roles
 	hc      *http.Client
 	timeout time.Duration
 	ttl     time.Duration
@@ -90,7 +140,7 @@ type cacheEntry struct {
 
 // NewSiteChecker returns a checker. An empty url gives a checker that
 // confirms nobody.
-func NewSiteChecker(url string, roles []string, timeout, ttl time.Duration, hc *http.Client, now func() time.Time) *SiteChecker {
+func NewSiteChecker(url string, roles Roles, timeout, ttl time.Duration, hc *http.Client, now func() time.Time) *SiteChecker {
 	if hc == nil {
 		hc = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 	}
@@ -100,7 +150,7 @@ func NewSiteChecker(url string, roles []string, timeout, ttl time.Duration, hc *
 	// A redirect could carry the token to another host.
 	hc.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	return &SiteChecker{
-		url: url, roles: slices.Clone(roles), hc: hc, timeout: timeout, ttl: ttl, now: now,
+		url: url, roles: Roles{Full: slices.Clone(roles.Full), Settings: slices.Clone(roles.Settings)}, hc: hc, timeout: timeout, ttl: ttl, now: now,
 		cache: map[[32]byte]cacheEntry{},
 	}
 }
@@ -188,7 +238,7 @@ func (s *SiteChecker) ask(ctx context.Context, token string) (Identity, CheckOut
 
 // parseSiteAnswer reads the user ID and the role name. The error never
 // holds a value of the answer.
-func parseSiteAnswer(body []byte, roles []string) (Identity, error) {
+func parseSiteAnswer(body []byte, roles Roles) (Identity, error) {
 	var a siteAnswer
 	if err := json.Unmarshal(body, &a); err != nil {
 		return Identity{}, errors.New("site answer is not the expected JSON")
@@ -200,9 +250,5 @@ func parseSiteAnswer(body []byte, roles []string) (Identity, error) {
 	if err != nil || uid <= 0 {
 		return Identity{}, fmt.Errorf("site answer: user.id is not a positive whole number")
 	}
-	id := Identity{Level: gwapi.LevelDemo, UserID: uid}
-	if *a.Role.Name != "" && slices.Contains(roles, *a.Role.Name) {
-		id.Level = gwapi.LevelFull
-	}
-	return id, nil
+	return roles.identity(uid, *a.Role.Name), nil
 }

@@ -451,6 +451,8 @@ func (c *client) readLoop(ctx context.Context) {
 			c.handleUnwatch(m)
 		case gwapi.Action:
 			c.handleAction(ctx, m)
+		case gwapi.ChangeSettings:
+			c.handleChangeSettings(ctx, m)
 		}
 	}
 }
