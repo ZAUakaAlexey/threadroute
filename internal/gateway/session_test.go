@@ -58,7 +58,7 @@ func TestOperatorSessionFlow(t *testing.T) {
 	if _, err := gwapi.EncodeServer(w, aud); err != nil || !strings.HasPrefix(w.OperatorID, "web-") || w.TickMS != 250 {
 		t.Fatalf("welcome %+v: %v", w, err)
 	}
-	if got := e.api.Calls(); len(got) != 1 || got[0] != "put "+w.OperatorID+" [en und] 2" {
+	if got := e.api.Calls(); len(got) != 1 || got[0] != "put "+w.OperatorID+" [en und] 2 p1" {
 		t.Fatalf("calls %v", got)
 	}
 	if frameType(t, c.next(t)) != gwapi.TypeStatus {

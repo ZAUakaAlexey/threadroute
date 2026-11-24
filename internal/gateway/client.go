@@ -629,7 +629,7 @@ func (g *Gateway) doAction(ctx context.Context, c *client, a gwapi.Action) gwapi
 		case gwapi.ActionSetLanguages:
 			langs := slices.Sorted(slices.Values(a.Languages))
 			var resp opapi.OperatorResponse
-			resp, err = g.api.PutOperator(ctx, s.id, opapi.OperatorRequest{Languages: langs, Capacity: gwapi.HumanCapacity})
+			resp, err = g.api.PutOperator(ctx, s.id, humanOperator(langs))
 			if err == nil {
 				g.ops.setRow(s, resp.Operator)
 			}

@@ -140,4 +140,9 @@ const (
 	// GatewayHumanCapacity is the capacity of a human operator (decision
 	// 0012, point 4).
 	GatewayHumanCapacity = 2
+	// GatewayHumanPriority is the operator priority of a human operator.
+	// Among operators with the same lowest load the router offers to the
+	// higher priority first, and simulated operators have 0 (decision
+	// 0009, "An operator priority").
+	GatewayHumanPriority = 1
 )

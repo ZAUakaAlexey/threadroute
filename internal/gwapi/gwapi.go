@@ -110,6 +110,11 @@ const HumanOperatorPrefix = "web-"
 // HumanCapacity is the capacity of a human operator (decision 0012).
 const HumanCapacity = defaults.GatewayHumanCapacity
 
+// HumanPriority is the operator priority of a human operator (decisions
+// 0009 and 0012). The gateway sends it to the router; the protocol to the
+// browser does not carry it.
+const HumanPriority = defaults.GatewayHumanPriority
+
 // View is the screen a connection serves. It is chosen in Hello and does
 // not change for the life of the connection.
 type View string

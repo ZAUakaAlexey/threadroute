@@ -147,7 +147,7 @@ type attachResult struct {
 
 // Attach gives owner an operator: the one of resume when the token is
 // valid for ident, else a new one. A new operator is created through the
-// router API with capacity 2 and is offline.
+// router API with capacity 2 and priority 1, and is offline.
 func (r *registry) Attach(ctx context.Context, ident Identity, langs []string, resume string, owner *client) (attachResult, error) {
 	langs = slices.Sorted(slices.Values(langs))
 	if s := r.resume(ident, resume, owner); s.sess != nil {
@@ -157,7 +157,7 @@ func (r *registry) Attach(ctx context.Context, ident Identity, langs []string, r
 		same := slices.Equal(s.sess.row.Languages, langs)
 		r.mu.Unlock()
 		if !same {
-			if resp, err := r.api.PutOperator(ctx, s.sess.id, opapi.OperatorRequest{Languages: langs, Capacity: gwapi.HumanCapacity}); err == nil {
+			if resp, err := r.api.PutOperator(ctx, s.sess.id, humanOperator(langs)); err == nil {
 				r.setRow(s.sess, resp.Operator)
 			} else {
 				r.logger.Warn("languages of a resumed operator not changed", "operator_id", s.sess.id, "error", err)
@@ -188,7 +188,7 @@ func (r *registry) Attach(ctx context.Context, ident Identity, langs []string, r
 	r.mu.Unlock()
 
 	s.callMu.Lock()
-	resp, err := r.api.PutOperator(ctx, s.id, opapi.OperatorRequest{Languages: langs, Capacity: gwapi.HumanCapacity})
+	resp, err := r.api.PutOperator(ctx, s.id, humanOperator(langs))
 	s.callMu.Unlock()
 	if err != nil {
 		r.mu.Lock()
@@ -198,6 +198,13 @@ func (r *registry) Attach(ctx context.Context, ident Identity, langs []string, r
 	}
 	r.setRow(s, resp.Operator)
 	return attachResult{sess: s, token: tok}, nil
+}
+
+// humanOperator is the body of every PutOperator call for a human
+// operator: capacity gwapi.HumanCapacity and priority gwapi.HumanPriority.
+// A PUT replaces every field, so each call must send both.
+func humanOperator(langs []string) opapi.OperatorRequest {
+	return opapi.OperatorRequest{Languages: langs, Capacity: gwapi.HumanCapacity, Priority: gwapi.HumanPriority}
 }
 
 func (r *registry) setRow(s *opSession, op opapi.Operator) {

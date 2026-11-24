@@ -273,3 +273,42 @@ func TestDayChangeSendsSnapshot(t *testing.T) {
 		}
 	})
 }
+
+// TestHumanOperatorPriority checks that every PutOperator call for a human
+// operator sends capacity 2 and priority 1: when the operator is created,
+// when the person changes the languages, and when a resume brings new
+// languages. A PUT replaces the priority, so a call without it would set
+// it back to 0 (decision 0009, "An operator priority").
+func TestHumanOperatorPriority(t *testing.T) {
+	e := newEnv(t)
+	c1, w1 := e.connect(operatorHello("en", "und"), "10.0.0.1")
+	c1.send(t, gwapi.Action{RequestID: "r1", Action: gwapi.ActionSetLanguages, Languages: []string{"de", "und"}})
+	if r := decodeResult(t, c1.nextOf(t, gwapi.TypeResult)); r.Outcome != gwapi.OutcomeDone {
+		t.Fatalf("set_languages %+v", r)
+	}
+	c1.Close(gwapi.CloseNormal)
+	waitFor(t, "grace started", func() bool { return e.g.hub.count() == 0 })
+	h := operatorHello("fr", "und")
+	h.ResumeToken = w1.ResumeToken
+	if _, w2 := e.connect(h, "10.0.0.1"); w2.OperatorID != w1.OperatorID {
+		t.Fatalf("resume gave %s, want %s", w2.OperatorID, w1.OperatorID)
+	}
+
+	want := []string{
+		"put " + w1.OperatorID + " [en und] 2 p1",
+		"put " + w1.OperatorID + " [de und] 2 p1",
+		"put " + w1.OperatorID + " [fr und] 2 p1",
+	}
+	var puts []string
+	for _, c := range e.api.Calls() {
+		if strings.HasPrefix(c, "put ") {
+			puts = append(puts, c)
+		}
+	}
+	if !slices.Equal(puts, want) {
+		t.Errorf("put calls %v, want %v", puts, want)
+	}
+	if gwapi.HumanPriority != 1 {
+		t.Errorf("gwapi.HumanPriority = %d, want 1", gwapi.HumanPriority)
+	}
+}

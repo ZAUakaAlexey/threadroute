@@ -198,12 +198,13 @@ func (f *fakeAPI) Calls() []string {
 }
 
 func (f *fakeAPI) PutOperator(_ context.Context, id string, req opapi.OperatorRequest) (opapi.OperatorResponse, error) {
-	res, err := f.record(fmt.Sprintf("put %s %v %d", id, req.Languages, req.Capacity))
+	res, err := f.record(fmt.Sprintf("put %s %v %d p%d", id, req.Languages, req.Capacity, req.Priority))
 	if err != nil {
 		return opapi.OperatorResponse{}, err
 	}
 	return opapi.OperatorResponse{Result: res, Operator: opapi.Operator{
-		ID: id, Languages: slices.Sorted(slices.Values(req.Languages)), Capacity: req.Capacity, Presence: opapi.PresenceOffline,
+		ID: id, Languages: slices.Sorted(slices.Values(req.Languages)), Capacity: req.Capacity, Priority: req.Priority,
+		Presence: opapi.PresenceOffline,
 	}}, nil
 }
 func (f *fakeAPI) Online(_ context.Context, id string) (opapi.Result, error) {
