@@ -49,6 +49,7 @@ UPDATE conversations SET
     queued_at = @queued_at,
     preferred_operator_id = @preferred_operator_id,
     last_operator_id = @last_operator_id,
+    last_offer_id = @last_offer_id,
     route_seq = @route_seq,
     sla_started_at = @sla_started_at,
     first_accepted_at = @first_accepted_at,
@@ -247,6 +248,39 @@ FOR UPDATE;
 UPDATE operators
 SET presence = @presence, presence_changed_at = @changed_at, updated_at = @changed_at
 WHERE id = @id AND presence <> @presence;
+
+-- name: NextOperatorEvents :many
+-- NextOperatorEvents gives each operator of @ids the next operator event
+-- sequence number, stores @event_at as the time of its last operator event,
+-- and returns the full snapshot of each one in ID order (decision 0011). The
+-- caller must already hold the row lock of every operator in @ids, so the
+-- statement never waits and the languages it reads are the current ones.
+WITH bumped AS (
+    UPDATE operators SET op_seq = op_seq + 1, op_event_at = @event_at::timestamptz
+    WHERE id = ANY (@ids::text[])
+    RETURNING id, capacity, presence, dedicated_company_id, op_seq
+)
+SELECT
+    b.id,
+    b.capacity,
+    b.presence,
+    b.dedicated_company_id,
+    b.op_seq,
+    COALESCE((SELECT array_agg(ol.lang ORDER BY ol.lang) FROM operator_languages AS ol
+              WHERE ol.operator_id = b.id), '{}')::text[] AS languages
+FROM bumped AS b
+ORDER BY b.id;
+
+-- name: LockOperatorsDueForRefresh :many
+-- LockOperatorsDueForRefresh locks up to @max_rows operators whose last
+-- operator event is older than @before, or who have none, oldest first. A
+-- row that another transaction holds is skipped, not waited for: it stays
+-- due and the next call takes it.
+SELECT id FROM operators
+WHERE op_event_at IS NULL OR op_event_at < @before::timestamptz
+ORDER BY op_event_at NULLS FIRST, id
+LIMIT @max_rows
+FOR UPDATE SKIP LOCKED;
 
 -- name: OperatorExists :one
 SELECT EXISTS (SELECT 1 FROM operators WHERE id = @id)::boolean AS found;

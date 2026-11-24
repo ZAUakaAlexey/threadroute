@@ -52,14 +52,15 @@ const (
 	kConv
 	kSLA
 	kTeams
+	kRefresh
 	ccKinds
 )
 
 var ccNames = [ccKinds]string{"assign", "accept", "refuse", "reply", "resolve", "expire", "tick",
-	"offline", "online", "capacity", "conv_event", "sla", "teams"}
+	"offline", "online", "capacity", "conv_event", "sla", "teams", "refresh"}
 
 // ccWeights sets how often each kind runs.
-var ccWeights = [ccKinds]int{22, 12, 4, 5, 8, 6, 9, 3, 5, 3, 20, 3, 2}
+var ccWeights = [ccKinds]int{22, 12, 4, 5, 8, 6, 9, 3, 5, 3, 20, 3, 2, 3}
 
 // ccStats counts outcomes. Errors of the database that are not a deadlock
 // or a serialization failure are kept as text and fail the test.
@@ -78,6 +79,7 @@ type ccStats struct {
 	formed        int
 	resized       int
 	released      int
+	refreshed     int
 	overCapacity  int
 }
 
@@ -141,10 +143,16 @@ func ccSeed(t *testing.T) uint64 {
 // What runs at once: Assign from every worker, accept, refuse, reply,
 // resolve (also late and repeated, on old offers), the accept timeout, the
 // SLA check, the team check, operators going offline and online, capacity
-// changes that cut below the current load, and conversation events (open,
-// customer and company messages, close, reopen with a preferred operator,
-// and the numbering reset of conv). The events of one conversation come
-// from one worker, in order, as conv delivers them from one partition.
+// changes that cut below the current load, the refresh of operator
+// snapshots, and conversation events (open, customer and company messages,
+// "message removed", close, reopen with a preferred operator, and the
+// numbering reset of conv). The events of one conversation come from one
+// worker, in order, as conv delivers them from one partition.
+//
+// The invariants cover the three outbox families: sequence numbers per key
+// from 1 with no gap and no repeat, op_seq equal to the number of operator
+// events, the newest operator event equal to the operator row, and the
+// previous pair on every queued event that needs one.
 func TestIntegrationConcurrency(t *testing.T) {
 	seed := ccSeed(t)
 	t.Logf("seed %d (set %s to this value and run once to repeat the mix)", seed, ccEnvSeed)
@@ -286,6 +294,12 @@ func TestIntegrationConcurrency(t *testing.T) {
 	}
 	t.Logf("  offers made %d, offers expired %d, SLA misses %d, teams formed %d resized %d released %d",
 		stats.offers, stats.expired, stats.missed, stats.formed, stats.resized, stats.released)
+	var opEvents, opKeys int
+	if err := pool.QueryRow(ctx, `SELECT count(*), count(DISTINCT record_key) FROM outbox WHERE family = 'operator'`).
+		Scan(&opEvents, &opKeys); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("  operator events %d for %d operators, %d of them from the refresh", opEvents, opKeys, stats.refreshed)
 	t.Logf("  rejections %v", stats.rejected)
 	t.Logf("  checks that saw an operator above its current capacity after a cut: %d", stats.overCapacity)
 	t.Logf("  deadlocks %d, serialization failures %d, retries 0 (none are made)", stats.deadlocks, stats.serialization)
@@ -306,9 +320,10 @@ func TestIntegrationConcurrency(t *testing.T) {
 	// are about half of the smallest values seen in 10 local runs, so a slower
 	// machine that interleaves differently does not fail here.
 	if stats.offers < 90 || stats.done[kAccept] < 50 || stats.expired < 4 || stats.done[kOffline] == 0 ||
-		stats.done[kRefuse] == 0 || stats.done[kResolve] == 0 || stats.formed == 0 {
-		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d",
-			stats.offers, stats.done[kAccept], stats.expired, stats.done[kOffline], stats.done[kRefuse], stats.done[kResolve], stats.formed)
+		stats.done[kRefuse] == 0 || stats.done[kResolve] == 0 || stats.formed == 0 || stats.refreshed == 0 {
+		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d refreshed %d",
+			stats.offers, stats.done[kAccept], stats.expired, stats.done[kOffline], stats.done[kRefuse], stats.done[kResolve],
+			stats.formed, stats.refreshed)
 	}
 }
 
@@ -393,6 +408,15 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 		stats.released += r.Released
 		stats.mu.Unlock()
 		return done(r.Formed+r.Resized+r.Released+r.Moved, err)
+	case kRefresh:
+		// Every operator whose last event is older than now is due, so the
+		// refresh runs against online, offline, capacity and team changes
+		// of the same operators.
+		n, err := svc.RefreshOperators(ctx, clock.Now(), 1+rng.IntN(len(opIDs)))
+		stats.mu.Lock()
+		stats.refreshed += n
+		stats.mu.Unlock()
+		return done(n, err)
 	}
 	return "", fmt.Errorf("unknown kind %d", k)
 }
@@ -446,6 +470,8 @@ func ccConvEvent(ctx context.Context, svc *Service, rng *rand.Rand, own []*convS
 			ev = s.message(event.FromCompany)
 		case r < 60:
 			ev = s.answered(time.Duration(rng.IntN(90)) * time.Second)
+		case r < 66:
+			ev = s.removed()
 		default:
 			ev = s.closed()
 		}

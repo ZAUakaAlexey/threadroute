@@ -976,7 +976,7 @@ func testCounts(t *testing.T, e *env) {
 		t.Fatal(err)
 	}
 	if c.Conversations[stateWaiting] != 2 || c.Conversations[stateOffered] != 1 || c.LiveSlots != 1 ||
-		len(c.Queues) != 1 || c.Queues[0].Waiting != 2 || c.Queues[0].Lang != "en" || c.UnsentOutbox != 4 ||
+		len(c.Queues) != 1 || c.Queues[0].Waiting != 2 || c.Queues[0].Lang != "en" || c.UnsentOutbox != 6 ||
 		c.OldestUnsent.IsZero() || len(c.Operators) != 1 || c.Operators[0].N != 1 {
 		t.Errorf("counts = %+v", c)
 	}

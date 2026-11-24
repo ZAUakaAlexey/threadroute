@@ -2,13 +2,14 @@
 // internal/router (decisions 0009 and 0010): the consumer of the
 // conversations topic with its catch-up, the outbox publisher to the
 // routing topic, the operator API, and the background loops of assignment,
-// offer expiry, SLA, teams, outbox pruning and state sampling.
+// offer expiry, SLA, teams, the refresh of operator snapshots (decision
+// 0011), outbox pruning and state sampling.
 //
 // # Start-up order
 //
 // Run waits for the conversations topic (conv creates it), ensures the
-// routing topic, and starts the outbox publisher, the prune and sampling
-// loops and the operator API. Then it catches up: it reads the end offsets
+// routing topic, and starts the outbox publisher, the refresh, prune and
+// sampling loops and the operator API. Then it catches up: it reads the end offsets
 // of the conversations topic and applies everything up to them with
 // catchUp=true, so no offer is made in that phase. It then calls
 // EndCatchUp, which puts the conversations that are still open into their
@@ -261,6 +262,7 @@ func (s *Service) Run(ctx context.Context) error {
 	g.Go(func() error { return s.api.Serve(gctx) })
 	s.logger.Info("operator API listening", "addr", s.api.Addr())
 	g.Go(func() error { return pub.Run(gctx) })
+	g.Go(func() error { return s.runner.loop(gctx, s.refreshLoop()) })
 	g.Go(func() error { return s.runner.loop(gctx, s.pruneLoop()) })
 	g.Go(func() error { return s.runner.loop(gctx, s.countsLoop()) })
 	g.Go(func() error {
@@ -361,6 +363,28 @@ func (s *Service) routingLoops() []loopSpec {
 			},
 		},
 	)
+}
+
+// refreshLoop publishes the snapshot of every operator again when its last
+// operator event is older than Config.OperatorRefresh (decision 0011,
+// "Operators stay in the view"). The time of the last event is stored per
+// operator, so a restart does not reset it, and the refresh is safe when
+// two processes run it.
+func (s *Service) refreshLoop() loopSpec {
+	return loopSpec{
+		name: "refresh", interval: refreshCheck(s.cfg.OperatorRefresh),
+		step: func(ctx context.Context) (bool, error) {
+			n, err := s.core.RefreshOperators(ctx, s.clock.Now().Add(-s.cfg.OperatorRefresh), refreshBatch)
+			s.m.refreshed.Add(float64(n))
+			return n >= refreshBatch, err
+		},
+	}
+}
+
+// refreshCheck returns the pause of the refresh loop for a refresh
+// interval: a sixtieth of it, between minInterval and maxRefreshCheck.
+func refreshCheck(refresh time.Duration) time.Duration {
+	return min(max(refresh/60, minInterval), maxRefreshCheck)
 }
 
 func (s *Service) pruneLoop() loopSpec {

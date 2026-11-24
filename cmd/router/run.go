@@ -42,6 +42,7 @@ func run(ctx context.Context, cfg routersvc.Config, logger *slog.Logger, reg *pr
 		"team_size", []int{rc.TeamMinSize, rc.TeamMaxSize},
 		"assign_workers", cfg.AssignWorkers,
 		"outage_limit", cfg.OutageLimit.String(),
+		"operator_refresh", cfg.OperatorRefresh.String(),
 	)
 
 	// Ready once the catch-up has ended.

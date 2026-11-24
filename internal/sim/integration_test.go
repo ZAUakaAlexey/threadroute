@@ -103,6 +103,7 @@ func startRouter(t *testing.T) *itEnv {
 		PruneInterval:   time.Second,
 		CountsInterval:  time.Second,
 		OutageLimit:     30 * time.Second,
+		OperatorRefresh: time.Hour,
 		LogLevel:        slog.LevelWarn,
 	}
 	svc, err := routersvc.New(t.Context(), routersvc.Options{
@@ -278,7 +279,9 @@ func (env *itEnv) checkLoad() {
 	}
 }
 
-// routingLog reads the whole routing topic.
+// routingLog reads the whole routing topic: want distinct events of all
+// three key families (decision 0011). It keeps the sequence numbers per
+// family and key, and returns the events by record key.
 func (env *itEnv) routingLog(want int64) map[string][]event.Routing {
 	env.t.Helper()
 	cl, err := kgo.NewClient(kgo.SeedBrokers(env.brokers...), kgo.ConsumeTopics(bus.TopicRouting),
@@ -304,13 +307,20 @@ func (env *itEnv) routingLog(want int64) map[string][]event.Routing {
 				env.t.Fatalf("routing record: %v", err)
 			}
 			k := string(rec.Key)
-			if ev.Seq <= seen[k] {
+			fk := k
+			switch {
+			case ev.Type.IsOperator():
+				fk = "operator/" + k
+			case ev.Type.IsTeam():
+				fk = "team/" + k
+			}
+			if ev.Seq <= seen[fk] {
 				continue // a repeat from the publisher
 			}
-			if ev.Seq != seen[k]+1 {
-				env.t.Fatalf("key %s: seq %d after %d", k, ev.Seq, seen[k])
+			if ev.Seq != seen[fk]+1 {
+				env.t.Fatalf("key %s: seq %d after %d", fk, ev.Seq, seen[fk])
 			}
-			seen[k] = ev.Seq
+			seen[fk] = ev.Seq
 			byKey[k] = append(byKey[k], ev)
 			n++
 		}
@@ -374,7 +384,24 @@ func TestIntegration(t *testing.T) {
 	itWait(t, 30*time.Second, "outbox sent", func() bool {
 		return env.count(`SELECT count(*) FROM outbox WHERE sent_at IS NULL`) == 0
 	})
-	byKey := env.routingLog(env.count(`SELECT count(*) FROM outbox WHERE family = 'conversation'`))
+	byKey := env.routingLog(env.count(`SELECT count(*) FROM outbox`))
+
+	// The operator events of the simulated operators are in the topic
+	// (decision 0011): the first is operator_updated, and presence changes
+	// of the shifts and the restart follow. The simulator ignored them.
+	opEvents := 0
+	for key, evs := range byKey {
+		if len(evs) == 0 || !evs[0].Type.IsOperator() {
+			continue
+		}
+		opEvents += len(evs)
+		if evs[0].Type != event.TypeOperatorUpdated || !strings.HasPrefix(key, "sim-op-") {
+			t.Errorf("operator %s: first event %s", key, evs[0].Type)
+		}
+	}
+	if opEvents == 0 {
+		t.Error("no operator event in the routing topic")
+	}
 
 	// Every open conversation was offered, accepted, replied and resolved
 	// by a simulated operator.
@@ -427,6 +454,9 @@ func TestIntegration(t *testing.T) {
 			case event.TypeOfferExpired, event.TypeResolved, event.TypeEnded:
 				live = ""
 			case event.TypeQueued:
+				if ev.QueueReason.HasPreviousOperator() != (ev.PreviousOfferID != "") {
+					t.Errorf("%s: queued(%s) with previous offer %q", key, ev.QueueReason, ev.PreviousOfferID)
+				}
 				if ev.QueueReason == event.QueueOperatorOffline && live != "" {
 					returned, shift = true, ev.At.After(shiftsFrom)
 				}

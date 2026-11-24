@@ -63,7 +63,8 @@ func TestDefaultConfigValues(t *testing.T) {
 		t.Errorf("DefaultConfig() = %+v, want the values of decisions 0009 and 0010 %+v", c, want)
 	}
 	s := c.Settings()
-	if err := s.Validate(); err != nil || s.AcceptTimeout() != 20*time.Second || s.CapacityDefault != 4 {
+	if err := s.Validate(); err != nil || s.AcceptTimeout() != 20*time.Second || s.CapacityDefault != 4 ||
+		s.AssignmentTargetUS != 60_000_000 || s.FirstResponseTargetUS != 120_000_000 {
 		t.Errorf("Settings() = %+v, %v", s, err)
 	}
 }
@@ -190,12 +191,13 @@ func TestPlanApply(t *testing.T) {
 		return &stored{Session: session, Seq: seq, State: state}
 	}
 	company := func(ev event.Conversation) event.Conversation { ev.Direction = event.FromCompany; return ev }
-	tests := []struct {
+	type planCase struct {
 		name string
 		cur  *stored
 		ev   event.Conversation
 		want applyPlan
-	}{
+	}
+	tests := []planCase{
 		{"new conversation", nil, convEv(event.TypeOpened, 1, 1),
 			applyPlan{startSession: true, queue: event.QueueNew}},
 		{"new, later session", nil, convEv(event.TypeOpened, 3, 9),
@@ -228,6 +230,32 @@ func TestPlanApply(t *testing.T) {
 		{"answered", st(1, 4, stateAssigned), company(convEv(event.TypeAnswered, 1, 5)), applyPlan{realResponse: true}},
 		{"answered in a new conversation", nil, company(convEv(event.TypeAnswered, 1, 2)),
 			applyPlan{startSession: true, queue: event.QueueNew, realResponse: true}},
+	}
+	// A "message removed" event never queues, opens or ends a conversation
+	// (decision 0011): in every state it only moves the sequence number, or
+	// it is skipped when it is not newer.
+	removed := func(session, seq uint64) event.Conversation {
+		ev := convEv(event.TypeMessageRemoved, session, seq)
+		ev.RemoveReason = event.RemoveDeleted
+		return ev
+	}
+	tests = append(tests, planCase{"removed, unknown conversation", nil, removed(1, 3), applyPlan{numbersOnly: true}})
+	tests = append(tests, planCase{"removed, unknown conversation, later session", nil, removed(4, 30), applyPlan{numbersOnly: true}})
+	for _, state := range []string{statePending, stateWaiting, stateOffered, stateAssigned, stateResolved, stateClosed} {
+		for _, c := range []struct {
+			name string
+			ev   event.Conversation
+			want applyPlan
+		}{
+			{"same session", removed(2, 9), applyPlan{numbersOnly: true}},
+			{"later session", removed(3, 9), applyPlan{numbersOnly: true}},
+			{"repeat", removed(2, 8), applyPlan{skip: true}},
+			{"older session", removed(1, 12), applyPlan{skip: true}},
+			{"later session, not newer", removed(3, 8), applyPlan{skip: true}},
+			{"session 1 seq 1", removed(1, 1), applyPlan{skip: true}},
+		} {
+			tests = append(tests, planCase{"removed, " + state + ", " + c.name, st(2, 8, state), c.ev, c.want})
+		}
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

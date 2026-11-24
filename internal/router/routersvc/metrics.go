@@ -54,6 +54,7 @@ type metrics struct {
 	publishErrors prometheus.Counter
 	pruned        prometheus.Counter
 	lockHeld      prometheus.Gauge
+	refreshed     prometheus.Counter
 
 	loopErrors *prometheus.CounterVec
 
@@ -106,6 +107,8 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		publishErrors: counter("publish_errors_total", "Publish rounds that ended with a produce error."),
 		pruned:        counter("outbox_pruned_total", "Sent outbox rows deleted."),
 		lockHeld:      gauge("publisher_lock_held", "1 while this process holds the publisher lock and publishes the outbox."),
+		refreshed: counter("operators_refreshed_total",
+			"Operator snapshots that the refresh loop of this process wrote to the outbox again (decision 0011)."),
 
 		loopErrors: prometheus.NewCounterVec(prometheus.CounterOpts(opts("loop_errors_total",
 			"Failed steps of the background loops and the consumer, by loop.")),
@@ -129,7 +132,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.applied, m.fetchErrors, m.catchUpActive, m.catchUpSeconds, m.catchUpQueued,
 		m.offers, m.expired, m.slaMarked, m.teamChange,
-		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.loopErrors,
+		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.refreshed, m.loopErrors,
 		m.conversations, m.queueWaiting, m.queueOldest, m.operators, m.capacity,
 		m.liveSlots, m.activeTeams, m.outboxUnsent, m.outboxOldest,
 	} {
@@ -137,7 +140,9 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			return nil, fmt.Errorf("register router metrics: %w", err)
 		}
 	}
-	for _, t := range []event.ConversationType{event.TypeOpened, event.TypeMessageAdded, event.TypeAnswered, event.TypeClosed} {
+	for _, t := range []event.ConversationType{
+		event.TypeOpened, event.TypeMessageAdded, event.TypeAnswered, event.TypeClosed, event.TypeMessageRemoved,
+	} {
 		for _, r := range []string{resultQueued, resultPending, resultEnded, resultApplied, resultDuplicate, resultReset, resultRejected} {
 			m.applied.WithLabelValues(string(t), r)
 		}
@@ -150,6 +155,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		event.TypeQueued, event.TypeOffered, event.TypeAccepted, event.TypeOfferExpired, event.TypeReplied,
 		event.TypeResolved, event.TypeSLAMissed, event.TypeEnded,
 		event.TypeTeamFormed, event.TypeTeamResized, event.TypeTeamReleased,
+		event.TypeOperatorUpdated, event.TypeOperatorOnline, event.TypeOperatorOffline,
 	} {
 		m.published.WithLabelValues(string(t))
 	}

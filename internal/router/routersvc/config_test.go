@@ -42,6 +42,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"workers", cfg.AssignWorkers, 4},
 		{"outbox keep", cfg.OutboxKeep, time.Hour},
 		{"outage", cfg.OutageLimit, 2 * time.Minute},
+		{"operator refresh", cfg.OperatorRefresh, 6 * time.Hour},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -71,6 +72,7 @@ func TestLoadValues(t *testing.T) {
 		pg.EnvConnectWait:      "10s",
 		EnvExpireInterval:      "500ms",
 		EnvFirstResponseTarget: " 90s ",
+		EnvOperatorRefresh:     "2h",
 	}))
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +81,8 @@ func TestLoadValues(t *testing.T) {
 		cfg.Router.Capacity != 6 || cfg.Router.AcceptTimeout != 5*time.Second || cfg.Router.TeamFormLoad != 10 ||
 		cfg.Router.TeamReleaseLoad != 3 || cfg.AssignWorkers != 8 || cfg.PublishBatch != 200 ||
 		cfg.OutboxKeep != 30*time.Minute || cfg.Postgres.MaxConns != 16 || cfg.Postgres.ConnectWait != 10*time.Second ||
-		cfg.ExpireInterval != 500*time.Millisecond || cfg.Router.FirstResponseTarget != 90*time.Second {
+		cfg.ExpireInterval != 500*time.Millisecond || cfg.Router.FirstResponseTarget != 90*time.Second ||
+		cfg.OperatorRefresh != 2*time.Hour {
 		t.Errorf("config %+v", cfg)
 	}
 	if isLoopback(cfg.APIAddr) {
@@ -110,6 +113,7 @@ func TestLoadErrors(t *testing.T) {
 		{"batch", map[string]string{EnvPublishBatch: "x"}, []string{EnvPublishBatch}},
 		{"log level", map[string]string{EnvLogLevel: "loud"}, []string{EnvLogLevel}},
 		{"max conns", map[string]string{pg.EnvMaxConns: "0"}, []string{pg.EnvMaxConns}},
+		{"refresh not positive", map[string]string{EnvOperatorRefresh: "-1h"}, []string{EnvOperatorRefresh}},
 		{"several", map[string]string{EnvOutageLimit: "0s", EnvPruneInterval: "x"}, []string{EnvOutageLimit, EnvPruneInterval}},
 	}
 	for _, tt := range tests {

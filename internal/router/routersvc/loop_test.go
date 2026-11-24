@@ -227,3 +227,19 @@ func TestRetryStopsOnCancel(t *testing.T) {
 		t.Fatalf("retry() = %v, want context.Canceled", err)
 	}
 }
+
+func TestRefreshCheck(t *testing.T) {
+	tests := []struct {
+		refresh, want time.Duration
+	}{
+		{6 * time.Hour, maxRefreshCheck},
+		{time.Hour, time.Minute},
+		{30 * time.Second, 500 * time.Millisecond},
+		{time.Millisecond, minInterval},
+	}
+	for _, tt := range tests {
+		if got := refreshCheck(tt.refresh); got != tt.want {
+			t.Errorf("refreshCheck(%s) = %s, want %s", tt.refresh, got, tt.want)
+		}
+	}
+}

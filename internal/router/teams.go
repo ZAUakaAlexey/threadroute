@@ -298,8 +298,9 @@ func (s *Service) poolCandidates(ctx context.Context, q *pgdb.Queries, loads []l
 }
 
 // join moves the chosen candidates into the team and returns those that
-// joined.
-func (s *Service) join(ctx context.Context, q *pgdb.Queries, company string, loads []langLoad, k int,
+// joined. Each one gets an operator_updated event, because its dedicated
+// company changed.
+func (s *Service) join(ctx context.Context, q *pgdb.Queries, ob *outbox, company string, loads []langLoad, k int,
 	members []opInfo, now time.Time,
 ) ([]string, error) {
 	cands, err := s.poolCandidates(ctx, q, loads)
@@ -314,13 +315,30 @@ func (s *Service) join(ctx context.Context, q *pgdb.Queries, company string, loa
 	if err != nil {
 		return nil, fmt.Errorf("join team: %w", err)
 	}
+	if err := addOperatorEvents(ctx, q, ob, joined, event.TypeOperatorUpdated, now); err != nil {
+		return nil, err
+	}
 	return joined, nil
+}
+
+// leave moves members of the team of a company back to the shared pool
+// and returns those that left. Each one gets an operator_updated event,
+// because its dedicated company changed.
+func leave(ctx context.Context, q *pgdb.Queries, ob *outbox, company string, ids []string, now time.Time) ([]string, error) {
+	left, err := q.LeaveTeam(ctx, pgdb.LeaveTeamParams{UpdatedAt: now, Ids: ids, CompanyID: company})
+	if err != nil {
+		return nil, fmt.Errorf("leave team: %w", err)
+	}
+	if err := addOperatorEvents(ctx, q, ob, left, event.TypeOperatorUpdated, now); err != nil {
+		return nil, err
+	}
+	return left, nil
 }
 
 func (s *Service) formTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Company, ob *outbox,
 	loads []langLoad, load int64, now time.Time, res *TeamResult,
 ) error {
-	joined, err := s.join(ctx, q, co.CompanyID, loads, s.cfg.teamSize(load), nil, now)
+	joined, err := s.join(ctx, q, ob, co.CompanyID, loads, s.cfg.teamSize(load), nil, now)
 	if err != nil || len(joined) == 0 {
 		// No online operator of the shared pool has a language of the
 		// company. The next check tries again.
@@ -342,16 +360,16 @@ func (s *Service) resizeTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Comp
 	changed := false
 	switch {
 	case target > len(members):
-		joined, err := s.join(ctx, q, co.CompanyID, loads, target-len(members), members, now)
+		joined, err := s.join(ctx, q, ob, co.CompanyID, loads, target-len(members), members, now)
 		if err != nil {
 			return err
 		}
 		changed = len(joined) > 0
 	case target < len(members):
 		ids := pickLeave(loads, len(members)-target, members)
-		left, err := q.LeaveTeam(ctx, pgdb.LeaveTeamParams{UpdatedAt: now, Ids: ids, CompanyID: co.CompanyID})
+		left, err := leave(ctx, q, ob, co.CompanyID, ids, now)
 		if err != nil {
-			return fmt.Errorf("leave team: %w", err)
+			return err
 		}
 		changed = len(left) > 0
 	}
@@ -377,7 +395,7 @@ func (s *Service) releaseTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Com
 	for i, m := range members {
 		ids[i] = m.ID
 	}
-	left, err := q.LeaveTeam(ctx, pgdb.LeaveTeamParams{UpdatedAt: now, Ids: ids, CompanyID: co.CompanyID})
+	left, err := leave(ctx, q, ob, co.CompanyID, ids, now)
 	if err != nil {
 		return fmt.Errorf("release team: %w", err)
 	}

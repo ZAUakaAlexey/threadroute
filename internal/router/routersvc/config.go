@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ZAUakaAlexey/threadroute/internal/defaults"
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg"
 	"github.com/ZAUakaAlexey/threadroute/internal/router"
@@ -51,6 +52,7 @@ const (
 	EnvPruneInterval   = Prefix + "ROUTER_PRUNE_INTERVAL"
 	EnvCountsInterval  = Prefix + "ROUTER_COUNTS_INTERVAL"
 	EnvOutageLimit     = Prefix + "ROUTER_OUTAGE_LIMIT"
+	EnvOperatorRefresh = Prefix + "ROUTER_OPERATOR_REFRESH"
 )
 
 // Defaults that are not routing rules. The routing rules come from
@@ -96,6 +98,20 @@ const (
 	// DefaultOutageLimit is how long a loop may fail without a break
 	// before the process stops with an error.
 	DefaultOutageLimit = 2 * time.Minute
+	// DefaultOperatorRefresh is how long after its last operator event an
+	// operator snapshot is published again, in machine time (decision
+	// 0011).
+	DefaultOperatorRefresh = defaults.OperatorRefresh
+)
+
+// Refresh of the operator snapshots.
+const (
+	// refreshBatch is the most operators one refresh transaction takes.
+	refreshBatch = 100
+	// maxRefreshCheck is the longest pause of the refresh loop. The loop
+	// looks for due operators OperatorRefresh/60 apart, at most this long,
+	// so a snapshot is late by at most a small part of the interval.
+	maxRefreshCheck = time.Minute
 )
 
 // Limits of the numeric settings.
@@ -142,6 +158,9 @@ type Config struct {
 	CountsInterval time.Duration
 	// OutageLimit ends the process when a loop has failed for this long.
 	OutageLimit time.Duration
+	// OperatorRefresh is how long after its last operator event the
+	// snapshot of an operator is published again, in machine time.
+	OperatorRefresh time.Duration
 
 	// LogLevel is the minimum level for log/slog.
 	LogLevel slog.Level
@@ -192,6 +211,7 @@ func Load(lookup LookupFunc) (Config, error) {
 		PruneInterval:   r.duration(EnvPruneInterval, DefaultPruneInterval),
 		CountsInterval:  r.duration(EnvCountsInterval, DefaultCountsInterval),
 		OutageLimit:     r.duration(EnvOutageLimit, DefaultOutageLimit),
+		OperatorRefresh: r.duration(EnvOperatorRefresh, DefaultOperatorRefresh),
 		LogLevel:        r.logLevel(EnvLogLevel, DefaultLogLevel),
 	}
 	// The cross-field rules of router.Config.Validate, checked here so the
@@ -249,6 +269,7 @@ func (c Config) Validate() error {
 		{"prune interval", c.PruneInterval},
 		{"counts interval", c.CountsInterval},
 		{"outage limit", c.OutageLimit},
+		{"operator refresh", c.OperatorRefresh},
 	} {
 		if d.v <= 0 {
 			errs = append(errs, fmt.Errorf("%s %s is not positive", d.name, d.v))

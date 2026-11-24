@@ -232,7 +232,7 @@ func (q *Queries) EnsureCompany(ctx context.Context, arg EnsureCompanyParams) er
 
 const getConversation = `-- name: GetConversation :one
 
-SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at FROM conversations
+SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at, last_offer_id FROM conversations
 WHERE company_id = $1 AND customer_id = $2
 `
 
@@ -269,6 +269,7 @@ func (q *Queries) GetConversation(ctx context.Context, arg GetConversationParams
 		&i.RealResponseUs,
 		&i.CloseReason,
 		&i.UpdatedAt,
+		&i.LastOfferID,
 	)
 	return i, err
 }
@@ -635,7 +636,7 @@ func (q *Queries) LockCompany(ctx context.Context, companyID string) (Company, e
 }
 
 const lockConversation = `-- name: LockConversation :one
-SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at FROM conversations
+SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at, last_offer_id FROM conversations
 WHERE company_id = $1 AND customer_id = $2
 FOR UPDATE
 `
@@ -671,6 +672,7 @@ func (q *Queries) LockConversation(ctx context.Context, arg LockConversationPara
 		&i.RealResponseUs,
 		&i.CloseReason,
 		&i.UpdatedAt,
+		&i.LastOfferID,
 	)
 	return i, err
 }
@@ -728,6 +730,43 @@ func (q *Queries) LockOperator(ctx context.Context, id string) (LockOperatorRow,
 	return i, err
 }
 
+const lockOperatorsDueForRefresh = `-- name: LockOperatorsDueForRefresh :many
+SELECT id FROM operators
+WHERE op_event_at IS NULL OR op_event_at < $1::timestamptz
+ORDER BY op_event_at NULLS FIRST, id
+LIMIT $2
+FOR UPDATE SKIP LOCKED
+`
+
+type LockOperatorsDueForRefreshParams struct {
+	Before  time.Time
+	MaxRows int32
+}
+
+// LockOperatorsDueForRefresh locks up to @max_rows operators whose last
+// operator event is older than @before, or who have none, oldest first. A
+// row that another transaction holds is skipped, not waited for: it stays
+// due and the next call takes it.
+func (q *Queries) LockOperatorsDueForRefresh(ctx context.Context, arg LockOperatorsDueForRefreshParams) ([]string, error) {
+	rows, err := q.db.Query(ctx, lockOperatorsDueForRefresh, arg.Before, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markOutboxSent = `-- name: MarkOutboxSent :execrows
 UPDATE outbox SET sent_at = $1::timestamptz
 WHERE id = ANY ($2::bigint[]) AND sent_at IS NULL
@@ -744,6 +783,70 @@ func (q *Queries) MarkOutboxSent(ctx context.Context, arg MarkOutboxSentParams) 
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const nextOperatorEvents = `-- name: NextOperatorEvents :many
+WITH bumped AS (
+    UPDATE operators SET op_seq = op_seq + 1, op_event_at = $1::timestamptz
+    WHERE id = ANY ($2::text[])
+    RETURNING id, capacity, presence, dedicated_company_id, op_seq
+)
+SELECT
+    b.id,
+    b.capacity,
+    b.presence,
+    b.dedicated_company_id,
+    b.op_seq,
+    COALESCE((SELECT array_agg(ol.lang ORDER BY ol.lang) FROM operator_languages AS ol
+              WHERE ol.operator_id = b.id), '{}')::text[] AS languages
+FROM bumped AS b
+ORDER BY b.id
+`
+
+type NextOperatorEventsParams struct {
+	EventAt time.Time
+	Ids     []string
+}
+
+type NextOperatorEventsRow struct {
+	ID                 string
+	Capacity           int32
+	Presence           string
+	DedicatedCompanyID *string
+	OpSeq              int64
+	Languages          []string
+}
+
+// NextOperatorEvents gives each operator of @ids the next operator event
+// sequence number, stores @event_at as the time of its last operator event,
+// and returns the full snapshot of each one in ID order (decision 0011). The
+// caller must already hold the row lock of every operator in @ids, so the
+// statement never waits and the languages it reads are the current ones.
+func (q *Queries) NextOperatorEvents(ctx context.Context, arg NextOperatorEventsParams) ([]NextOperatorEventsRow, error) {
+	rows, err := q.db.Query(ctx, nextOperatorEvents, arg.EventAt, arg.Ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []NextOperatorEventsRow{}
+	for rows.Next() {
+		var i NextOperatorEventsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Capacity,
+			&i.Presence,
+			&i.DedicatedCompanyID,
+			&i.OpSeq,
+			&i.Languages,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const nextOutbox = `-- name: NextOutbox :many
@@ -847,7 +950,7 @@ func (q *Queries) OperatorSlots(ctx context.Context, id string) (OperatorSlotsRo
 }
 
 const pendingConversations = `-- name: PendingConversations :many
-SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at FROM conversations
+SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at, last_offer_id FROM conversations
 WHERE state = 'pending'
 ORDER BY company_id, customer_id
 LIMIT $1
@@ -887,6 +990,7 @@ func (q *Queries) PendingConversations(ctx context.Context, maxRows int32) ([]Co
 			&i.RealResponseUs,
 			&i.CloseReason,
 			&i.UpdatedAt,
+			&i.LastOfferID,
 		); err != nil {
 			return nil, err
 		}
@@ -1074,7 +1178,7 @@ func (q *Queries) QueueDepths(ctx context.Context) ([]QueueDepthsRow, error) {
 }
 
 const queueMismatches = `-- name: QueueMismatches :many
-SELECT cv.company_id, cv.customer_id, cv.conv_session, cv.conv_seq, cv.lang, cv.state, cv.team_queue, cv.priority, cv.queued_at, cv.preferred_operator_id, cv.last_operator_id, cv.route_seq, cv.sla_started_at, cv.first_accepted_at, cv.first_replied_at, cv.sla_assignment_missed, cv.sla_response_missed, cv.sim_response_us, cv.real_response_us, cv.close_reason, cv.updated_at FROM conversations AS cv
+SELECT cv.company_id, cv.customer_id, cv.conv_session, cv.conv_seq, cv.lang, cv.state, cv.team_queue, cv.priority, cv.queued_at, cv.preferred_operator_id, cv.last_operator_id, cv.route_seq, cv.sla_started_at, cv.first_accepted_at, cv.first_replied_at, cv.sla_assignment_missed, cv.sla_response_missed, cv.sim_response_us, cv.real_response_us, cv.close_reason, cv.updated_at, cv.last_offer_id FROM conversations AS cv
 WHERE cv.company_id = $1
   AND cv.state = 'waiting'
   AND cv.team_queue <> ($2::boolean AND EXISTS (
@@ -1124,6 +1228,7 @@ func (q *Queries) QueueMismatches(ctx context.Context, arg QueueMismatchesParams
 			&i.RealResponseUs,
 			&i.CloseReason,
 			&i.UpdatedAt,
+			&i.LastOfferID,
 		); err != nil {
 			return nil, err
 		}
@@ -1238,17 +1343,18 @@ UPDATE conversations SET
     queued_at = $7,
     preferred_operator_id = $8,
     last_operator_id = $9,
-    route_seq = $10,
-    sla_started_at = $11,
-    first_accepted_at = $12,
-    first_replied_at = $13,
-    sla_assignment_missed = $14,
-    sla_response_missed = $15,
-    sim_response_us = $16,
-    real_response_us = $17,
-    close_reason = $18,
-    updated_at = $19
-WHERE company_id = $20 AND customer_id = $21
+    last_offer_id = $10,
+    route_seq = $11,
+    sla_started_at = $12,
+    first_accepted_at = $13,
+    first_replied_at = $14,
+    sla_assignment_missed = $15,
+    sla_response_missed = $16,
+    sim_response_us = $17,
+    real_response_us = $18,
+    close_reason = $19,
+    updated_at = $20
+WHERE company_id = $21 AND customer_id = $22
 `
 
 type SaveConversationParams struct {
@@ -1261,6 +1367,7 @@ type SaveConversationParams struct {
 	QueuedAt            *time.Time
 	PreferredOperatorID *string
 	LastOperatorID      *string
+	LastOfferID         *string
 	RouteSeq            int64
 	SlaStartedAt        *time.Time
 	FirstAcceptedAt     *time.Time
@@ -1287,6 +1394,7 @@ func (q *Queries) SaveConversation(ctx context.Context, arg SaveConversationPara
 		arg.QueuedAt,
 		arg.PreferredOperatorID,
 		arg.LastOperatorID,
+		arg.LastOfferID,
 		arg.RouteSeq,
 		arg.SlaStartedAt,
 		arg.FirstAcceptedAt,
@@ -1464,7 +1572,7 @@ func (q *Queries) TeamServesLang(ctx context.Context, arg TeamServesLangParams) 
 }
 
 const tryLockConversation = `-- name: TryLockConversation :one
-SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at FROM conversations
+SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at, last_offer_id FROM conversations
 WHERE company_id = $1 AND customer_id = $2
 FOR UPDATE SKIP LOCKED
 `
@@ -1501,12 +1609,13 @@ func (q *Queries) TryLockConversation(ctx context.Context, arg TryLockConversati
 		&i.RealResponseUs,
 		&i.CloseReason,
 		&i.UpdatedAt,
+		&i.LastOfferID,
 	)
 	return i, err
 }
 
 const tryLockWaitingConversation = `-- name: TryLockWaitingConversation :one
-SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at FROM conversations
+SELECT company_id, customer_id, conv_session, conv_seq, lang, state, team_queue, priority, queued_at, preferred_operator_id, last_operator_id, route_seq, sla_started_at, first_accepted_at, first_replied_at, sla_assignment_missed, sla_response_missed, sim_response_us, real_response_us, close_reason, updated_at, last_offer_id FROM conversations
 WHERE company_id = $1 AND customer_id = $2 AND state = 'waiting'
 FOR UPDATE SKIP LOCKED
 `
@@ -1544,6 +1653,7 @@ func (q *Queries) TryLockWaitingConversation(ctx context.Context, arg TryLockWai
 		&i.RealResponseUs,
 		&i.CloseReason,
 		&i.UpdatedAt,
+		&i.LastOfferID,
 	)
 	return i, err
 }

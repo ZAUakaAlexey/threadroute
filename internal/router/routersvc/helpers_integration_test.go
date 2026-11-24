@@ -53,7 +53,10 @@ type scenario struct {
 	// rcfg is the router configuration of the services the scenario
 	// starts. A test may change it before the start.
 	rcfg router.Config
-	cl   *kgo.Client
+	// refresh is the operator refresh interval of the services, one hour
+	// unless a test changes it before the start.
+	refresh time.Duration
+	cl      *kgo.Client
 }
 
 // testLogger writes warnings and errors, so a failing run shows why.
@@ -81,6 +84,7 @@ func (h *harness) newScenario(t *testing.T) *scenario {
 		routingTopic: fmt.Sprintf("routing-test-%d", n),
 		group:        fmt.Sprintf("router-test-%d", n),
 		rcfg:         testRouterConfig(),
+		refresh:      time.Hour,
 	}
 	_, err := h.pool.Exec(t.Context(), `TRUNCATE outbox, replies, offer_skips, offers, conversations,
 		companies, operator_languages, operators RESTART IDENTITY CASCADE`)
@@ -127,6 +131,7 @@ func (sc *scenario) config() Config {
 		PruneInterval:   time.Second,
 		CountsInterval:  200 * time.Millisecond,
 		OutageLimit:     30 * time.Second,
+		OperatorRefresh: sc.refresh,
 		LogLevel:        slog.LevelWarn,
 	}
 }
@@ -300,6 +305,14 @@ func (s *convStream) closed() event.Conversation {
 	return ev
 }
 
+// removed is a "message removed" event of the current session (decision
+// 0011).
+func (s *convStream) removed() event.Conversation {
+	ev := s.next(event.TypeMessageRemoved)
+	ev.RemoveReason = event.RemoveDeleted
+	return ev
+}
+
 func (s *convStream) key() string { return string(event.ConversationKey(s.company, s.customer)) }
 
 // routingReader reads the routing topic of a scenario from its start.
@@ -370,7 +383,10 @@ func checkOrder(t *testing.T, recs []*kgo.Record) map[string][]event.Routing {
 		values map[uint64][]byte
 		max    uint64
 	}
-	keys := map[string]*state{}
+	// The topic holds three key families (conversation, team, operator),
+	// and a reader keeps the sequence numbers per family and key.
+	type famKey struct{ family, key string }
+	keys := map[famKey]*state{}
 	out := map[string][]event.Routing{}
 	for _, rec := range recs {
 		ev, err := event.UnmarshalRouting(rec.Value)
@@ -381,10 +397,11 @@ func checkOrder(t *testing.T, recs []*kgo.Record) map[string][]event.Routing {
 		if key != string(ev.Key()) {
 			t.Fatalf("record key %q, event key %q", key, ev.Key())
 		}
-		st := keys[key]
+		fk := famKey{family: family(ev.Type), key: key}
+		st := keys[fk]
 		if st == nil {
 			st = &state{values: map[uint64][]byte{}}
-			keys[key] = st
+			keys[fk] = st
 		}
 		if prev, ok := st.values[ev.Seq]; ok {
 			if !bytes.Equal(prev, rec.Value) {
@@ -402,6 +419,17 @@ func checkOrder(t *testing.T, recs []*kgo.Record) map[string][]event.Routing {
 	return out
 }
 
+// family names the key family of a routing type.
+func family(typ event.RoutingType) string {
+	switch {
+	case typ.IsTeam():
+		return "team"
+	case typ.IsOperator():
+		return "operator"
+	}
+	return "conversation"
+}
+
 // types lists event types with the queue reason, for short messages.
 func types(evs []event.Routing) string {
 	parts := make([]string, len(evs))
@@ -416,6 +444,7 @@ func types(evs []event.Routing) string {
 
 // outboxRow is one row of the outbox.
 type outboxRow struct {
+	family  string
 	key     string
 	seq     uint64
 	payload []byte
@@ -423,7 +452,7 @@ type outboxRow struct {
 
 func (sc *scenario) outbox() []outboxRow {
 	sc.t.Helper()
-	rows, err := sc.h.pool.Query(sc.t.Context(), `SELECT record_key, seq, payload FROM outbox ORDER BY id`)
+	rows, err := sc.h.pool.Query(sc.t.Context(), `SELECT family, record_key, seq, payload FROM outbox ORDER BY id`)
 	if err != nil {
 		sc.t.Fatal(err)
 	}
@@ -431,7 +460,7 @@ func (sc *scenario) outbox() []outboxRow {
 		var o outboxRow
 		var key []byte
 		var seq int64
-		err := r.Scan(&key, &seq, &o.payload)
+		err := r.Scan(&o.family, &key, &seq, &o.payload)
 		o.key, o.seq = string(key), uint64(seq)
 		return o, err
 	})
@@ -442,29 +471,25 @@ func (sc *scenario) outbox() []outboxRow {
 }
 
 // matchOutbox checks that the topic holds every outbox row once (without
-// repeats), with the same payload, and nothing else.
+// repeats), with the same payload, and nothing else. The outbox is read
+// again while it waits, so rows that loops keep writing (the refresh of
+// operator snapshots) do not make it fail: it waits until the topic has
+// caught up with the outbox as it is at that moment.
 func (sc *scenario) matchOutbox(r *routingReader) {
 	sc.t.Helper()
-	rows := sc.outbox()
+	var rows []outboxRow
 	recs := r.waitFor(60*time.Second, "every outbox row in the topic", func(recs []*kgo.Record) bool {
+		rows = sc.outbox()
 		n := 0
 		for _, evs := range checkOrder(sc.t, recs) {
 			n += len(evs)
 		}
-		return n >= len(rows)
+		return n == len(rows)
 	})
-	byKey := checkOrder(sc.t, recs)
-	n := 0
-	for _, evs := range byKey {
-		n += len(evs)
-	}
-	if n != len(rows) {
-		sc.t.Fatalf("topic has %d distinct events, outbox %d rows", n, len(rows))
-	}
 	first := map[string]map[uint64][]byte{}
 	for _, rec := range recs {
 		ev, _ := event.UnmarshalRouting(rec.Value)
-		k := string(rec.Key)
+		k := family(ev.Type) + "/" + string(rec.Key)
 		if first[k] == nil {
 			first[k] = map[uint64][]byte{}
 		}
@@ -473,8 +498,8 @@ func (sc *scenario) matchOutbox(r *routingReader) {
 		}
 	}
 	for _, row := range rows {
-		if !bytes.Equal(first[row.key][row.seq], row.payload) {
-			sc.t.Fatalf("key %s seq %d: topic %s, outbox %s", row.key, row.seq, first[row.key][row.seq], row.payload)
+		if !bytes.Equal(first[row.family+"/"+row.key][row.seq], row.payload) {
+			sc.t.Fatalf("key %s seq %d: topic %s, outbox %s", row.key, row.seq, first[row.family+"/"+row.key][row.seq], row.payload)
 		}
 	}
 }

@@ -108,12 +108,15 @@ func (c Config) Validate() error {
 	return errors.Join(errs...)
 }
 
-// Settings returns the settings the simulator reads from the operator API.
+// Settings returns the settings of the operator API: what the simulator
+// needs, and the two SLA targets for the console (decision 0011).
 func (c Config) Settings() opapi.Settings {
 	return opapi.Settings{
-		SpeedFactor:     c.SpeedFactor,
-		AcceptTimeoutUS: c.AcceptTimeout.Microseconds(),
-		CapacityDefault: c.Capacity,
+		SpeedFactor:           c.SpeedFactor,
+		AcceptTimeoutUS:       c.AcceptTimeout.Microseconds(),
+		CapacityDefault:       c.Capacity,
+		AssignmentTargetUS:    c.AssignmentTarget.Microseconds(),
+		FirstResponseTargetUS: c.FirstResponseTarget.Microseconds(),
 	}
 }
 

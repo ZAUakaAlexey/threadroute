@@ -6,9 +6,12 @@ import (
 	"errors"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jackc/pgx/v5/stdlib"
+	"github.com/pressly/goose/v3"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/pg"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg/pgdb"
@@ -183,5 +186,80 @@ func TestIntegrationMigratedPool(t *testing.T) {
 	}
 	if _, err := pgdb.New(pool).GetOperator(t.Context(), "sim-op-0001"); !errors.Is(err, pgx.ErrNoRows) {
 		t.Errorf("GetOperator() error = %v, want pgx.ErrNoRows", err)
+	}
+}
+
+// TestIntegrationOperatorEventsMigration checks migration 00003 on a
+// database that already holds routing data: a resolved conversation gets
+// the offer ID of its last accepted offer, the outbox takes the operator
+// family, and existing operators start without operator events.
+func TestIntegrationOperatorEventsMigration(t *testing.T) {
+	pool := pgtest.Open(t, pgtest.Start(t))
+	ctx := t.Context()
+	files, err := pg.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { _ = db.Close() })
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, files, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 2); err != nil {
+		t.Fatalf("migrate to 2: %v", err)
+	}
+	// Synthetic data as the router wrote it before stage 4: one
+	// conversation with two accepted offers (the second one resolved), and
+	// one that never had an operator.
+	for _, q := range []string{
+		`INSERT INTO operators (id, capacity) VALUES ('sim-op-0001', 4), ('sim-op-0002', 4)`,
+		`INSERT INTO conversations (company_id, customer_id, conv_session, conv_seq, lang, state, queued_at,
+		     last_operator_id, updated_at)
+		 VALUES ('test-co-0001', 'test-cu-000001', 1, 5, 'en', 'resolved', now(), 'sim-op-0002', now()),
+		        ('test-co-0001', 'test-cu-000002', 1, 1, 'en', 'waiting', now(), NULL, now())`,
+		`INSERT INTO offers (company_id, customer_id, session, operator_id, state, capacity, queued_at, offered_at,
+		     accept_by, accepted_at)
+		 VALUES ('test-co-0001', 'test-cu-000001', 1, 'sim-op-0001', 'assignment_ended', 4, now(), now(), now(), now()),
+		        ('test-co-0001', 'test-cu-000001', 1, 'sim-op-0002', 'refused', 4, now(), now(), now(), NULL),
+		        ('test-co-0001', 'test-cu-000001', 1, 'sim-op-0002', 'resolved', 4, now(), now(), now(), now())`,
+	} {
+		if _, err := pool.Exec(ctx, q); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+	}
+	if err := pg.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("Migrate() error = %v", err)
+	}
+
+	var last *string
+	err = pool.QueryRow(ctx, `SELECT last_offer_id FROM conversations WHERE customer_id = 'test-cu-000001'`).Scan(&last)
+	if err != nil || last == nil || *last != "of-3" {
+		t.Errorf("last offer of the resolved conversation = %v, %v; want of-3", last, err)
+	}
+	err = pool.QueryRow(ctx, `SELECT last_offer_id FROM conversations WHERE customer_id = 'test-cu-000002'`).Scan(&last)
+	if err != nil || last != nil {
+		t.Errorf("last offer of a conversation without operator = %v, %v; want NULL", last, err)
+	}
+	var seq int64
+	var at *time.Time
+	err = pool.QueryRow(ctx, `SELECT op_seq, op_event_at FROM operators WHERE id = 'sim-op-0001'`).Scan(&seq, &at)
+	if err != nil || seq != 0 || at != nil {
+		t.Errorf("existing operator op_seq %d, op_event_at %v, %v", seq, at, err)
+	}
+
+	insert := func(family string) error {
+		_, err := pool.Exec(ctx, `INSERT INTO outbox (family, record_key, seq, event_type, payload, created_at)
+			VALUES ($1, 'sim-op-0001', 1, 'operator_updated', '{}', now())`, family)
+		return err
+	}
+	if err := insert("operator"); err != nil {
+		t.Errorf("outbox row of the operator family: %v", err)
+	}
+	if err := insert("other"); err == nil {
+		t.Error("outbox row of an unknown family: no error, want a check violation")
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operators SET op_seq = -1 WHERE id = 'sim-op-0001'`); err == nil {
+		t.Error("negative op_seq: no error, want a check violation")
 	}
 }

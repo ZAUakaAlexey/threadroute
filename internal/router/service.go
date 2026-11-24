@@ -11,25 +11,33 @@
 // for the operations that work through a list, one transaction per item).
 // The transaction changes the state and appends the routing events to the
 // outbox, each with the next sequence number of its record key. The
-// sequence counter lives on the conversation row (or the company row for
-// team events), which the transaction holds locked, so the numbers of one
-// key have no gap and no repeat, and the outbox order of one key is its
-// commit order.
+// sequence counter lives on the conversation row (the company row for team
+// events, the operator row for operator events), which the transaction
+// holds locked, so the numbers of one key have no gap and no repeat, and
+// the outbox order of one key is its commit order.
 //
 // Transactions run at READ COMMITTED. Correctness rests on row locks, and
 // on re-reading rows in a new statement after a lock is held.
 //
 // # Lock order
 //
-// See migrations/00002_routing.sql in internal/pg. In short: assignment
-// and the timer sweeps take conversation and operator rows with SKIP
-// LOCKED and never wait for a row lock. Every other operation takes locks
-// in one order: the team advisory lock, companies, operators,
-// conversations by key, offers. Operator actions read the offer without a
-// lock to find its conversation, lock the conversation, and then lock and
-// read the offer again. No operation retries on a deadlock or a
-// serialization failure. The lock order is meant to make both impossible,
-// and the concurrency test counts them.
+// See migrations/00002_routing.sql and 00003_operator_events.sql in
+// internal/pg. In short: assignment, the timer sweeps and the refresh of
+// operator snapshots take conversation and operator rows with SKIP LOCKED
+// and never wait for a row lock. Every other operation takes locks in one
+// order: the team advisory lock, companies, operators, conversations by
+// key, offers. Operator actions read the offer without a lock to find its
+// conversation, lock the conversation, and then lock and read the offer
+// again. No operation retries on a deadlock or a serialization failure.
+// The lock order is meant to make both impossible, and the concurrency test
+// counts them.
+//
+// Operator events (decision 0011) take their sequence number at the
+// "operators" step: PutOperator, Online and Offline lock the one operator
+// row first, a team change locks its members after the company row, and
+// the refresh locks its batch with SKIP LOCKED. The number is given in a
+// statement after the lock is held, so the snapshot in the event is the
+// state that commits.
 //
 // # Clock
 //
@@ -107,6 +115,7 @@ const (
 const (
 	familyConversation = "conversation"
 	familyTeam         = "team"
+	familyOperator     = "operator"
 )
 
 // teamLockKey is the key of the advisory lock that serializes team
@@ -248,6 +257,7 @@ func saveConv(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, now ti
 		QueuedAt:            c.QueuedAt,
 		PreferredOperatorID: c.PreferredOperatorID,
 		LastOperatorID:      c.LastOperatorID,
+		LastOfferID:         c.LastOfferID,
 		RouteSeq:            c.RouteSeq,
 		SlaStartedAt:        c.SlaStartedAt,
 		FirstAcceptedAt:     c.FirstAcceptedAt,
@@ -292,9 +302,24 @@ func deref[T any](p *T) T {
 	return *p
 }
 
+// previous names the offer or assignment that ended just before a
+// conversation goes back to its queue (decision 0011, "Contract changes").
+type previous struct {
+	operatorID, offerID string
+}
+
+// previousOf returns the previous pair of an offer.
+func previousOf(o *pgdb.Offer) previous {
+	return previous{operatorID: o.OperatorID, offerID: o.ID}
+}
+
 // enqueue puts a conversation into its queue and adds a queued event. In
 // catch-up it only marks the conversation pending, without an event
 // (decision 0009, "Catching up").
+//
+// prev must be set exactly for a reason with
+// event.QueueReason.HasPreviousOperator, so no queued event of such a reason
+// is ever written without the pair.
 //
 // keepWait keeps the queue time when the conversation goes back to the
 // queue after an offer or an assignment (decision 0009, step 4). Both SLA
@@ -305,8 +330,12 @@ func deref[T any](p *T) T {
 // same moment can leave the conversation in the other queue; the next team
 // check moves it.
 func enqueue(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, ob *outbox, now time.Time,
-	reason event.QueueReason, keepWait, catchUp bool,
+	reason event.QueueReason, prev previous, keepWait, catchUp bool,
 ) error {
+	if has := prev.operatorID != "" && prev.offerID != ""; has != reason.HasPreviousOperator() ||
+		(!has && (prev.operatorID != "" || prev.offerID != "")) {
+		return fmt.Errorf("queue reason %s with previous operator %q and offer %q", reason, prev.operatorID, prev.offerID)
+	}
 	if catchUp {
 		c.State = statePending
 		return nil
@@ -326,6 +355,8 @@ func enqueue(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, ob *out
 	ev := convEvent(event.TypeQueued, now)
 	ev.QueuedAt = *c.QueuedAt
 	ev.QueueReason = reason
+	ev.PreviousOperatorID = prev.operatorID
+	ev.PreviousOfferID = prev.offerID
 	return ob.addConv(c, ev)
 }
 
@@ -358,7 +389,7 @@ func returnOffer(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, o *
 	if err := ob.addConv(c, ev); err != nil {
 		return err
 	}
-	return enqueue(ctx, q, c, ob, now, queueReason, true, false)
+	return enqueue(ctx, q, c, ob, now, queueReason, previousOf(o), true, false)
 }
 
 // isNoRows reports whether err is pgx.ErrNoRows.

@@ -37,12 +37,19 @@ type applyPlan struct {
 	preferPrevious bool
 	// realResponse stores the real response time of the thread author.
 	realResponse bool
+	// numbersOnly: the event changes no routing state, it only moves the
+	// applied sequence number forward (a "message removed" event, decision
+	// 0011). The stored session stays as it is.
+	numbersOnly bool
 }
 
 // planApply decides what ev does. cur is nil for a conversation the router
 // has never seen. It reads nothing else, so it is tested without a
 // database.
 func planApply(cur *stored, ev event.Conversation) applyPlan {
+	if ev.Type == event.TypeMessageRemoved {
+		return planRemoved(cur, ev)
+	}
 	var p applyPlan
 	session, seq := int64(ev.Session), int64(ev.Seq)
 	answered := ev.Type == event.TypeAnswered
@@ -107,6 +114,31 @@ func planApply(cur *stored, ev event.Conversation) applyPlan {
 		p.realResponse = true
 	}
 	return p
+}
+
+// planRemoved plans a "message removed" event. It never queues, opens or
+// ends a conversation and never changes its routing state (decision 0011,
+// "Removed messages and the router"). It only moves the applied sequence
+// number forward:
+//
+//   - An unknown conversation keeps the row that ApplyConversation inserted
+//     for it: closed, with the numbers of the event.
+//   - An event of the stored session that is newer moves the sequence
+//     number.
+//   - An event of a later session moves only the sequence number, which
+//     conv counts over every session, and keeps the stored session. So the
+//     next real event of that session still ends the stored session as a
+//     lost close and starts the new one.
+//   - An older or repeated event is skipped.
+func planRemoved(cur *stored, ev event.Conversation) applyPlan {
+	if cur == nil {
+		return applyPlan{numbersOnly: true}
+	}
+	session, seq := int64(ev.Session), int64(ev.Seq)
+	if session < cur.Session || seq <= cur.Seq {
+		return applyPlan{skip: true}
+	}
+	return applyPlan{numbersOnly: true}
 }
 
 // ApplyResult says what ApplyConversation did.
@@ -201,6 +233,11 @@ func lockOrInsertConversation(ctx context.Context, q *pgdb.Queries, ev event.Con
 func (s *Service) applyPlan(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, ob *outbox,
 	p applyPlan, ev event.Conversation, isNew, catchUp bool, now time.Time, res *ApplyResult,
 ) error {
+	if p.numbersOnly {
+		// A new row already holds the session of the event.
+		c.ConvSeq = int64(ev.Seq)
+		return nil
+	}
 	res.Reset = p.reset
 	if p.endSession {
 		ended, err := endSession(ctx, q, c, ob, now, p.endReason)
@@ -221,6 +258,7 @@ func (s *Service) applyPlan(ctx context.Context, q *pgdb.Queries, c *pgdb.Conver
 		startSession(c, ev)
 		if p.reset {
 			c.LastOperatorID = nil
+			c.LastOfferID = nil
 		}
 	}
 	if p.closed {
@@ -234,7 +272,13 @@ func (s *Service) applyPlan(ctx context.Context, q *pgdb.Queries, c *pgdb.Conver
 		if p.preferPrevious {
 			c.PreferredOperatorID = c.LastOperatorID
 		}
-		if err := enqueue(ctx, q, c, ob, now, p.queue, false, catchUp); err != nil {
+		var prev previous
+		if p.queue.HasPreviousOperator() {
+			// A customer message after a resolve: the last assignment of
+			// the conversation is the one the operator resolved.
+			prev = previous{operatorID: deref(c.LastOperatorID), offerID: deref(c.LastOfferID)}
+		}
+		if err := enqueue(ctx, q, c, ob, now, p.queue, prev, false, catchUp); err != nil {
 			return err
 		}
 		res.Queued = !catchUp
@@ -325,7 +369,7 @@ func (s *Service) EndCatchUp(ctx context.Context, batch int) (int, error) {
 			var ob outbox
 			for i := range rows {
 				c := &rows[i]
-				if err := enqueue(ctx, q, c, &ob, now, event.QueueCatchUp, false, false); err != nil {
+				if err := enqueue(ctx, q, c, &ob, now, event.QueueCatchUp, previous{}, false, false); err != nil {
 					return err
 				}
 				if err := saveConv(ctx, q, c, now); err != nil {

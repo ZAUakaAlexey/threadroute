@@ -22,8 +22,10 @@ type OutboxRecord struct {
 	// metrics.
 	Type event.RoutingType
 	Seq  uint64
-	// Team reports an event of the team family.
-	Team bool
+	// Team reports an event of the team family, and Operator one of the
+	// operator family.
+	Team     bool
+	Operator bool
 	// CreatedAt is the machine time of the transaction that wrote it.
 	CreatedAt time.Time
 }
@@ -42,7 +44,8 @@ func (s *Service) NextOutbox(ctx context.Context, limit int) ([]OutboxRecord, er
 	for i, r := range rows {
 		out[i] = OutboxRecord{
 			ID: r.ID, Key: r.RecordKey, Value: r.Payload, Type: event.RoutingType(r.EventType),
-			Seq: uint64(r.Seq), Team: r.Family == familyTeam, CreatedAt: r.CreatedAt,
+			Seq: uint64(r.Seq), Team: r.Family == familyTeam, Operator: r.Family == familyOperator,
+			CreatedAt: r.CreatedAt,
 		}
 	}
 	return out, nil

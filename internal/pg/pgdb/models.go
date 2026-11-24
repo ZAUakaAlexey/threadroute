@@ -39,6 +39,7 @@ type Conversation struct {
 	RealResponseUs      *int64
 	CloseReason         *string
 	UpdatedAt           time.Time
+	LastOfferID         *string
 }
 
 type Offer struct {
@@ -74,6 +75,8 @@ type Operator struct {
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 	PresenceChangedAt  time.Time
+	OpSeq              int64
+	OpEventAt          *time.Time
 }
 
 type OperatorLanguage struct {

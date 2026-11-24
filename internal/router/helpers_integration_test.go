@@ -123,6 +123,14 @@ func (s *convStream) closed() event.Conversation {
 	return ev
 }
 
+// removed returns a "message removed" event of the current session. The
+// counters of conv do not change for it, and it is no message of its own.
+func (s *convStream) removed() event.Conversation {
+	ev := s.next(event.TypeMessageRemoved)
+	ev.RemoveReason = event.RemoveDeleted
+	return ev
+}
+
 // forget restarts the numbering as conv does 24 hours after a close.
 func (s *convStream) forget() { s.session, s.seq = 0, 0 }
 
@@ -290,6 +298,53 @@ var invariantChecks = []struct{ name, sql string }{
 		            GROUP BY record_key) AS o
 		      ON o.record_key = convert_to(c.company_id, 'UTF8')
 		 WHERE c.team_seq <> COALESCE(o.n, 0)`,
+	},
+	{
+		"op_seq of an operator equals its number of operator events",
+		`SELECT o.id || ' ' || o.op_seq || ' ' || COALESCE(x.n, 0)
+		 FROM operators AS o
+		 LEFT JOIN (SELECT record_key, count(*) AS n FROM outbox WHERE family = 'operator'
+		            GROUP BY record_key) AS x
+		      ON x.record_key = convert_to(o.id, 'UTF8')
+		 WHERE o.op_seq <> COALESCE(x.n, 0)`,
+	},
+	{
+		"the first event of an operator is operator_updated",
+		`SELECT encode(record_key, 'escape') || ' ' || event_type FROM outbox
+		 WHERE family = 'operator' AND seq = 1 AND event_type <> 'operator_updated'`,
+	},
+	{
+		"the newest operator event is the snapshot of the operator row",
+		`SELECT o.id || ' ' || x.j::text
+		 FROM operators AS o
+		 JOIN LATERAL (SELECT convert_from(payload, 'UTF8')::jsonb AS j FROM outbox
+		               WHERE family = 'operator' AND record_key = convert_to(o.id, 'UTF8')
+		               ORDER BY seq DESC LIMIT 1) AS x ON true
+		 WHERE (x.j->>'capacity')::integer <> o.capacity
+		    OR x.j->>'presence' <> o.presence
+		    OR (x.j->>'dedicated_company_id') IS DISTINCT FROM o.dedicated_company_id
+		    OR ARRAY(SELECT jsonb_array_elements_text(x.j->'languages'))
+		       <> COALESCE((SELECT array_agg(ol.lang ORDER BY ol.lang) FROM operator_languages AS ol
+		                    WHERE ol.operator_id = o.id), '{}')`,
+	},
+	{
+		"a queued event carries the previous pair exactly for the reasons that have one",
+		`SELECT encode(record_key, 'escape') || ' seq ' || seq || ' ' || convert_from(payload, 'UTF8')
+		 FROM outbox
+		 WHERE event_type = 'queued'
+		   AND (convert_from(payload, 'UTF8')::jsonb->>'queue_reason'
+		            IN ('offer_expired', 'offer_refused', 'operator_offline', 'customer_message_after_resolve'))
+		       <> (convert_from(payload, 'UTF8')::jsonb ? 'previous_operator_id'
+		           AND convert_from(payload, 'UTF8')::jsonb ? 'previous_offer_id')`,
+	},
+	{
+		"the previous offer of a queued event is an offer of that operator and conversation",
+		`SELECT x.j::text
+		 FROM (SELECT convert_from(payload, 'UTF8')::jsonb AS j FROM outbox WHERE event_type = 'queued') AS x
+		 LEFT JOIN offers AS f ON f.id = x.j->>'previous_offer_id'
+		 WHERE x.j ? 'previous_offer_id'
+		   AND (f.num IS NULL OR f.operator_id <> x.j->>'previous_operator_id'
+		        OR f.company_id <> x.j->>'company_id' OR f.customer_id <> x.j->>'customer_id')`,
 	},
 	{
 		"team members belong to an active team",

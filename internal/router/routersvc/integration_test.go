@@ -42,6 +42,7 @@ func TestIntegration(t *testing.T) {
 	t.Run("LateAndRepeatedCalls", func(t *testing.T) { testLateCalls(t, h) })
 	t.Run("Restart", func(t *testing.T) { testRestart(t, h) })
 	t.Run("TwoPublishers", func(t *testing.T) { testTwoPublishers(t, h) })
+	t.Run("OperatorEventsAndRequeues", func(t *testing.T) { testOperatorEventsInTopic(t, h) })
 }
 
 // testCatchUp: the topic holds a conversation that opened and closed and

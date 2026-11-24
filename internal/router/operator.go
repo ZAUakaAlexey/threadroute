@@ -21,7 +21,11 @@ import (
 // (opapi.PatternPutOperator). A new operator is offline. A capacity of 0
 // takes Config.Capacity. Lowering the capacity below the current load ends
 // nothing: the operator gets no new slot until the load is below the new
-// capacity.
+// capacity. A real change writes an operator_updated event; a call that
+// changes nothing writes none.
+//
+// Locks: the operator row first when it exists, so the upsert compares
+// with the state that it then overwrites.
 func (s *Service) PutOperator(ctx context.Context, id string, req opapi.OperatorRequest) (opapi.OperatorResponse, error) {
 	if !opapi.ValidID(id) {
 		return opapi.OperatorResponse{}, actionErr(opapi.CodeInvalidRequest, "operator ID %q is not valid", id)
@@ -35,6 +39,9 @@ func (s *Service) PutOperator(ctx context.Context, id string, req opapi.Operator
 	}
 	var resp opapi.OperatorResponse
 	err := s.inTx(ctx, func(q *pgdb.Queries) error {
+		if _, err := q.LockOperator(ctx, id); err != nil && !isNoRows(err) {
+			return fmt.Errorf("lock operator: %w", err)
+		}
 		r, err := q.UpsertOperator(ctx, pgdb.UpsertOperatorParams{
 			ID: id, Capacity: int32(capacity), Languages: req.Languages,
 		})
@@ -46,11 +53,17 @@ func (s *Service) PutOperator(ctx context.Context, id string, req opapi.Operator
 			return fmt.Errorf("read back: %w", err)
 		}
 		resp.Result = opapi.ResultAlreadyDone
-		if r.Created || r.CapacityChanged || r.LanguagesAdded > 0 || r.LanguagesRemoved > 0 {
-			resp.Result = opapi.ResultDone
-		}
 		resp.Operator = operatorView(op)
-		return nil
+		if !r.Created && !r.CapacityChanged && r.LanguagesAdded == 0 && r.LanguagesRemoved == 0 {
+			return nil
+		}
+		resp.Result = opapi.ResultDone
+		now := s.now()
+		var ob outbox
+		if err := addOperatorEvents(ctx, q, &ob, []string{id}, event.TypeOperatorUpdated, now); err != nil {
+			return err
+		}
+		return ob.flush(ctx, q, now)
 	})
 	if err != nil {
 		return opapi.OperatorResponse{}, fmt.Errorf("put operator %s: %w", id, err)
@@ -83,17 +96,25 @@ func operatorView(op pgdb.GetOperatorRow) opapi.Operator {
 	}
 }
 
-// Online puts an operator online (opapi.PatternOnline).
+// Online puts an operator online (opapi.PatternOnline) and writes an
+// operator_online event. A repeat writes nothing.
+//
+// Locks: the operator row, taken by the update of its presence.
 func (s *Service) Online(ctx context.Context, id string) (opapi.Result, error) {
 	var res opapi.Result
 	err := s.inTx(ctx, func(q *pgdb.Queries) error {
-		n, err := q.SetPresence(ctx, pgdb.SetPresenceParams{Presence: presenceOnline, ChangedAt: s.now(), ID: id})
+		now := s.now()
+		n, err := q.SetPresence(ctx, pgdb.SetPresenceParams{Presence: presenceOnline, ChangedAt: now, ID: id})
 		if err != nil {
 			return fmt.Errorf("set presence: %w", err)
 		}
 		if n == 1 {
 			res = opapi.ResultDone
-			return nil
+			var ob outbox
+			if err := addOperatorEvents(ctx, q, &ob, []string{id}, event.TypeOperatorOnline, now); err != nil {
+				return err
+			}
+			return ob.flush(ctx, q, now)
 		}
 		found, err := q.OperatorExists(ctx, id)
 		if err != nil {
@@ -110,7 +131,9 @@ func (s *Service) Online(ctx context.Context, id string) (opapi.Result, error) {
 
 // Offline puts an operator offline (opapi.PatternOffline). Its offers end
 // and the conversations it holds go back to their queues with their
-// waiting time kept. The operator is not skipped for them.
+// waiting time kept. The operator is not skipped for them. An
+// operator_offline event comes first in the outbox, then the events of the
+// conversations. A repeat writes nothing.
 //
 // Locks: the operator row first, so no new offer can reach the operator,
 // then each conversation of its live offers in key order, then the offer.
@@ -133,11 +156,14 @@ func (s *Service) Offline(ctx context.Context, id string) (opapi.Result, error) 
 		if _, err := q.SetPresence(ctx, pgdb.SetPresenceParams{Presence: presenceOffline, ChangedAt: now, ID: id}); err != nil {
 			return fmt.Errorf("set presence: %w", err)
 		}
+		var ob outbox
+		if err := addOperatorEvents(ctx, q, &ob, []string{id}, event.TypeOperatorOffline, now); err != nil {
+			return err
+		}
 		live, err := q.LiveOffersOfOperator(ctx, id)
 		if err != nil {
 			return fmt.Errorf("live offers: %w", err)
 		}
-		var ob outbox
 		for _, l := range live {
 			if err := s.returnHeld(ctx, q, &ob, l, id); err != nil {
 				return err
@@ -172,7 +198,7 @@ func (s *Service) returnHeld(ctx context.Context, q *pgdb.Queries, ob *outbox, l
 		o.EndedAt = ptr(now)
 		o.EndReason = ptr(endOperatorOffline)
 		if err = saveOffer(ctx, q, &o); err == nil {
-			err = enqueue(ctx, q, &c, ob, now, event.QueueOperatorOffline, true, false)
+			err = enqueue(ctx, q, &c, ob, now, event.QueueOperatorOffline, previousOf(&o), true, false)
 		}
 	}
 	if err != nil {
@@ -297,6 +323,7 @@ func (s *Service) accept(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversat
 	}
 	c.State = stateAssigned
 	c.LastOperatorID = ptr(o.OperatorID)
+	c.LastOfferID = ptr(o.ID)
 	c.PreferredOperatorID = nil
 	if c.FirstAcceptedAt == nil {
 		c.FirstAcceptedAt = ptr(now)

@@ -321,6 +321,10 @@ func (e *engine) due(now time.Time) []*task {
 // number was already seen for its key (decision 0010), and reacts only to
 // events about the simulated operators, or about a conversation one of
 // them holds.
+//
+// The routing topic holds three key families (decision 0011). Only
+// conversation events reach the map of seen sequence numbers, so a company
+// key or an operator key can never hide a conversation key.
 func (e *engine) handle(ev event.Routing) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -328,6 +332,13 @@ func (e *engine) handle(ev event.Routing) {
 	if ev.Type.IsTeam() {
 		// Team membership changes nothing for the simulated operators:
 		// the router picks who gets an offer.
+		return
+	}
+	if ev.Type.IsOperator() {
+		// Operator events are snapshots of presence and settings. For a
+		// simulated operator they echo the simulator's own calls, whose
+		// answers it already applied, and other operators do not concern
+		// it.
 		return
 	}
 	now := e.clock.Now()

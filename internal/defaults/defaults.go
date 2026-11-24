@@ -81,6 +81,16 @@ const (
 	RouterSpeedFactor = 1.0
 )
 
+// Operator snapshots in the routing topic (decision 0011). This one is
+// machine time, not model time: it follows the retention of the topic.
+const (
+	// OperatorRefresh is how long after its last operator event the router
+	// publishes the snapshot of an operator again. The routing topic keeps
+	// 24 hours, so a consumer that builds its view from the topic keeps
+	// every operator.
+	OperatorRefresh = 6 * time.Hour
+)
+
 // Simulated operators in sim (decision 0010). Durations are model time, like
 // the router ones: sim divides them by the speed factor of the router.
 const (

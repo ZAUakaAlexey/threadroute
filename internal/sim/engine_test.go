@@ -2,6 +2,7 @@ package sim
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -583,5 +584,100 @@ func TestPruneSeen(t *testing.T) {
 	}
 	if _, ok := h.e.seen[string(event.ConversationKey("test-co-0001", customerID(0)))]; !ok {
 		t.Error("the key of a held conversation was pruned")
+	}
+}
+
+// TestOperatorEvents: operator events plan nothing, are not counted as
+// skipped, and do not touch the sequence numbers seen for conversations,
+// even when an operator event comes with the same sequence number as a
+// conversation event (decision 0011, three key families in one topic).
+func TestOperatorEvents(t *testing.T) {
+	h := newHarness(t, testBehaviour(), 1, 2)
+	opEvent := func(typ event.RoutingType, op string, seq uint64, presence event.Presence) event.Routing {
+		return event.Routing{
+			Type: typ, OperatorID: op, Seq: seq, At: h.clock.Now(),
+			Languages: []string{"en", "und"}, Capacity: 4, Presence: presence,
+		}
+	}
+	// Echoes of the simulator's own calls, a team change, and an operator
+	// the simulator does not play.
+	for i, ev := range []event.Routing{
+		opEvent(event.TypeOperatorUpdated, op1, 1, event.PresenceOffline),
+		opEvent(event.TypeOperatorOnline, op1, 2, event.PresenceOnline),
+		opEvent(event.TypeOperatorUpdated, operatorID(2), 1, event.PresenceOffline),
+		opEvent(event.TypeOperatorUpdated, "console-op-1", 1, event.PresenceOffline),
+	} {
+		if err := ev.Validate(); err != nil {
+			t.Fatalf("operator event %d is not valid: %v", i, err)
+		}
+		h.e.handle(ev)
+	}
+	team := opEvent(event.TypeOperatorUpdated, op1, 3, event.PresenceOnline)
+	team.DedicatedCompanyID = "test-co-0001"
+	h.e.handle(team)
+	// The same operator event again, as after a restart of the publisher.
+	h.e.handle(opEvent(event.TypeOperatorOnline, op1, 2, event.PresenceOnline))
+	if h.e.pending() != 0 {
+		t.Errorf("%d planned after operator events, want 0", h.e.pending())
+	}
+	if got := testutil.ToFloat64(h.m.eventsSkipped); got != 0 {
+		t.Errorf("skipped %v, want 0", got)
+	}
+	if got := testutil.ToFloat64(h.m.events.WithLabelValues(string(event.TypeOperatorUpdated))); got != 4 {
+		t.Errorf("operator_updated events counted %v, want 4", got)
+	}
+
+	// Conversation events of the same operator still work, and their own
+	// repeats are still skipped.
+	ev := h.send(event.TypeOffered, customerID(1), op1, offerID(1))
+	h.e.handle(ev)
+	h.e.handle(opEvent(event.TypeOperatorOffline, op1, 1, event.PresenceOffline))
+	if got := testutil.ToFloat64(h.m.eventsSkipped); got != 1 {
+		t.Errorf("skipped %v, want 1 (the repeated offer)", got)
+	}
+	h.until(time.Minute)
+	if n := len(h.api.callsOf(actionAccept)); n != 1 {
+		t.Errorf("%d accepts, want 1", n)
+	}
+	// A queued event with the previous pair (stage 4) cancels the offer as
+	// before.
+	q := event.Routing{
+		Type: event.TypeQueued, CompanyID: "test-co-0001", CustomerID: customerID(1), Session: 1,
+		At: h.clock.Now(), Lang: "en", QueuedAt: h.clock.Now(), QueueReason: event.QueueOfferRefused,
+		PreviousOperatorID: op1, PreviousOfferID: offerID(1), Seq: 2,
+	}
+	if err := q.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	h.e.handle(q)
+	if h.e.pending() != 0 {
+		t.Errorf("%d planned after the requeue, want 0", h.e.pending())
+	}
+}
+
+// TestRecordsBeforeStage4: the routing topic keeps 24 hours, so records
+// written before stage 4 are still read after an upgrade. A "queued"
+// record that follows an offer has no previous pair then; it decodes and
+// cancels the held offer as before.
+func TestRecordsBeforeStage4(t *testing.T) {
+	h := newHarness(t, testBehaviour(), 1, 1)
+	h.send(event.TypeOffered, customerID(1), op1, offerID(1))
+	at := h.clock.Now().UnixMicro()
+	old := fmt.Sprintf(`{"type":"queued","company_id":"test-co-0001","customer_id":%q,"session":1,"seq":2,`+
+		`"at_us":%d,"lang":"en","team_queue":false,"priority":0,"queued_at_us":%d,"queue_reason":"offer_refused"}`,
+		customerID(1), at, at)
+	ev, err := event.UnmarshalRouting([]byte(old))
+	if err != nil {
+		t.Fatalf("old queued record: %v", err)
+	}
+	if ev.PreviousOperatorID != "" || ev.PreviousOfferID != "" {
+		t.Fatalf("old record has a previous pair: %+v", ev)
+	}
+	h.e.handle(ev)
+	if h.e.pending() != 0 {
+		t.Errorf("%d planned after the old queued record, want 0", h.e.pending())
+	}
+	if got := testutil.ToFloat64(h.m.dropped); got != 1 {
+		t.Errorf("plans cancelled %v, want 1", got)
 	}
 }
