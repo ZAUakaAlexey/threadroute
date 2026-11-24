@@ -153,6 +153,20 @@ func TestSettings(t *testing.T) {
 		t.Errorf("json = %s, want %s", b, want)
 	}
 
+	withTargets := valid
+	withTargets.AssignmentTargetUS, withTargets.FirstResponseTargetUS = 60_000_000, 120_000_000
+	if err := withTargets.Validate(); err != nil {
+		t.Errorf("Validate() with targets error = %v", err)
+	}
+	b, err = json.Marshal(withTargets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"speed_factor":50,"accept_timeout_us":20000000,"capacity_default":4,` +
+		`"assignment_target_us":60000000,"first_response_target_us":120000000}`; string(b) != want {
+		t.Errorf("json = %s, want %s", b, want)
+	}
+
 	tests := []struct {
 		name string
 		in   Settings
@@ -161,6 +175,8 @@ func TestSettings(t *testing.T) {
 		{name: "zero", in: Settings{}, errs: []string{"speed_factor", "accept_timeout_us", "capacity_default"}},
 		{name: "negative speed", in: Settings{SpeedFactor: -1, AcceptTimeoutUS: 1, CapacityDefault: 1}, errs: []string{"speed_factor"}},
 		{name: "capacity too large", in: Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: MaxCapacity + 1}, errs: []string{"capacity_default"}},
+		{name: "negative targets", in: Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 1,
+			AssignmentTargetUS: -1, FirstResponseTargetUS: -1}, errs: []string{"assignment_target_us", "first_response_target_us"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

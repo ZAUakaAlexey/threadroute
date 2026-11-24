@@ -279,6 +279,13 @@ type Settings struct {
 	// CapacityDefault is the capacity of an operator that is created
 	// without one.
 	CapacityDefault int `json:"capacity_default"`
+	// AssignmentTargetUS and FirstResponseTargetUS are the two SLA
+	// targets of decision 0009 in model time, in whole microseconds. The
+	// gateway passes them to the console (decision 0011). They are
+	// optional: a router from before stage 4 does not send them, and 0
+	// means "not known". The simulator does not use them.
+	AssignmentTargetUS    int64 `json:"assignment_target_us,omitempty"`
+	FirstResponseTargetUS int64 `json:"first_response_target_us,omitempty"`
 }
 
 // AcceptTimeout returns AcceptTimeoutUS as a duration.
@@ -298,6 +305,12 @@ func (s Settings) Validate() error {
 	}
 	if s.CapacityDefault < 1 || s.CapacityDefault > MaxCapacity {
 		errs = append(errs, fmt.Errorf("capacity_default: %d is not between 1 and %d", s.CapacityDefault, MaxCapacity))
+	}
+	if s.AssignmentTargetUS < 0 {
+		errs = append(errs, fmt.Errorf("assignment_target_us: %d is negative", s.AssignmentTargetUS))
+	}
+	if s.FirstResponseTargetUS < 0 {
+		errs = append(errs, fmt.Errorf("first_response_target_us: %d is negative", s.FirstResponseTargetUS))
 	}
 	return errors.Join(errs...)
 }
