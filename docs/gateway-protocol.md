@@ -69,24 +69,30 @@ An operator whose connection closes stays online for **15 seconds** on the serve
 
 ## Close codes
 
-| Code | Name (close reason) | Meaning | Client reaction |
-|---|---|---|---|
-| 1000 | `normal` | closed on purpose | do not reconnect |
-| 1001 | `going_away` | the gateway restarts or shuts down | reconnect |
-| 1009 | `message_too_big` | a client message was over 4096 bytes | bug in the client, do not reconnect at once |
-| 1011 | `internal` | unexpected server error | reconnect |
-| 1013 | `try_again_later` | the gateway cannot take the connection now | reconnect |
-| 4400 | `bad_message` | invalid JSON, unknown type, invalid fields, or the first message was not `hello` | bug in the client, do not reconnect at once |
-| 4401 | `unauthorized` | the site rejected the token | drop the token; the user may reconnect without it (demo level) |
-| 4408 | `hello_timeout` | no valid `hello` within 5 seconds | bug in the client, do not reconnect at once |
-| 4409 | `replaced` | a newer connection took over this operator (another tab, or a reload) | do not reconnect; tell the user the session moved |
-| 4410 | `slow_client` | the client did not read its messages fast enough | reconnect |
-| 4426 | `unsupported_version` | `hello.version` is not the server's version; the reason names the server's version | reload the page, do not reconnect |
-| 4429 | `too_many_connections` | this address holds too many connections | reconnect later |
-| 4503 | `no_operator_seat` | the 5 demo operator seats are taken | try later, or open the supervisor view |
-| 4504 | `auth_unavailable` | the site API did not answer, so the token could not be checked | try later, or connect without the token |
+The close reason is always the name in the second column, never anything else.
 
-The "reconnect" column is the same as `CloseCode.Reconnect` in the Go code.
+| Code | Name (close reason) | Meaning | Reconnect | Client reaction |
+|---|---|---|---|---|
+| 1000 | `normal` | closed on purpose | no | do not reconnect |
+| 1001 | `going_away` | the gateway restarts or shuts down | yes | reconnect with backoff |
+| 1009 | `message_too_big` | a client message was over 4096 bytes | no | bug in the client, do not reconnect at once |
+| 1011 | `internal` | unexpected server error | yes | reconnect with backoff |
+| 1013 | `try_again_later` | the gateway cannot take the connection now | yes | reconnect with backoff |
+| 4400 | `bad_message` | invalid JSON, unknown type, invalid fields, or the first message was not `hello` | no | bug in the client, do not reconnect at once |
+| 4401 | `unauthorized` | the site rejected the token | no | drop the token; the user may reconnect without it (demo level) |
+| 4408 | `hello_timeout` | no valid `hello` within 5 seconds | no | bug in the client, do not reconnect at once |
+| 4409 | `replaced` | a newer connection took over this operator (another tab, or a reload) | no | tell the user the session moved |
+| 4410 | `slow_client` | the client did not read its messages fast enough | yes | reconnect with backoff |
+| 4426 | `unsupported_version` | `hello.version` is not the server's version | no | reload the page |
+| 4429 | `too_many_connections` | this address holds too many connections | yes | reconnect with backoff |
+| 4503 | `no_operator_seat` | the demo operator seats are taken (5 by default) | yes | reconnect with backoff, or open the supervisor view |
+| 4504 | `auth_unavailable` | the site API did not answer, so the token could not be checked | yes | reconnect with backoff, or without the token |
+
+The "Reconnect" column is `CloseCode.Reconnect` in the Go code.
+
+A browser also reports two codes that the server never sends: `1005` (a close frame without a code) and `1006` (the connection dropped without a close frame, for example a network loss). The client treats both like `1001` and reconnects with backoff.
+
+The gateway of version 1 never sends `4401` and `4504`: when the site API rejects a token, gives a broken answer, or does not answer in time, the connection goes on at the `demo` level (decision 0012, "the default for an unknown user is no text"). The codes stay defined, so a later gateway can use them without a new version. A client should still handle them as the table says.
 
 ## Versioning
 
@@ -94,7 +100,8 @@ There is one number, `version`, now `1`. The client sends it in `hello`; the ser
 
 - Adding a field or a message type does not change the version. Both sides ignore what they do not know.
 - Removing or changing the meaning of a field, or a new rule that an old client would break, raises the version.
-- A `hello` with another version (or without one) is answered with close code `4426` and no `welcome`. The close reason names the version the server speaks. The console should then ask the user to reload the page, because a newer console was deployed.
+- A `hello` with another version (or without one) is answered with close code `4426` and no `welcome`. The close reason is `unsupported_version`, like every close reason. The console should then ask the user to reload the page, because a newer console was deployed.
+- **Enum values.** Fields with a fixed set of values (`state`, `kind`, `presence`, `level`, `view`, `outcome`, `code`, `reason`, `direction`) only ever hold the values this document lists. A new value needs a new version. The console treats an unknown value as a broken frame: it closes the connection and reconnects. So the server never sends a value the version does not define.
 
 ## Client messages
 
@@ -128,8 +135,10 @@ A browser that wants both screens opens two connections.
 - An operator connection may watch the conversations it holds: rows of `my_conversations` with state `assigned` (decision 0011, point 6). An offer shows no messages.
 - A supervisor connection may watch any conversation in its `conversations`.
 - At most **4** watched conversations per connection.
-- Every `watch` and `unwatch` gets one `result`. On success, a `messages` snapshot follows at once.
+- Every `watch` and `unwatch` gets one `result`. On success, a `messages` snapshot follows at once. A `watch` of a conversation the connection already watches is answered `already_done` and also gets a new `messages` snapshot.
 - A state snapshot ends every watch. Send `watch` again for a conversation you still show, using its `id` from the new snapshot.
+- The server ends a watch by itself, without a message, when the connection may no longer watch the conversation: on an operator connection when the operator stops holding it (resolved, returned to the queue, conversation closed), on a supervisor connection when the gateway forgets the conversation. No more `messages` or `message_removed` arrive for it. Drop its messages when the row leaves `my_conversations` or `conversations`.
+- An `unwatch` for a conversation that is not watched (never, or no longer, for example after the server ended the watch) is answered `already_done`, not with an error.
 
 ### `action`
 
@@ -197,7 +206,9 @@ Sent right after `welcome` and again on every change. While `stale` is true, the
 |---|---|
 | `catching_up` | the gateway started and is still reading the topics |
 | `source_unavailable` | the gateway cannot read the topics |
-| `lagging` | the newest data is older than the gateway's limit; `lag_us` says how much (machine time) |
+| `lagging` | the gateway is behind the topics by more than its limit |
+
+`lag_us` is optional with every reason: how long the gateway has been behind the end of the topics, in machine time, when it knows it. It is always set with `lagging`. With `source_unavailable` it says how long ago the gateway last saw the end of the topics.
 
 Losing the WebSocket connection also means "stale" for the screens, without a message.
 
@@ -226,6 +237,8 @@ The server keeps, for each connection, the set of keys that changed. At most eve
 - `remove`: IDs to drop.
 
 A collection that is absent did not change. In a snapshot a collection that is absent is empty, and `remove` is never used.
+
+**A snapshot in several frames.** A large first state (thousands of conversations on the supervisor view) may come in several `state` frames sent back to back: the first one has `snapshot: true` and every collection except part of `conversations` (or `my_conversations`), and the next ones have `snapshot: false` and only `set` more rows of that collection, each with the next `seq` (decision 0011). The client needs no extra logic: it applies them like any update.
 
 **First snapshot and later updates.** The first `state` of a connection always has `seq: 1` and `snapshot: true`. The server sends another snapshot when it rebuilt its own view, and at the demo level when the pseudonyms change (once a day). The client needs no other logic to tell them apart: `snapshot: true` means "replace", `false` means "apply".
 
@@ -404,11 +417,16 @@ Codes of the gateway:
 | `not_allowed` | not allowed for this view or level, for example an action on a supervisor connection |
 | `rate_limited` | over the request limit; retry later |
 | `unknown_offer` | the offer is not a live offer or assignment of this operator in the gateway's view |
-| `stale_connection` | this connection no longer owns its operator, or the gateway's data is stale; reconnect |
-| `unknown_conversation` | `watch` or `unwatch` for a conversation that is not in this view or not watched |
+| `stale_connection` | see below |
+| `unknown_conversation` | `watch` for a conversation that is not in this view, or that this connection may not watch |
 | `too_many_watched` | `watch` with 4 conversations already watched |
 
 Only `unavailable` and `rate_limited` mean "the same request may work later". The others need a change first (for example a new offer).
+
+`stale_connection` has two causes, and the `message` names the one that applies:
+
+- **The connection lost its operator** (`message`: "the operator moved to another connection"). Another connection took the operator over with the resume token; this connection is closed with `4409` right after. Nothing to do on this connection.
+- **The gateway's data is stale** (`message`: "the gateway data is stale"). The gateway is catching up or cannot read the topics (`status.stale` is true), so it cannot check an offer action (`accept`, `refuse`, `reply`, `resolve`) against its view. The connection stays open. Wait for `status` with `stale: false` and send the request again, or reconnect. `online`, `offline` and `set_languages` are not checked against the view and work while the data is stale.
 
 ## Timers in the browser
 

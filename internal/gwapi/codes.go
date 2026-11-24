@@ -45,8 +45,8 @@ const (
 	// a snapshot.
 	CloseSlowClient CloseCode = 4410
 	// CloseUnsupportedVersion: the Hello named a protocol version other
-	// than ProtocolVersion. The reason names the version the server
-	// speaks. The client must be reloaded, not reconnected.
+	// than ProtocolVersion. The reason is the name, like for every code.
+	// The client must be reloaded, not reconnected.
 	CloseUnsupportedVersion CloseCode = 4426
 	// CloseTooManyConnections: this address holds too many connections.
 	// Reconnect later.
@@ -152,8 +152,9 @@ const (
 	// gateway's data is stale so that it cannot check the request. The
 	// client reconnects.
 	CodeStaleConnection ErrorCode = "stale_connection"
-	// CodeUnknownConversation: Watch or Unwatch named a conversation that
-	// is not in the view of this connection, or that it does not watch.
+	// CodeUnknownConversation: Watch named a conversation that is not in
+	// the view of this connection, or that it may not watch. An Unwatch of
+	// a conversation that is not watched gets OutcomeAlreadyDone instead.
 	CodeUnknownConversation ErrorCode = "unknown_conversation"
 	// CodeTooManyWatched: Watch when the connection already watches
 	// MaxWatched conversations.

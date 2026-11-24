@@ -162,7 +162,8 @@ type Status struct {
 	// Reason is set when Stale is true.
 	Reason StaleReason `json:"reason,omitempty"`
 	// LagUS is how far the gateway is behind the topics, in machine time,
-	// when it knows it. Only when Stale is true.
+	// when it knows it, with any Reason. Always set with StaleLagging.
+	// Only when Stale is true.
 	LagUS int64 `json:"lag_us,omitempty"`
 }
 
