@@ -317,7 +317,7 @@ Sim (`cmd/sim`). `THREADROUTE_KAFKA_BROKERS` and `THREADROUTE_LOG_LEVEL` work as
 | `THREADROUTE_SIM_METRICS_ADDR` | `:9469` | listen address of metrics, pprof and health |
 | `THREADROUTE_SIM_OUTAGE_LIMIT` | `2m` | when the router has not answered this long, sim stops with an error |
 | `THREADROUTE_SIM_OPERATORS` | `200` | number of operators (1 to 9999), IDs `sim-op-0001` and so on |
-| `THREADROUTE_SIM_LANGUAGES` | `en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3` | language spread, scaled to the operator count. Every operator also serves the general queue (`und`) |
+| `THREADROUTE_SIM_LANGUAGES` | `en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3` | language spread, scaled to the operator count. The language of an operator depends only on the spread and its number. Every operator also serves the general queue (`und`) |
 | `THREADROUTE_SIM_CAPACITY` | `0` | capacity of each operator; 0 takes the router default |
 | `THREADROUTE_SIM_SHIFT_ONLINE`, `THREADROUTE_SIM_SHIFT_OFFLINE` | `4h`, `30m` | shift parts, with a random offset per operator |
 | `THREADROUTE_SIM_ACCEPT_DELAY_MIN`, `THREADROUTE_SIM_ACCEPT_DELAY_MAX` | `1s`, `8s` | uniform delay before an accept |
@@ -367,7 +367,7 @@ What can be changed:
 
 | Setting | Field | Service | Default | Bounds | How fast it acts |
 |---|---|---|---|---|---|
-| Simulated operators | `sim.operators` | sim | 200 | 10 to 500 | within a minute. Fewer: operators go offline by language, and their conversations go back to the queue. More: operators put aside come back first, then new ones are created |
+| Simulated operators | `sim.operators` | sim | 200 | 10 to 500 | within a minute. The active operators are always the numbers 1 to N. Fewer: the highest numbers go offline, and their conversations go back to the queue. More: operators put aside come back first, then new ones are created. The language of an operator depends only on the spread and its number, so the spread keeps its proportions at every count and no operator changes its language at a change or a restart |
 | Capacity of an operator | `sim.capacity` | sim | 4 | 1 to 20 | within a minute. An operator above the new capacity keeps their conversations and gets no new offers until the load is below it |
 | Handling time, median | `sim.handling_median_us` | sim | 45 s | 5 s to 10 min | for conversations accepted after the change |
 | Resolve time, median | `sim.resolve_median_us` | sim | 3 min | 10 s to 30 min | for conversations replied to after the change |
@@ -404,7 +404,7 @@ To try it on the local stack:
 4. Change a value, for example "Share of operators in teams", and press "Apply". The change shows in the list of last changes, marked `local`, and on the trend strip. `curl -s 127.0.0.1:9468/metrics | grep settings_value` shows the new value in the router.
 5. A second change within 10 seconds is refused, and the console says when you can apply again.
 
-Live check: pending.
+A live check on the laptop is described under "Results", in "Stand settings from the console, live check on the laptop".
 
 Where the values live. The team values of the router environment and the values that `sim` reports at its start are the defaults. While nothing is stored, the router uses its environment. The first report of `sim` already stores a set (version 1, marked `simulator` in the change log), with the team values of the router at that moment. From then on the stored set wins at every start, also over a new value in the environment. A new environment value only becomes the new default, and "Reset to defaults" in the console brings the defaults back. So on a stack that has run once, a new `THREADROUTE_ROUTER_TEAM_*` or `THREADROUTE_SIM_*` value of this list acts only after "Reset to defaults", or after the PostgreSQL volume is removed (`down -v`, which removes all routing data too). A router whose team values are outside the bounds runs with them as before and does not offer the settings; the console then shows no panel. A simulator whose values are outside the bounds runs from its environment and does not read the settings.
 
@@ -608,6 +608,48 @@ Conditions: about 21 minutes on 2026-11-24 from 15:49:47 to 16:10:47 UTC, a cold
 
 What the comparison shows: with about the same demand, the overflow used the slots that the strict teams left free. Until minute 15 the team queues stayed empty and the shared queues kept up, where the cap check had 161 conversations waiting at that minute, almost all of them in team queues. After minute 15 the demand was above the online capacity in both runs. Then the shared `en` queue did not keep up any more: its oldest wait reached 102 s at the end, against 18 s in the cap check. The overflow spreads the wait over all companies, where the cap check put it on the team companies alone. The two runs saw different 20 minutes of the stream, so the last minutes are not an exact comparison.
 
+### Stand settings from the console, live check on the laptop
+
+This check shows how fast a change from the console acts on the stand (decision 0014). It does not compare one setting with another; see "What this is for" in "Stand settings from the console".
+
+Conditions: one laptop, on 2026-11-24 (22:00 to 22:45 UTC), the whole compose stack on live traffic for about 45 minutes. Default settings at start (200 simulated operators). The real console was driven by a headless browser with the local role, in two browser windows. Metrics were read every 2 to 5 seconds, so the times below are known to about 5 seconds. Each time is the first read that showed the effect, so it is an upper bound. The operators are simulated, so the queue numbers describe the simulator and these settings.
+
+13 settings versions were applied from the console. Every applied change was visible in the status line of the console, in the answer of `GET /v1/settings`, as a row of the change log table, in the settings metrics of the router, the simulator and the gateway, as a mark on the trend strip, and in the second browser window without a reload. The round trip of one Apply was 25 to 30 ms.
+
+Time from Apply to effect:
+
+| Change | Effect | Time after Apply |
+|---|---|---|
+| Simulated operators 200 to 60 | the simulator put 140 operators aside | within 2.4 s |
+| | the router showed 54 operators online; waiting conversations went from 0 to 157 in that time | within 8.4 s |
+| Simulated operators 60 to 200 | 182 operators online | within 3 s |
+| | after the operators came back, teams grew to the cap again: 5 to 12 teams, 15 to 36 team operators | within 13 s |
+| Share of operators in teams 50% to 20% | the new cap (27 to 10 operators) was in effect | within 1 s |
+| Team size max 20 to 3 | teams were trimmed: online team operators 24 to 13 | within 11 s |
+
+What did not happen:
+
+- The share was lowered from 50% to 20% in the same change as the load that forms a team (20 to 6) and the load that releases it (8 to 2). After it, 24 online team operators stayed above the cap of 10 for the 6 minutes that were watched, and no new team formed. Decision 0009 has no forced exit from a team, so the teams only stop growing. In that time the cap stopped 1,153 attempts to form a team (`threadroute_router_team_cap_stops_total`).
+- After the operators went back from 60 to 200, the queue did not drain. During the run the traffic grew from about 1.0 to between 3.5 and 4.3 messages per second, the operator slots were full (680 of 720), and about 1,300 conversations were waiting 12 minutes later. So this run shows how fast a setting acts, not how many operators the stand needs.
+
+Other checks:
+
+| Check | Result | Note |
+|---|---|---|
+| A value outside the bounds | refused | as described in "Stand settings from the console" |
+| A second change 166 ms after the first | refused, then applied after the 10 seconds | |
+| Two people change the set at the same time | one change applied; the other person was told and kept their edits | |
+| Restart of the router, the simulator and the gateway, one at a time, with a stored set that is not the default (120 operators, team share 30%) | each came back within seconds with the stored set | the trend history started again after the gateway restart |
+| Empty list of settings roles | the panel was read-only, and a change sent by hand was refused | |
+| Database invariants | 0 violations of the routing rules in 44 checks | the same queries as in the earlier checks. One of them replays old offers against the languages the operators have now. After the simulator restart it reported 13 and then 14 rows in 7 of the 44 checks: offers made before the restart, compared with the changed languages (the defect below). With the languages at the time of each offer it reports 0 |
+| Error-level log lines | 0 in the router, the simulator, conv, normalize and ingest | |
+| Gateway | 20 to 27 MB of memory; mean tick from 0.06 ms to 0.39 ms as the view grew; 0 slow ticks | |
+
+What the check found, and what was fixed after it:
+
+- The first version of the simulator laid out the operators in blocks by language, so a restart at another count gave 14 operators another language. The rule is now "language by number": the language of an operator depends only on the language spread and its number, and the active operators are always the numbers 1 to N (decision 0014, point 3A). A second live check on a fresh stack went 200 to 120, restart, 200, 300, restart, 250, 500. No operator changed its language at any step (0 differences in the stored languages of all operators), the counts per language were exactly 176/6/4/4/4/3/3 at 200, and there was no error-level log line.
+- The trend strip counted offline team members as "operators in teams". It now counts the online ones, the number that the cap limits.
+
 ### Known gaps
 
 - An edit of a post is not pushed live to a conversation that is open on a screen.
@@ -620,7 +662,8 @@ What the comparison shows: with about the same demand, the overflow used the slo
 - The answer shape of the real site API is not verified live; this run used a local stub.
 - The site cookie holds a token that lives a short time, and the site refreshes it when its own pages load. A person who opens the console with an old cookie gets the demo level until they open a site page. This is not checked on the real site yet (decision 0014, point 7A).
 - The trend history lives in the memory of the gateway. A gateway restart loses it, and the strip starts empty.
-- Stand settings changed from the console have no result of a live run in this README yet.
+- A team number that goes down acts slowly, because decision 0009 has no forced exit from a team. In the live check of the console, 24 online team operators stayed above a lowered cap of 10 for the 6 minutes that were watched.
+- The CPU of PostgreSQL grows with the length of the queue: 2 to 5% of one core with an empty queue, up to about two cores with 1,000 to 2,800 conversations waiting on the laptop. The busiest statements are the operator pick (`PickOperator`) and the list of waiting conversations (`WaitingConversations`).
 - After the first start, a new team or simulator value in the environment acts only after "Reset to defaults" in the console, because the stored set wins at a restart.
 - A person with no conversation now gets the next conversation in their languages (1 to 3.4 s in the run after the change). A person who already holds one still loses to an idle simulated operator, because the priority only breaks a tie of the load (decision 0009). With the console capacity of 2 this is a short wait while the stream is busy, but it is not measured for a quiet hour.
 - A language whose few operators are online but busy (German and Spanish with 4 simulated operators each) still waits for them, up to 96 s for the oldest one in the run after the change; the general queue is used only when no online operator has the language.
