@@ -38,6 +38,7 @@ Companies come and go within hours (decision 0008), so a dedicated team needs a 
 - Team members serve only their company. Conversations of that company are served only by the team.
 - The team is released when the company has stayed below a lower threshold for a set time, or when its admission ends. Its operators finish the conversations they already hold and go back to the shared pool. Conversations of the company that are still waiting go to the shared queues.
 - The two thresholds are different on purpose, so a company near the limit does not gain and lose its team again and again.
+- Since 2026-11-24 all teams together hold at most a share of the online operators. See "A cap on the operators that teams hold".
 
 ### Assignment
 
@@ -118,6 +119,29 @@ A person in the console waited 374 to 469 seconds for a first offer in the first
 
 Options that were not chosen: priority before load (a person gets offers while they have a free slot, which moves further away from "lowest load"), and no change.
 
+## Change after the first day of live traffic (2026-11-24)
+
+### A cap on the operators that teams hold
+
+About five hours into the first 24-hour run, at daytime traffic, the number of teams grew from 11 to 60 in 90 minutes. The teams held 174 of the 180 online operators, 6 were left in the shared pool, and about 3,850 conversations waited, the oldest for more than an hour. At the same time about a fifth of all slots was free, because a team member serves only their company.
+
+The cause is a loop in the rules above. A waiting conversation counts for the active load of its company. When the shared queues grow, more companies reach the threshold and get a team, each team takes operators out of the shared pool, and the shared queues grow faster.
+
+- **Rule.** All teams together hold at most a share of the online operators. The start value is one half. The router checks the cap when an operator would join a team: a new team, or a team that grows.
+- **At the cap.** A team that should grow gets only as many operators as the cap leaves. A new team forms only if the cap leaves room for the minimum team size. Otherwise the company stays in the shared queues, and the router tries again at the next check.
+- **Order.** When the cap does not leave enough for every company, the company with the highest active load comes first.
+- **No forced exit.** The cap never takes an operator out of a team. When operators of the shared pool go offline and the share of the teams rises above the cap, the teams only stop growing. They get smaller by the normal size check and the release rule.
+- **Off switch.** A share of 1 turns the cap off.
+- **Counted.** The router shows the number of online operators in teams, the current cap, and how often the cap stopped a team from forming or growing.
+
+The project owner chose this option on 2026-11-24. Options that were not chosen:
+
+- **Idle team members help the shared pool.** It removes the free slots, but a team can then be busy when its company needs it, and it adds more rules and more edge cases. It can be added later if free team slots stay a problem.
+- **No new team while the shared queue is late.** It works against the loop directly, but teams then depend on the state of the queues, which is harder to explain and to test.
+- **More simulated operators and no rule change.** It helps for this traffic, and the loop comes back at the next peak.
+
+The rule for a language that no online operator has (above) removes a part of what fed the loop: conversations that nobody could serve stayed in a queue and counted for the load of their company. How much of the loop is left without the cap is not measured. The recorded stream of that day can be replayed against the new rules in the load tests.
+
 ## Choices confirmed by the project owner
 
 - **When a slot is freed:** when the operator resolves the conversation, not when the conversation closes by inactivity. The alternative keeps every conversation with its operator for at least 30 minutes and needs several times more operators.
@@ -138,6 +162,7 @@ These are configuration values. The numbers are starting points and are tuned wi
 | Team threshold, form | 20 open conversations of one company | |
 | Team threshold, release | below 8 for 15 minutes | |
 | Team size | open conversations divided by capacity, rounded up, between 2 and 20 | |
+| Share of online operators that teams may hold | one half | added on 2026-11-24 |
 
 ## Alternatives considered
 
