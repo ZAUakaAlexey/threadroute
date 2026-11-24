@@ -77,6 +77,8 @@ On 2026-11-24 the project owner chose the recommended option in every point:
 - **Human operator:** an operator of their own (4B).
 - **Token transport:** the first message after the connection opens (5C).
 
+Change of 2026-11-24: the site keeps its sign-in in a cookie that page code cannot read, so the console has no token to put into the first message. Decision 0014 (point 7) replaces 5C for the site sign-in: the gateway reads the cookie from the opening request. It also adds a second list of roles, for the right to change settings.
+
 ## Access levels that result
 
 | Level | Who | Sees | Can do |

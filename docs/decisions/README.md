@@ -16,3 +16,7 @@ Status values: `Proposed` (under review), `Accepted`, `Superseded by NNNN`.
 | [0008](0008-company-admission.md) | Which companies are served | Accepted |
 | [0009](0009-routing-model.md) | Routing: queues, teams, assignment and SLA | Accepted |
 | [0010](0010-operators-and-simulator.md) | Operators: the operator API and the simulator | Accepted |
+| [0011](0011-gateway.md) | Gateway: live data for browsers | Accepted |
+| [0012](0012-console-access.md) | Console access: sign-in, roles and the human operator | Accepted |
+| [0013](0013-console-screens.md) | Console: screens and the public page | Accepted |
+| [0014](0014-console-settings.md) | Settings changed from the console | Accepted |
