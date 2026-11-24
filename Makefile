@@ -34,8 +34,8 @@ SQLC_VERSION := v1.31.1
 generate:
 	cd internal/pg && CGO_ENABLED=1 $(GO) run github.com/sqlc-dev/sqlc/cmd/sqlc@$(SQLC_VERSION) generate
 
-# Starts Kafka, Redis, ingest, normalize and conv. Add --profile record to
-# also start the recorder.
+# Starts Kafka, Redis, PostgreSQL, ingest, normalize, conv, router and sim.
+# Add --profile record to also start the recorder.
 up:
 	$(COMPOSE) up -d --build
 

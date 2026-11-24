@@ -1,17 +1,21 @@
-# Local development stack: Kafka, Redis, ingest, normalize, conv and
-# (optional) record.
+# Local development stack: Kafka, Redis, PostgreSQL, ingest, normalize,
+# conv, router, sim and (optional) record.
 #
 #   docker compose -f deploy/compose.yaml up -d --build            # the pipeline
 #   docker compose -f deploy/compose.yaml --profile record up -d   # also record
 #
 # Start order: ingest creates raw.bluesky and ingest.cursor, normalize waits
 # for raw.bluesky and creates events and events.control, conv waits for those
-# two and creates conversations. Each service waits a bounded time (2 minutes
-# by default) and then exits, and the restart policy starts it again, so a
-# cold start needs no manual steps.
+# two and creates conversations. The router waits for PostgreSQL (healthy)
+# and for conversations, and creates routing. sim waits for the operator API
+# of the router and for routing. Each service waits a bounded time (2
+# minutes by default, 1 minute for PostgreSQL) and then exits, and the
+# restart policy starts it again, so a cold start needs no manual steps.
 #
-# Every published port listens on 127.0.0.1 only. No secrets exist yet:
-# Redis has no password and is reachable from the host only.
+# Every published port listens on 127.0.0.1 only. The only secret is the
+# PostgreSQL password. Its default here is for this local stack only; set
+# THREADROUTE_POSTGRES_PASSWORD in .env for anything else. Redis has no
+# password and is reachable from the host only.
 
 name: threadroute
 
@@ -93,17 +97,31 @@ services:
       - 768mb
       - --maxmemory-policy
       - noeviction
-      # Memory only: no RDB snapshots, no append-only file. Redis holds post
-      # text, and decision 0004 removes it at once on a deletion. An
-      # append-only file would keep deleted text on disk until its next
-      # rewrite. The cost: a Redis restart loses the conversation state and
-      # the outbox, see the README.
+      # Append-only file, written and synced on every write. conv commits
+      # its Kafka offsets only after Redis confirmed a write, so a confirmed
+      # write must survive a restart: the conversation state and the outbox
+      # come back after a Redis restart.
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - always
+      # Redis holds post text. A deletion removes it from memory at once,
+      # but the old text stays in the append-only file until the next
+      # rewrite (decision 0004). The file is rewritten when it has grown by
+      # half since the last rewrite, and not before it reaches 32 MB.
+      - --auto-aof-rewrite-percentage
+      - "50"
+      - --auto-aof-rewrite-min-size
+      - 32mb
+      # No separate RDB snapshots.
       - --save
       - ""
-      - --appendonly
-      - "no"
     ports:
       - "127.0.0.1:${THREADROUTE_REDIS_HOST_PORT:-6379}:6379"
+    volumes:
+      # /data of the image, owned by the redis user (999:1000). The
+      # append-only files are in /data/appendonlydir.
+      - redis-data:/data
     read_only: true
     security_opt:
       - no-new-privileges:true
@@ -120,6 +138,51 @@ services:
         limits:
           # maxmemory plus room for the process itself.
           memory: 1g
+
+  # Routing state of the router: operators, conversations, offers, teams,
+  # SLA timers and the outbox of routing events. No post text (decision 0004).
+  postgres:
+    image: postgres:19.0-alpine
+    hostname: postgres
+    restart: unless-stopped
+    # The uid and gid of the postgres user in the image. The entrypoint then
+    # skips its chown and user switch, which would need capabilities.
+    user: "70:70"
+    environment:
+      POSTGRES_USER: threadroute
+      POSTGRES_DB: threadroute
+      # Local only. The default is not a secret and must not be used
+      # anywhere else. Only URL-safe characters, because it is also put
+      # into the DSN of the router below.
+      POSTGRES_PASSWORD: ${THREADROUTE_POSTGRES_PASSWORD:-threadroute-local-only}
+    ports:
+      - "127.0.0.1:${THREADROUTE_POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      # The image keeps its data in /var/lib/postgresql/19/docker (PGDATA).
+      - postgres-data:/var/lib/postgresql
+    read_only: true
+    tmpfs:
+      - /var/run/postgresql
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # Over TCP: the temporary server of the first start listens on the
+    # socket only, so it does not count as ready.
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "threadroute", "-d", "threadroute"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          # shared_buffers is 128 MB by default; the router uses at most 8
+          # connections.
+          memory: 512m
 
   ingest:
     <<: *go-service
@@ -236,6 +299,109 @@ services:
         limits:
           memory: 256m
 
+  router:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: router
+    image: threadroute-router:dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      # The password is part of the DSN; the DSN is never logged.
+      THREADROUTE_POSTGRES_DSN: postgres://threadroute:${THREADROUTE_POSTGRES_PASSWORD:-threadroute-local-only}@postgres:5432/threadroute?sslmode=disable
+      THREADROUTE_POSTGRES_MAX_CONNS: ${THREADROUTE_POSTGRES_MAX_CONNS:-8}
+      THREADROUTE_POSTGRES_CONNECT_WAIT: ${THREADROUTE_POSTGRES_CONNECT_WAIT:-1m}
+      THREADROUTE_ROUTER_GROUP_ID: ${THREADROUTE_ROUTER_GROUP_ID:-threadroute-router}
+      THREADROUTE_ROUTER_METRICS_ADDR: ":9468"
+      # All interfaces inside the container, so sim reaches it. The API has
+      # no authentication in stage 3: the host port below is on 127.0.0.1
+      # only, and the compose network is not reachable from outside.
+      THREADROUTE_ROUTER_API_ADDR: ":9470"
+      THREADROUTE_ROUTER_INPUT_TOPIC_WAIT: ${THREADROUTE_ROUTER_INPUT_TOPIC_WAIT:-2m}
+      THREADROUTE_ROUTER_SPEED_FACTOR: ${THREADROUTE_ROUTER_SPEED_FACTOR:-1}
+      THREADROUTE_ROUTER_OPERATOR_CAPACITY: ${THREADROUTE_ROUTER_OPERATOR_CAPACITY:-4}
+      THREADROUTE_ROUTER_ACCEPT_TIMEOUT: ${THREADROUTE_ROUTER_ACCEPT_TIMEOUT:-20s}
+      THREADROUTE_ROUTER_ASSIGNMENT_TARGET: ${THREADROUTE_ROUTER_ASSIGNMENT_TARGET:-60s}
+      THREADROUTE_ROUTER_FIRST_RESPONSE_TARGET: ${THREADROUTE_ROUTER_FIRST_RESPONSE_TARGET:-120s}
+      THREADROUTE_ROUTER_TEAM_FORM_LOAD: ${THREADROUTE_ROUTER_TEAM_FORM_LOAD:-20}
+      THREADROUTE_ROUTER_TEAM_RELEASE_LOAD: ${THREADROUTE_ROUTER_TEAM_RELEASE_LOAD:-8}
+      THREADROUTE_ROUTER_TEAM_RELEASE_AFTER: ${THREADROUTE_ROUTER_TEAM_RELEASE_AFTER:-15m}
+      THREADROUTE_ROUTER_TEAM_MIN_SIZE: ${THREADROUTE_ROUTER_TEAM_MIN_SIZE:-2}
+      THREADROUTE_ROUTER_TEAM_MAX_SIZE: ${THREADROUTE_ROUTER_TEAM_MAX_SIZE:-20}
+      THREADROUTE_ROUTER_ASSIGN_WORKERS: ${THREADROUTE_ROUTER_ASSIGN_WORKERS:-4}
+      THREADROUTE_ROUTER_ASSIGN_INTERVAL: ${THREADROUTE_ROUTER_ASSIGN_INTERVAL:-250ms}
+      THREADROUTE_ROUTER_EXPIRE_INTERVAL: ${THREADROUTE_ROUTER_EXPIRE_INTERVAL:-1s}
+      THREADROUTE_ROUTER_SLA_INTERVAL: ${THREADROUTE_ROUTER_SLA_INTERVAL:-1s}
+      THREADROUTE_ROUTER_TEAM_INTERVAL: ${THREADROUTE_ROUTER_TEAM_INTERVAL:-10s}
+      THREADROUTE_ROUTER_PUBLISH_INTERVAL: ${THREADROUTE_ROUTER_PUBLISH_INTERVAL:-100ms}
+      THREADROUTE_ROUTER_PUBLISH_BATCH: ${THREADROUTE_ROUTER_PUBLISH_BATCH:-500}
+      THREADROUTE_ROUTER_OUTBOX_KEEP: ${THREADROUTE_ROUTER_OUTBOX_KEEP:-1h}
+      THREADROUTE_ROUTER_PRUNE_INTERVAL: ${THREADROUTE_ROUTER_PRUNE_INTERVAL:-1m}
+      THREADROUTE_ROUTER_COUNTS_INTERVAL: ${THREADROUTE_ROUTER_COUNTS_INTERVAL:-5s}
+      THREADROUTE_ROUTER_OUTAGE_LIMIT: ${THREADROUTE_ROUTER_OUTAGE_LIMIT:-2m}
+    ports:
+      - "127.0.0.1:9468:9468"
+      - "127.0.0.1:9470:9470"
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  sim:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: sim
+    image: threadroute-sim:dev
+    # The router image has no shell for a healthcheck, so sim only starts
+    # after it; sim itself waits for the operator API and the routing topic
+    # (THREADROUTE_SIM_START_WAIT). The dependency also makes compose stop
+    # sim before the router, so sim can put its operators offline.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      router:
+        condition: service_started
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_SIM_ROUTER_URL: http://router:9470
+      THREADROUTE_SIM_START_WAIT: ${THREADROUTE_SIM_START_WAIT:-2m}
+      THREADROUTE_SIM_GROUP_ID: ${THREADROUTE_SIM_GROUP_ID:-threadroute-sim}
+      THREADROUTE_SIM_METRICS_ADDR: ":9469"
+      THREADROUTE_SIM_OUTAGE_LIMIT: ${THREADROUTE_SIM_OUTAGE_LIMIT:-2m}
+      THREADROUTE_SIM_OPERATORS: ${THREADROUTE_SIM_OPERATORS:-200}
+      THREADROUTE_SIM_LANGUAGES: ${THREADROUTE_SIM_LANGUAGES:-en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3}
+      THREADROUTE_SIM_CAPACITY: ${THREADROUTE_SIM_CAPACITY:-0}
+      THREADROUTE_SIM_SHIFT_ONLINE: ${THREADROUTE_SIM_SHIFT_ONLINE:-4h}
+      THREADROUTE_SIM_SHIFT_OFFLINE: ${THREADROUTE_SIM_SHIFT_OFFLINE:-30m}
+      THREADROUTE_SIM_ACCEPT_DELAY_MIN: ${THREADROUTE_SIM_ACCEPT_DELAY_MIN:-1s}
+      THREADROUTE_SIM_ACCEPT_DELAY_MAX: ${THREADROUTE_SIM_ACCEPT_DELAY_MAX:-8s}
+      THREADROUTE_SIM_MISSED_OFFER_SHARE: ${THREADROUTE_SIM_MISSED_OFFER_SHARE:-0.03}
+      THREADROUTE_SIM_HANDLING_MEDIAN: ${THREADROUTE_SIM_HANDLING_MEDIAN:-45s}
+      THREADROUTE_SIM_RESOLVE_MEDIAN: ${THREADROUTE_SIM_RESOLVE_MEDIAN:-3m}
+      THREADROUTE_SIM_SEED: ${THREADROUTE_SIM_SEED:-1}
+    ports:
+      - "127.0.0.1:9469:9469"
+    # On stop sim puts its operators offline (up to 10s), then closes its
+    # Kafka client (up to 10s).
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
   record:
     <<: *go-service
     profiles: ["record"]
@@ -276,3 +442,5 @@ services:
 
 volumes:
   kafka-data:
+  redis-data:
+  postgres-data:
