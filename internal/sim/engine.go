@@ -150,13 +150,13 @@ type operator struct {
 	// idx is the 0-based index, the number minus 1, used to pick the call
 	// worker.
 	idx int
-	// lang is the language of the spread that the operator got when it was
-	// created. It never changes. langs is lang and event.LangUndetermined.
+	// lang is the language of the spread for its number (Spread.langOrder).
+	// It never changes. langs is lang and event.LangUndetermined.
 	lang  string
 	langs []string
-	// phase is the position in the shift cycle at the model time base,
-	// drawn once. base is the start of the shifts for the operators of the
-	// start, and the time of the change that created the others.
+	// phase is the position in the shift cycle at the model time base. It
+	// depends only on the seed and the number (phaseOf). base is the start
+	// of the shifts of the engine, for every operator.
 	phase time.Duration
 	base  time.Duration
 	// gen counts the shift changes and the presence calls of a change. A
@@ -213,10 +213,12 @@ type seenKey struct {
 // blocks on the network: the service runs the calls of due tasks in
 // workers and reports each answer back with complete.
 //
-// Every random draw happens in newEngine (shift phases, in operator order)
-// and in handle (accept delay and missed offers on "offered", handling and
-// resolve time on "accepted"). So the same seed and the same event order
-// give the same decisions, whatever the timing of the API answers.
+// Every random draw of the shared generator happens in handle (accept delay
+// and missed offers on "offered", handling and resolve time on "accepted").
+// So the same seed and the same event order give the same decisions,
+// whatever the timing of the API answers. The shift phase of an operator
+// comes from a generator of its own (phaseOf), so it depends on the seed
+// and the number only, not on when the operator was created.
 type engine struct {
 	mu          sync.Mutex
 	b           Behaviour
@@ -228,15 +230,19 @@ type engine struct {
 	outageLimit time.Duration
 
 	ops map[string]*operator
-	// opList holds every operator the engine knows, in number order: the
-	// operators of the start, then the ones that changes created.
+	// opList holds every operator the engine knows, in number order with no
+	// gap: opList[i] has the number i+1. The operators 1 to b.Operators are
+	// active, apart from a new one whose first put failed (see complete).
 	opList []*operator
-	// nextNum is the number of the next operator a change creates.
-	nextNum int
-	offers  map[string]*offer
-	byKey   map[string]*offer
-	seen    map[string]seenKey
-	events  int
+	// langs is the language of every number, Spread.langOrder up to
+	// MaxOperators.
+	langs  []string
+	offers map[string]*offer
+	byKey  map[string]*offer
+	seen   map[string]seenKey
+	events int
+	// base is the model time of start, the base of every shift.
+	base time.Duration
 
 	heap taskHeap
 	seq  uint64
@@ -251,11 +257,10 @@ type engine struct {
 	started     bool
 }
 
-// newEngine builds the engine for the operators ids, which are
-// operatorID(1) to operatorID(len(ids)) and exist in the router. langs
-// holds the languages of each operator, its spread language first. speed is
-// the speed factor of the router.
-func newEngine(b Behaviour, ids []string, langs [][]string, speed float64, outageLimit time.Duration,
+// newEngine builds the engine for the operators 1 to n, which exist in the
+// router with the languages of Spread.langOrder. speed is the speed factor
+// of the router.
+func newEngine(b Behaviour, n int, speed float64, outageLimit time.Duration,
 	clock Clock, m *metrics, logger *slog.Logger,
 ) *engine {
 	e := &engine{
@@ -268,24 +273,63 @@ func newEngine(b Behaviour, ids []string, langs [][]string, speed float64, outag
 		m:           m,
 		logger:      logger,
 		outageLimit: outageLimit,
-		ops:         make(map[string]*operator, len(ids)),
+		ops:         make(map[string]*operator, n),
+		langs:       b.Languages.langOrder(MaxOperators),
 		offers:      map[string]*offer{},
 		byKey:       map[string]*offer{},
 		seen:        map[string]seenKey{},
 		wake:        make(chan struct{}, 1),
-		nextNum:     len(ids) + 1,
 	}
-	cycle := b.ShiftOnline + b.ShiftOffline
-	for i, id := range ids {
-		op := &operator{
-			id: id, idx: i, lang: langs[i][0], langs: langs[i],
-			phase: uniform(e.rng, 0, cycle-1), active: true, registered: true,
-		}
-		e.ops[id] = op
-		e.opList = append(e.opList, op)
+	for range n {
+		op := e.add()
+		op.active, op.registered = true, true
 	}
 	e.countOperators()
 	return e
+}
+
+// add appends the operator with the next number to opList, not active and
+// not registered. It returns nil when the numbers ran out. The caller holds
+// e.mu or owns the engine alone.
+func (e *engine) add() *operator {
+	num := len(e.opList) + 1
+	if num > MaxOperators {
+		return nil
+	}
+	lang := e.langs[num-1]
+	op := &operator{
+		id: operatorID(num), idx: num - 1, lang: lang, langs: operatorLangs(lang),
+		phase: phaseOf(e.b.Seed, num, e.b.ShiftOnline+e.b.ShiftOffline), base: e.base,
+	}
+	e.ops[op.id] = op
+	e.opList = append(e.opList, op)
+	return op
+}
+
+// phaseOf returns the shift phase of the operator number num: a uniform
+// draw in the cycle from a generator of its own, seeded by the seed and the
+// number.
+func phaseOf(seed uint64, num int, cycle time.Duration) time.Duration {
+	rng := rand.New(rand.NewPCG(seed, uint64(num)))
+	return uniform(rng, 0, cycle-1)
+}
+
+// addAside adds the operators from the next number up to the number last,
+// which an earlier run left in the router and the start put offline. They
+// count as put aside: registered, offline and out of the shift cycle until
+// a larger count brings them back with a put of their own languages. It is
+// called before start.
+func (e *engine) addAside(last int) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for len(e.opList) < last {
+		op := e.add()
+		if op == nil {
+			break
+		}
+		op.registered = true
+	}
+	e.countOperators()
 }
 
 // start plans the first shift change of every operator. Every operator is
@@ -299,10 +343,12 @@ func (e *engine) start() {
 		return
 	}
 	e.started = true
-	base := e.tl.model(e.clock.Now())
+	e.base = e.tl.model(e.clock.Now())
 	for _, op := range e.opList {
-		op.base = base
-		e.planShift(op, base)
+		op.base = e.base
+		if op.active {
+			e.planShift(op, e.base)
+		}
 	}
 }
 
@@ -649,8 +695,8 @@ func (e *engine) complete(t *task, res opapi.Result, err error) error {
 				defer e.maybeStart(t.op, now)
 			} else {
 				// A new operator the router does not have: it counts as
-				// put aside, so the next larger count tries it again and
-				// the numbers keep no gap.
+				// put aside, and the next change that keeps its number
+				// in the count tries it again. The numbers keep no gap.
 				t.op.active, t.op.starting = false, false
 				e.countOperators()
 				e.logger.Warn("new operator not created, put aside", "operator_id", t.op.id, "error", err)

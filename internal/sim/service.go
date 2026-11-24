@@ -122,10 +122,6 @@ func New(o Options) (*Service, error) {
 	if o.RoutingTopic == "" {
 		o.RoutingTopic = bus.TopicRouting
 	}
-	b := o.Config.Behaviour
-	if _, err := b.Languages.Scale(b.Operators); err != nil {
-		return nil, fmt.Errorf("new sim service: languages: %w", err)
-	}
 	m, err := newMetrics(o.Registerer)
 	if err != nil {
 		return nil, fmt.Errorf("new sim service: %w", err)
@@ -138,18 +134,20 @@ func New(o Options) (*Service, error) {
 }
 
 // setOperators sets the operators of the start for a behaviour: the IDs
-// sim-op-0001 and on, the languages of the scaled spread in blocks.
+// sim-op-0001 to the count, each with the language of its number
+// (Spread.langOrder).
 func (s *Service) setOperators(b Behaviour) error {
-	scaled, err := b.Languages.Scale(b.Operators)
-	if err != nil {
+	if err := b.Languages.Validate(b.Operators); err != nil {
 		return fmt.Errorf("languages: %w", err)
 	}
-	s.langs = operatorLangs(scaled)
-	s.ids = make([]string, len(s.langs))
-	for i := range s.langs {
+	order := b.Languages.langOrder(b.Operators)
+	s.ids = make([]string, len(order))
+	s.langs = make([][]string, len(order))
+	for i, lang := range order {
 		s.ids[i] = operatorID(i + 1)
+		s.langs[i] = operatorLangs(lang)
 	}
-	s.logger.Info("operator languages", "spread", scaled.String(), "operators", b.Operators)
+	s.logger.Info("operator languages", "spread", b.Languages.layout(b.Operators).String(), "operators", b.Operators)
 	return nil
 }
 
@@ -231,7 +229,7 @@ func (s *Service) run(ctx context.Context) error {
 		return err
 	}
 
-	eng := newEngine(b, s.ids, s.langs, settings.SpeedFactor, s.cfg.OutageLimit, s.clock, s.m, s.logger)
+	eng := newEngine(b, len(s.ids), settings.SpeedFactor, s.cfg.OutageLimit, s.clock, s.m, s.logger)
 	s.eng = eng
 	cons, err := s.newConsumer(ends)
 	if err != nil {
@@ -248,7 +246,9 @@ func (s *Service) run(ctx context.Context) error {
 		return s.api.Offline(ctx, s.ids[i])
 	})
 	if err == nil {
-		err = s.offlineLeftovers(gctx, len(s.ids)+1)
+		var last int
+		last, err = s.offlineLeftovers(gctx, len(s.ids)+1)
+		eng.addAside(last)
 	}
 	if err != nil {
 		cancel()
@@ -505,46 +505,60 @@ func (s *Service) offlineAtStop(parent context.Context) {
 
 // offlineLeftovers puts offline the operators that an earlier run left in
 // the router with numbers from first on. Every run registers the numbers
-// 1 to its count at start and creates later operators with the next free
+// 1 to its count at start and creates later operators with the next
 // number, so the registered numbers have no gap: the first number that the
 // router does not know (CodeOperatorNotFound) ends the search. Without this,
 // after an exit without the offline calls of a stop, such an operator would
 // stay online and keep its conversations. The first number is asked alone,
 // because usually nothing is left, then startParallel at a time.
-func (s *Service) offlineLeftovers(ctx context.Context, first int) error {
+//
+// It returns the last number of the run of numbers from first on that
+// were put offline, or first-1 when there is none. The engine keeps those
+// operators as put aside.
+func (s *Service) offlineLeftovers(ctx context.Context, first int) (int, error) {
 	var outage outageClock
-	var left atomic.Int64
+	last := first - 1
+	left := 0
 	for from, size := first, 1; from <= MaxOperators; from, size = from+size, startParallel {
 		to := min(from+size-1, MaxOperators)
-		var end atomic.Bool
+		found := make([]bool, to-from+1)
 		g, gctx := errgroup.WithContext(ctx)
 		for n := from; n <= to; n++ {
 			g.Go(func() error {
-				found, err := s.offlineLeftover(gctx, operatorID(n), &outage)
-				if found {
-					left.Add(1)
-				} else {
-					end.Store(true)
-				}
+				ok, err := s.offlineLeftover(gctx, operatorID(n), &outage)
+				found[n-from] = ok
 				return err
 			})
 		}
 		if err := g.Wait(); err != nil {
-			return err
+			return first - 1, err
 		}
-		if end.Load() {
+		end := false
+		for i, ok := range found {
+			if !ok {
+				end = true
+				continue
+			}
+			left++
+			if !end {
+				last = from + i
+			}
+		}
+		if end {
 			break
 		}
 	}
-	if n := left.Load(); n > 0 {
-		s.logger.Info("operators of an earlier run with higher numbers put offline", "from", operatorID(first), "operators", n)
+	if left > 0 {
+		s.logger.Info("operators of an earlier run with higher numbers put offline", "from", operatorID(first), "operators", left)
 	}
-	return nil
+	return last, nil
 }
 
 // offlineLeftover puts one operator of an earlier run offline. It reports
 // false when the router does not know it, or when the router refused the
-// call, which is logged and ends the search.
+// call, which is logged and ends the search. The 404 of a number the router
+// does not know is the expected end of the search, not a failed call, so it
+// is not counted in the call metrics.
 func (s *Service) offlineLeftover(ctx context.Context, id string, outage *outageClock) (bool, error) {
 	backoff := minBackoff
 	for {
@@ -553,14 +567,15 @@ func (s *Service) offlineLeftover(ctx context.Context, id string, outage *outage
 			return false, ctx.Err()
 		}
 		label, code, out := classify(res, err)
+		if code == opapi.CodeOperatorNotFound {
+			outage.reset()
+			return false, nil
+		}
 		s.m.calls.WithLabelValues(actionOffline, label).Inc()
 		switch {
 		case out == outcomeSuccess:
 			outage.reset()
 			return true, nil
-		case code == opapi.CodeOperatorNotFound:
-			outage.reset()
-			return false, nil
 		case out != outcomeRetry:
 			s.logger.Warn("operator of an earlier run not put offline", "operator_id", id, "error", err)
 			return false, nil

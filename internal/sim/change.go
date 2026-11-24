@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ZAUakaAlexey/threadroute/internal/event"
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 )
 
@@ -27,8 +26,8 @@ type changeResult struct {
 	putAside, back, created int
 	// capacityPuts counts operators sent again with the new capacity.
 	capacityPuts int
-	// countErr is set when the operator count could not be applied: the
-	// language spread cannot be scaled to it. The count in effect stays.
+	// countErr is set when the operator count could not be applied: it is
+	// below the number of languages. The count in effect stays.
 	countErr error
 	// full is set when an operator could not be created because the
 	// numbers ran out (MaxOperators).
@@ -38,11 +37,12 @@ type changeResult struct {
 // applySim applies a sim part of the stand settings.
 //
 //   - Times and the missed share apply to the steps planned from now on.
-//   - The language spread of the configuration, scaled to the new count,
-//     gives a target for each language. In a language above its target,
-//     the operators with the highest numbers are put aside. In a language
-//     below it, operators put aside come back first, lowest numbers first,
-//     then new operators are created with the next free numbers.
+//   - The active operators are always the numbers 1 to the count, and the
+//     language of a number never changes (Spread.langOrder). So the result
+//     depends only on the new count, not on the changes before it. Active
+//     operators with a higher number are put aside. Numbers up to the count
+//     that were put aside come back, and the missing ones are created, in
+//     number order.
 //   - A new capacity is sent to every active operator. Operators that come
 //     back or are created get it with their own put.
 func (e *engine) applySim(s opapi.SimSettings) changeResult {
@@ -60,49 +60,30 @@ func (e *engine) applySim(s opapi.SimSettings) changeResult {
 	// the ones put aside now.
 	joined := map[*operator]bool{}
 	leaving := map[*operator]bool{}
-	targets, err := e.b.Languages.Scale(s.Operators)
-	if err != nil {
-		r.countErr = fmt.Errorf("languages %s cannot be scaled to %d operators: %w", e.b.Languages, s.Operators, err)
+	if err := e.b.Languages.Validate(s.Operators); err != nil {
+		r.countErr = fmt.Errorf("languages %s do not fit %d operators: %w", e.b.Languages, s.Operators, err)
 	} else {
 		e.b.Operators = s.Operators
-		for _, l := range targets {
-			var active, aside []*operator
-			for _, op := range e.opList {
-				switch {
-				case op.lang != l.Lang:
-				case op.active:
-					active = append(active, op)
-				default:
-					aside = append(aside, op)
-				}
-			}
-			if len(active) > l.Count {
-				for _, op := range active[l.Count:] {
-					e.putAside(op, now)
-					leaving[op] = true
-					r.putAside++
-				}
-				continue
-			}
-			need := l.Count - len(active)
-			for _, op := range aside {
-				if need == 0 {
-					break
-				}
+		for _, op := range e.opList {
+			switch num := op.idx + 1; {
+			case num > s.Operators && op.active:
+				e.putAside(op, now)
+				leaving[op] = true
+				r.putAside++
+			case num <= s.Operators && !op.active:
 				e.bringBack(op, now)
 				joined[op] = true
 				r.back++
-				need--
 			}
-			for ; need > 0; need-- {
-				op := e.create(l.Lang, now)
-				if op == nil {
-					r.full = true
-					break
-				}
-				joined[op] = true
-				r.created++
+		}
+		for len(e.opList) < s.Operators {
+			op := e.create(now)
+			if op == nil {
+				r.full = true
+				break
 			}
+			joined[op] = true
+			r.created++
 		}
 	}
 	if len(leaving) > 0 {
@@ -157,23 +138,16 @@ func (e *engine) bringBack(op *operator, now time.Duration) {
 	e.planPut(op, now)
 }
 
-// create makes a new operator with the next free number for a language and
-// plans its put. Its phase is drawn now, and it takes its place in the
-// shift cycle when the put succeeds. It returns nil when the numbers ran
-// out. The caller holds e.mu.
-func (e *engine) create(lang string, now time.Duration) *operator {
-	if e.nextNum > MaxOperators {
+// create makes a new operator with the next number and plans its put. It
+// takes its place in the shift cycle when the put succeeds, with the phase
+// of its number and the base of the start, like the operators of the start.
+// It returns nil when the numbers ran out. The caller holds e.mu.
+func (e *engine) create(now time.Duration) *operator {
+	op := e.add()
+	if op == nil {
 		return nil
 	}
-	num := e.nextNum
-	e.nextNum++
-	cycle := e.b.ShiftOnline + e.b.ShiftOffline
-	op := &operator{
-		id: operatorID(num), idx: num - 1, lang: lang, langs: []string{lang, event.LangUndetermined},
-		phase: uniform(e.rng, 0, cycle-1), base: now, active: true, starting: true,
-	}
-	e.ops[op.id] = op
-	e.opList = append(e.opList, op)
+	op.active, op.starting = true, true
 	e.planPut(op, now)
 	return op
 }

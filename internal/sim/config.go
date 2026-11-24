@@ -71,8 +71,8 @@ const (
 type Behaviour struct {
 	// Operators is the number of operators, 1 to MaxOperators.
 	Operators int
-	// Languages is the language spread, scaled to Operators with
-	// Spread.Scale.
+	// Languages is the language spread. Spread.langOrder gives the
+	// language of each operator number.
 	Languages Spread
 	// Capacity is the capacity of each operator. 0 takes the router
 	// default.

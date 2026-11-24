@@ -275,19 +275,7 @@ func newHarness(t *testing.T, b Behaviour, speed float64, operators int) *harnes
 		t.Fatal(err)
 	}
 	clock := newFakeClock()
-	ids := make([]string, operators)
-	langs := make([][]string, operators)
-	if scaled, err := b.Languages.Scale(operators); err == nil {
-		langs = operatorLangs(scaled)
-	} else {
-		for i := range langs {
-			langs[i] = []string{"en", event.LangUndetermined}
-		}
-	}
-	for i := range ids {
-		ids[i] = operatorID(i + 1)
-	}
-	e := newEngine(b, ids, langs, speed, time.Minute, clock, m, slog.New(slog.DiscardHandler))
+	e := newEngine(b, operators, speed, time.Minute, clock, m, slog.New(slog.DiscardHandler))
 	api := &fakeAPI{clock: clock, tl: &e.tl, anyOperator: true}
 	return &harness{t: t, clock: clock, api: api, e: e, m: m, reg: reg, seq: map[string]uint64{}}
 }

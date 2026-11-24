@@ -13,13 +13,17 @@
 //     the missed share.
 //  2. Wait for the routing topic, which the router creates.
 //  3. Create or update every operator: IDs sim-op-0001, sim-op-0002 and so
-//     on, the languages from the scaled spread in blocks, each with "und"
-//     for the general queue.
+//     on to the count. The language of each number depends only on the
+//     spread and the number (Spread.langOrder), so it is the same at every
+//     start and after any change of the count. Each has "und" for the
+//     general queue too.
 //  4. Read the end offsets of the routing topic and start the consumer
 //     exactly there.
 //  5. Put every operator offline, and then the operators with higher
 //     numbers that an earlier run left in the router, until the first
-//     number the router does not know.
+//     number the router does not know. Those count as put aside (see
+//     "Stand settings"). The 404 of that first unknown number is expected
+//     and not counted in the call metrics.
 //  6. Wait until the consumer has its partitions (up to StartWait), then
 //     plan the shifts: an operator whose shift is in its online part goes
 //     online at once, the others later. From here the scheduler runs and
@@ -74,12 +78,14 @@
 // version changed and the sim part differs from the applied one, it applies
 // it on the run, without a restart (point 3A): times and the missed share
 // for the steps planned after the change, a new capacity sent to every
-// active operator, and a new count by language. The language spread scaled
-// to the count gives a target for each language; operators above it are
-// put aside (offline, out of the shift cycle, still registered, every
-// planned step dropped), and below it operators put aside come back before
-// new ones are created with the next free numbers. A failed poll changes
-// nothing and counts on the outage clock like any call. See change.go.
+// active operator, and a new count. The active operators are always the
+// numbers 1 to the count. Operators with higher numbers are put aside
+// (offline, out of the shift cycle, still registered, every planned step
+// dropped); for a higher count, numbers put aside come back and the missing
+// ones are created, in number order. Each keeps the language of its number.
+// So the operators and their languages depend only on the count, not on the
+// changes or restarts before it. A failed poll changes nothing and counts
+// on the outage clock like any call. See change.go.
 //
 // # Time
 //
@@ -94,14 +100,16 @@
 //
 // # Randomness
 //
-// One generator, seeded from the configuration, makes every decision. The
-// draws happen at fixed points: the shift phases in operator order at
-// start, the missed offer and the accept delay on "offered", the handling
-// and resolve factors on "accepted". So the same seed and the same event
-// order give the same decisions, whatever the timing of the API answers. A
-// change of the stand settings draws the phases of the operators it
-// creates, so a run with changes cannot be repeated from the seed alone
-// (decision 0014).
+// One generator, seeded from the configuration, makes every decision about
+// offers. The draws happen at fixed points: the missed offer and the accept
+// delay on "offered", the handling and resolve factors on "accepted". So
+// the same seed and the same event order give the same decisions, whatever
+// the timing of the API answers. The shift phase of an operator comes from
+// the seed and its number alone, and every shift is counted from the start
+// of the process, so an operator that a change creates or brings back has
+// the same rhythm as if it had been there from the start. A run with
+// changes still cannot be repeated from the seed alone (decision 0014): the
+// changes come at times of their own and change which operators get offers.
 //
 // # Answers of the API
 //

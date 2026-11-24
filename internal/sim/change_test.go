@@ -1,8 +1,9 @@
 package sim
 
 import (
-	"maps"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,15 +70,13 @@ func (h *harness) presence() map[string]string {
 	return out
 }
 
-// checkState checks that the active operators match the targets of the
-// spread for n, that the router has them online, and every other operator
-// offline.
+// checkState checks that the active operators are the numbers 1 to n with
+// the languages of their numbers, that the router has them online, and
+// every other operator offline.
 func (h *harness) checkState(n int) {
 	h.t.Helper()
-	targets, err := h.e.b.Languages.Scale(n)
-	if err != nil {
-		h.t.Fatal(err)
-	}
+	targets := h.e.b.Languages.layout(n)
+	order := h.e.b.Languages.langOrder(len(h.e.opList))
 	byLang := h.activeByLang()
 	for _, l := range targets {
 		if got := len(byLang[l.Lang]); got != l.Count {
@@ -92,6 +91,12 @@ func (h *harness) checkState(n int) {
 		if op.active {
 			want = actionOnline
 			active++
+		}
+		if op.active != (op.idx < n) {
+			h.t.Errorf("count %d: %s active %v", n, op.id, op.active)
+		}
+		if op.lang != order[op.idx] || strings.Join(op.langs, ",") != order[op.idx]+",und" {
+			h.t.Errorf("count %d: %s has %v, want %s", n, op.id, op.langs, order[op.idx])
 		}
 		if pres[op.id] != want {
 			h.t.Errorf("count %d: %s (active %v) last %q, want %q", n, op.id, op.active, pres[op.id], want)
@@ -117,33 +122,25 @@ var defaultSpread = Spread{
 	{Lang: "es", Count: 4}, {Lang: "pt", Count: 3}, {Lang: "ko", Count: 3},
 }
 
-// TestChangeTargets: for a row of counts, the active operators of each
-// language are the scaled spread, the router has exactly them online, and
-// no more operators are created than the largest target of each language
-// needs.
+// TestChangeTargets: for a row of counts, the active operators are the
+// numbers 1 to the count with the languages of their numbers, the router
+// has exactly them online, and no more operators are created than the
+// largest count needs.
 func TestChangeTargets(t *testing.T) {
 	h := changeHarness(t, defaultSpread, 200)
 	h.checkState(200)
-	peak := map[string]int{}
-	note := func(n int) {
-		s, _ := defaultSpread.Scale(n)
-		for _, l := range s {
-			peak[l.Lang] = max(peak[l.Lang], l.Count)
-		}
+	if got := defaultSpread.layout(200); !slices.Equal(got, defaultSpread) {
+		t.Errorf("200 operators are %s, want the spread %s", got, defaultSpread)
 	}
-	note(200)
+	peak := 200
 	for _, n := range []int{100, 10, 37, 200, 500, 199, 11, 333} {
 		h.apply(h.simWith(n, 4))
 		h.until(h.model() + time.Minute)
 		h.checkState(n)
-		note(n)
+		peak = max(peak, n)
 	}
-	total := 0
-	for _, c := range peak {
-		total += c
-	}
-	if len(h.e.opList) != total {
-		t.Errorf("%d operators registered, want %d (the sum of the peaks of each language)", len(h.e.opList), total)
+	if len(h.e.opList) != peak {
+		t.Errorf("%d operators registered, want %d (the largest count)", len(h.e.opList), peak)
 	}
 	// Numbers have no gap.
 	for i, op := range h.e.opList {
@@ -153,52 +150,58 @@ func TestChangeTargets(t *testing.T) {
 	}
 }
 
-// TestChangeRoundingMovesOperator: with de:1, ja:3, en:3, 10 operators are
-// de 2, ja 4, en 4 and 11 are de 1, ja 5, en 5. One more operator puts a
-// de operator aside and creates one of ja and one of en.
-func TestChangeRoundingMovesOperator(t *testing.T) {
+// TestChangeKeepsLanguages: a change of the count never changes the
+// language of an operator. One more operator creates only the next number,
+// with the language of that number, and one less puts aside only the
+// highest number.
+func TestChangeKeepsLanguages(t *testing.T) {
 	spread := Spread{{Lang: "de", Count: 1}, {Lang: "ja", Count: 3}, {Lang: "en", Count: 3}}
+	order := spread.langOrder(12)
 	h := changeHarness(t, spread, 10)
-	want := map[string][]string{
-		"de": {operatorID(1), operatorID(2)},
-		"ja": {operatorID(3), operatorID(4), operatorID(5), operatorID(6)},
-		"en": {operatorID(7), operatorID(8), operatorID(9), operatorID(10)},
-	}
-	if got := h.activeByLang(); !maps.EqualFunc(got, want, slices.Equal) {
-		t.Fatalf("start %v, want %v", got, want)
-	}
+	h.checkState(10)
 	before := len(h.api.callsOf(""))
 	r := h.apply(h.simWith(11, 4))
-	if r.putAside != 1 || r.created != 2 || r.back != 0 {
-		t.Errorf("result %+v, want 1 put aside and 2 created", r)
-	}
-	want = map[string][]string{
-		"de": {operatorID(1)},
-		"ja": {operatorID(3), operatorID(4), operatorID(5), operatorID(6), operatorID(11)},
-		"en": {operatorID(7), operatorID(8), operatorID(9), operatorID(10), operatorID(12)},
-	}
-	if got := h.activeByLang(); !maps.EqualFunc(got, want, slices.Equal) {
-		t.Errorf("after 11 %v, want %v", got, want)
+	if r.putAside != 0 || r.created != 1 || r.back != 0 {
+		t.Errorf("result %+v, want 1 created", r)
 	}
 	var got []string
 	for _, c := range h.api.callsOf("")[before:] {
 		got = append(got, c.action+" "+c.op+" "+c.langs)
 	}
-	wantCalls := []string{
-		"offline sim-op-0002 ",
-		"put_operator sim-op-0011 ja,und", "put_operator sim-op-0012 en,und",
-		"online sim-op-0011 ", "online sim-op-0012 ",
-	}
+	wantCalls := []string{"put_operator sim-op-0011 " + order[10] + ",und", "online sim-op-0011 "}
 	if !slices.Equal(got, wantCalls) {
 		t.Errorf("calls %q, want %q", got, wantCalls)
 	}
 	h.checkState(11)
 
-	// Back to 10: the new ones are put aside, the de operator comes back.
-	h.apply(h.simWith(10, 4))
-	h.checkState(10)
-	if got := h.activeByLang()["de"]; !slices.Equal(got, []string{operatorID(1), operatorID(2)}) {
-		t.Errorf("de after 10 again: %v", got)
+	before = len(h.api.callsOf(""))
+	r = h.apply(h.simWith(9, 4))
+	if r.putAside != 2 || r.created != 0 || r.back != 0 {
+		t.Errorf("result %+v, want 2 put aside", r)
+	}
+	got = nil
+	for _, c := range h.api.callsOf("")[before:] {
+		got = append(got, c.action+" "+c.op)
+	}
+	if want := []string{"offline sim-op-0010", "offline sim-op-0011"}; !slices.Equal(got, want) {
+		t.Errorf("calls %q, want %q", got, want)
+	}
+	h.checkState(9)
+
+	r = h.apply(h.simWith(12, 4))
+	if r.putAside != 0 || r.created != 1 || r.back != 2 {
+		t.Errorf("result %+v, want 2 back and 1 created", r)
+	}
+	h.checkState(12)
+	// Every put of an operator carried the language of its number.
+	for _, c := range h.api.callsOf(actionPut) {
+		var num int
+		if _, err := fmt.Sscanf(c.op, "sim-op-%04d", &num); err != nil {
+			t.Fatal(err)
+		}
+		if c.langs != order[num-1]+",und" {
+			t.Errorf("%s put with %s, want %s", c.op, c.langs, order[num-1])
+		}
 	}
 }
 
@@ -234,9 +237,14 @@ func TestChangeFewer(t *testing.T) {
 	h.send(event.TypeOffered, customerID(13), operatorID(12), offerID(13))
 	h.send(event.TypeAccepted, customerID(10), operatorID(10), offerID(10))
 	h.until(10 * time.Hour)
+	// The shifts of the active operators go on; every other call is
+	// listed.
 	var after []string
 	for _, c := range h.api.callsOf("")[before:] {
-		after = append(after, c.action+" "+c.op)
+		shift := c.action == actionOnline || c.action == actionOffline
+		if !shift || c.op >= operatorID(10) {
+			after = append(after, c.action+" "+c.op)
+		}
 	}
 	want := []string{"offline sim-op-0010", "offline sim-op-0011", "offline sim-op-0012"}
 	if !slices.Equal(after, want) {

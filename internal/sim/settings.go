@@ -171,9 +171,9 @@ func (s *Service) logInvalid(fes []opapi.FieldError, err error) {
 }
 
 // startBehaviour returns the behaviour the engine starts with: the
-// environment, with the stored sim part in standLive. When the language
-// spread cannot be scaled to the stored count, the count of the
-// environment stays, with a warning.
+// environment, with the stored sim part in standLive. When the stored
+// count is below the number of languages, the count of the environment
+// stays, with a warning.
 func (s *Service) startBehaviour(st *stand) Behaviour {
 	b := s.cfg.Behaviour
 	if st.mode != standLive {
@@ -183,7 +183,7 @@ func (s *Service) startBehaviour(st *stand) Behaviour {
 	b.HandlingMedian = st.sim.HandlingMedian()
 	b.ResolveMedian = st.sim.ResolveMedian()
 	b.MissedOfferShare = st.sim.MissedOfferShare
-	if _, err := b.Languages.Scale(st.sim.Operators); err != nil {
+	if err := b.Languages.Validate(st.sim.Operators); err != nil {
 		s.logger.Warn("the stored operator count does not fit the language spread; the count of the environment stays",
 			"stored", st.sim.Operators, "operators", b.Operators, "languages", b.Languages.String(), "error", err)
 		return b
