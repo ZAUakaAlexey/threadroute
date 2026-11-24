@@ -74,7 +74,9 @@ func (s *Service) PruneOutbox(ctx context.Context, sentBefore time.Time, limit i
 }
 
 // Settings returns the settings of the operator API (opapi.PatternSettings).
-func (s *Service) Settings() opapi.Settings { return s.cfg.Settings() }
+//
+// It has no stand settings block; ReadSettings adds it.
+func (s *Service) Settings() opapi.Settings { return s.config().Settings() }
 
 // QueueDepth is the number of waiting conversations of one queue.
 type QueueDepth struct {
@@ -153,7 +155,7 @@ func (s *Service) Counts(ctx context.Context) (Counts, error) {
 			}
 		}
 	}
-	c.TeamCap = s.cfg.TeamCap(online)
+	c.TeamCap = s.config().TeamCap(online)
 	if c.LiveSlots, err = q.CountLiveSlots(ctx); err != nil {
 		return c, fmt.Errorf("counts: %w", err)
 	}

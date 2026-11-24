@@ -82,11 +82,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/event"
+	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg/pgdb"
 )
 
@@ -128,9 +130,21 @@ const teamLockKey int64 = 0x7472_7465_616d // "trteam"
 // Service runs the routing operations.
 type Service struct {
 	db     DB
-	cfg    Config
 	clock  Clock
 	logger *slog.Logger
+
+	// rules is the snapshot of the routing numbers in use (settings.go).
+	// Read it with config, once per operation that needs the team numbers.
+	rules atomic.Pointer[rules]
+	// envTeams is the team part of the configuration given to New: the
+	// defaults of the teams part of the stand settings.
+	envTeams opapi.TeamSettings
+	// standOn reports whether the Service offers stand settings. Only
+	// LoadSettings sets it.
+	standOn atomic.Bool
+	// consoleChanges and simChanges count the stand settings changes this
+	// Service applied.
+	consoleChanges, simChanges atomic.Int64
 }
 
 // New builds a Service. The configuration must be valid.
@@ -144,11 +158,14 @@ func New(db DB, cfg Config, clock Clock, logger *slog.Logger) (*Service, error) 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Service{db: db, cfg: cfg, clock: clock, logger: logger}, nil
+	s := &Service{db: db, clock: clock, logger: logger, envTeams: teamsOf(cfg)}
+	s.rules.Store(&rules{cfg: cfg, current: opapi.StandSettings{Teams: s.envTeams}})
+	return s, nil
 }
 
-// Config returns the configuration of the Service.
-func (s *Service) Config() Config { return s.cfg }
+// Config returns the configuration in use: the configuration given to New,
+// with the team part of the current stand settings.
+func (s *Service) Config() Config { return s.config() }
 
 // inTx runs fn in one transaction. It commits when fn returns nil and
 // rolls back otherwise. It never retries.

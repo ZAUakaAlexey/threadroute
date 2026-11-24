@@ -334,7 +334,7 @@ func testGeneralQueueSkips(t *testing.T, e *env) {
 	// u2 lets it time out. Every operator who could take it (u1 and u2;
 	// en cannot) is skipped now, so the skips are cleared and u1 gets it
 	// again.
-	e.clock.Advance(e.svc.cfg.machine(e.svc.cfg.AcceptTimeout))
+	e.clock.Advance(e.svc.config().machine(e.svc.config().AcceptTimeout))
 	if n, err := e.svc.ExpireOffers(ctx, 10); err != nil || n != 1 {
 		t.Fatalf("expire = %d, %v", n, err)
 	}

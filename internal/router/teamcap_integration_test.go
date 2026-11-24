@@ -278,7 +278,7 @@ func testCapOrder(t *testing.T, e *env) {
 	}
 
 	// Equal loads: the lower company ID first.
-	e2 := newCapEnv(newEnv(t, e.pool, e.svc.cfg))
+	e2 := newCapEnv(newEnv(t, e.pool, e.svc.config()))
 	e2.onlineOps(0, 4) // cap 2
 	e2.open(company(4), 20)
 	e2.open(company(3), 20)
@@ -347,7 +347,7 @@ func testCapTwoRouters(t *testing.T, e *env, pool DB) {
 	for i := range 8 {
 		c.open(company(i), 20)
 	}
-	other, err := New(pool, e.svc.cfg, e.clock, nil)
+	other, err := New(pool, e.svc.config(), e.clock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

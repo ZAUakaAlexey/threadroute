@@ -40,7 +40,7 @@ func startDB(t *testing.T, maxConns int32) *pgxpool.Pool {
 func resetDB(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
 	_, err := pool.Exec(t.Context(), `TRUNCATE outbox, replies, offer_skips, offers, conversations,
-		companies, operator_languages, operators RESTART IDENTITY CASCADE`)
+		companies, operator_languages, operators, stand_settings_changes, stand_settings RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset: %v", err)
 	}

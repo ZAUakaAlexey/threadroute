@@ -40,7 +40,7 @@ func (s *Service) PutOperator(ctx context.Context, id string, req opapi.Operator
 	}
 	capacity := req.Capacity
 	if capacity == 0 {
-		capacity = s.cfg.Capacity
+		capacity = s.config().Capacity
 	}
 	var resp opapi.OperatorResponse
 	err := s.inTx(ctx, func(q *pgdb.Queries) error {
@@ -342,7 +342,7 @@ func (s *Service) accept(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversat
 	ev.QueuedAt = deref(c.QueuedAt)
 	ev.OperatorID = o.OperatorID
 	ev.OfferID = o.ID
-	ev.Wait = s.cfg.model(now.Sub(deref(c.QueuedAt)))
+	ev.Wait = s.config().model(now.Sub(deref(c.QueuedAt)))
 	return ob.addConv(c, ev)
 }
 
@@ -360,7 +360,7 @@ func (s *Service) reply(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversati
 		if start == nil {
 			start = c.QueuedAt
 		}
-		rt := s.cfg.model(now.Sub(deref(start)))
+		rt := s.config().model(now.Sub(deref(start)))
 		c.FirstRepliedAt = ptr(now)
 		c.SimResponseUs = ptr(rt.Microseconds())
 		ev.FirstReply = true

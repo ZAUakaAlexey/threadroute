@@ -7,6 +7,9 @@
 //
 // # Start-up order
 //
+// New reads the stored stand settings (decision 0014) before anything
+// routes, so a set changed from the console survives a restart.
+//
 // Run waits for the conversations topic (conv creates it), ensures the
 // routing topic, and starts the outbox publisher, the refresh, prune and
 // sampling loops and the operator API. Then it catches up: it reads the end offsets
@@ -146,9 +149,17 @@ func New(ctx context.Context, o Options) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new router service: %w", err)
 	}
+	// The stored stand settings (decision 0014) win over the team values of
+	// the environment, so they are read before anything routes.
+	if err := core.LoadSettings(ctx); err != nil {
+		return nil, fmt.Errorf("new router service: %w", err)
+	}
 	m, err := newMetrics(o.Registerer)
 	if err != nil {
 		return nil, fmt.Errorf("new router service: %w", err)
+	}
+	if err := o.Registerer.Register(newSettingsCollector(core)); err != nil {
+		return nil, fmt.Errorf("new router service: register stand settings metrics: %w", err)
 	}
 	s := &Service{
 		cfg:          o.Config,
@@ -471,6 +482,11 @@ func closeClient(cl *kgo.Client, logger *slog.Logger, name string) {
 		logger.Warn("kafka client did not close in time", "client", name)
 	}
 }
+
+// kickingOps serves the stand settings through the core (decision 0014). A
+// change of the team numbers wakes nobody: it takes effect at the next team
+// check.
+var _ opserver.Stand = kickingOps{}
 
 // kickingOps is the router core as the operator API sees it. An action
 // that can free a slot or put a conversation back into a queue wakes the

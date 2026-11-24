@@ -384,7 +384,7 @@ func TestOutboxSequence(t *testing.T) {
 
 func TestNowNeverBefore(t *testing.T) {
 	clock := newFakeClock()
-	s := &Service{clock: clock, cfg: DefaultConfig()}
+	s := &Service{clock: clock}
 	later := clock.Now().Add(time.Second)
 	if got := s.now(nil, &later); !got.Equal(later) {
 		t.Errorf("now() = %s, want %s", got, later)

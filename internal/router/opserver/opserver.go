@@ -6,9 +6,19 @@
 //
 // The API has no authentication in stage 3 (decision 0010), so the router
 // binds it to localhost by default.
+//
+// # Stand settings
+//
+// The routes of opapi.SettingsPatterns and the stand settings block of
+// opapi.PatternSettings (decision 0014) are served through the optional
+// interface Stand. When the Operators value does not have it, the handler
+// answers like a router that does not offer stand settings: GET has no
+// "stand", and both PUT routes answer opapi.CodeSettingsOff. Every request
+// body is at most opapi.MaxBodyBytes; only answers may be larger.
 package opserver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +52,21 @@ type Operators interface {
 	Settings() opapi.Settings
 }
 
+// Stand is what the handlers need for the stand settings (decision 0014).
+// An error answer of the contract is an *opapi.SettingsError; any other
+// error is a database error. *router.Service has it.
+type Stand interface {
+	// ReadSettings returns the settings of opapi.PatternSettings with the
+	// stand settings block, and with the change log when withChanges is
+	// set.
+	ReadSettings(ctx context.Context, withChanges bool) (opapi.Settings, error)
+	// PutSettings runs steps 2 to 8 of opapi.PatternPutSettings.
+	PutSettings(ctx context.Context, req opapi.SettingsChangeRequest) (opapi.SettingsChangeResponse, error)
+	// PutSimDefaults serves opapi.PatternPutSimDefaults after the body was
+	// decoded.
+	PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
+}
+
 // DefaultTimeout bounds the work of one request.
 const DefaultTimeout = 10 * time.Second
 
@@ -57,14 +82,18 @@ type Options struct {
 
 // handler serves the API.
 type handler struct {
-	ops     Operators
+	ops Operators
+	// stand is nil when ops does not implement Stand.
+	stand   Stand
 	logger  *slog.Logger
 	timeout time.Duration
 	m       *metrics
 }
 
-// NewHandler returns the handler of every route in opapi.Patterns. Other
-// paths get the ServeMux answers (404, or 405 for a wrong method).
+// NewHandler returns the handler of every route in opapi.Patterns and
+// opapi.SettingsPatterns. Other paths get the ServeMux answers (404, or 405
+// for a wrong method). When ops also implements Stand, the stand settings
+// are served through it.
 func NewHandler(ops Operators, o Options) (http.Handler, error) {
 	if ops == nil {
 		return nil, errors.New("opserver: operators is nil")
@@ -84,6 +113,7 @@ func NewHandler(ops Operators, o Options) (http.Handler, error) {
 		return nil, err
 	}
 	h := &handler{ops: ops, logger: o.Logger, timeout: o.Timeout, m: m}
+	h.stand, _ = ops.(Stand)
 	mux := http.NewServeMux()
 	routes := map[string]func(*http.Request) (int, any){
 		opapi.PatternPutOperator: h.putOperator,
@@ -94,8 +124,15 @@ func NewHandler(ops Operators, o Options) (http.Handler, error) {
 		opapi.PatternReply:       h.reply,
 		opapi.PatternResolve:     h.offer("resolve", ops.Resolve),
 		opapi.PatternSettings:    h.settings,
+		// The stand settings (decision 0014).
+		opapi.PatternPutSettings:    h.putSettings,
+		opapi.PatternPutSimDefaults: h.putSimDefaults,
 	}
-	for _, p := range opapi.Patterns {
+	patterns := append(append([]string{}, opapi.Patterns...), opapi.SettingsPatterns...)
+	if len(routes) != len(patterns) {
+		return nil, fmt.Errorf("opserver: %d handlers for %d patterns", len(routes), len(patterns))
+	}
+	for _, p := range patterns {
 		fn, ok := routes[p]
 		if !ok {
 			return nil, fmt.Errorf("opserver: no handler for %q", p)
@@ -178,8 +215,90 @@ func (h *handler) reply(r *http.Request) (int, any) {
 	return h.result(r, "reply", res, err)
 }
 
-func (h *handler) settings(*http.Request) (int, any) {
-	return http.StatusOK, h.ops.Settings()
+// settings answers opapi.PatternSettings. Only the query value "1" asks
+// for the change log; any other value is the same as none.
+func (h *handler) settings(r *http.Request) (int, any) {
+	if h.stand == nil {
+		return http.StatusOK, h.ops.Settings()
+	}
+	withChanges := r.URL.Query().Get(opapi.QueryChanges) == "1"
+	s, err := h.stand.ReadSettings(r.Context(), withChanges)
+	if err != nil {
+		return h.fail(r, "settings", err)
+	}
+	return http.StatusOK, s
+}
+
+// putSettings answers opapi.PatternPutSettings. The body is checked here
+// (step 1 of the contract); the core runs the other steps in their order.
+func (h *handler) putSettings(r *http.Request) (int, any) {
+	const action = "put_settings"
+	var req opapi.SettingsChangeRequest
+	if err := decodeObject(r.Body, &req); err != nil {
+		return h.settingsFail(r, action, &opapi.SettingsError{SettingsErrorResponse: opapi.SettingsErrorResponse{
+			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeInvalidRequest, Message: err.Error()},
+		}})
+	}
+	if h.stand == nil {
+		return h.settingsFail(r, action, errSettingsOff)
+	}
+	resp, err := h.stand.PutSettings(r.Context(), req)
+	if err != nil {
+		return h.settingsFail(r, action, err)
+	}
+	return h.settingsDone(r, action, resp.Result, resp)
+}
+
+// putSimDefaults answers opapi.PatternPutSimDefaults, with the same order
+// of checks as putSettings.
+func (h *handler) putSimDefaults(r *http.Request) (int, any) {
+	const action = "put_sim_defaults"
+	var req opapi.SimDefaultsRequest
+	if err := decodeObject(r.Body, &req); err != nil {
+		return h.settingsFail(r, action, &opapi.SettingsError{SettingsErrorResponse: opapi.SettingsErrorResponse{
+			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeInvalidRequest, Message: err.Error()},
+		}})
+	}
+	if h.stand == nil {
+		return h.settingsFail(r, action, errSettingsOff)
+	}
+	resp, err := h.stand.PutSimDefaults(r.Context(), req)
+	if err != nil {
+		return h.settingsFail(r, action, err)
+	}
+	return h.settingsDone(r, action, resp.Result, resp)
+}
+
+// errSettingsOff is the answer of a handler without Stand.
+var errSettingsOff = &opapi.SettingsError{SettingsErrorResponse: opapi.SettingsErrorResponse{
+	ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeSettingsOff, Message: "this router does not offer stand settings"},
+}}
+
+// settingsDone checks the result of a stand settings call and counts it.
+func (h *handler) settingsDone(r *http.Request, action string, res opapi.Result, body any) (int, any) {
+	if res != opapi.ResultDone && res != opapi.ResultAlreadyDone {
+		return h.settingsFail(r, action, fmt.Errorf("unknown result %q", res))
+	}
+	h.m.actions.WithLabelValues(action, string(res)).Inc()
+	return http.StatusOK, body
+}
+
+// settingsFail maps an error of a stand settings call to the HTTP answer.
+// Every body is an opapi.SettingsErrorResponse: an *opapi.SettingsError
+// gives its own body with the status of its code, and any other error is
+// mapped like in fail.
+func (h *handler) settingsFail(r *http.Request, action string, err error) (int, any) {
+	var resp opapi.SettingsErrorResponse
+	if se, ok := errors.AsType[*opapi.SettingsError](err); ok {
+		resp = se.SettingsErrorResponse
+	} else {
+		resp.ErrorResponse = errorAnswer(err)
+	}
+	h.m.actions.WithLabelValues(action, string(resp.Code)).Inc()
+	if resp.Code == opapi.CodeUnavailable || resp.Code == opapi.CodeInternal {
+		h.logger.Warn("stand settings call failed", "action", action, "path", r.URL.Path, "code", resp.Code, "error", err)
+	}
+	return resp.Code.Status(), resp
 }
 
 func offerIDs(r *http.Request) (op, offer string, ok bool) {
@@ -278,6 +397,23 @@ func decodeBody(body io.Reader, v any) error {
 			return fmt.Errorf("body is larger than %d bytes", opapi.MaxBodyBytes)
 		}
 		return errors.New("body has data after the JSON object")
+	}
+	return nil
+}
+
+// decodeObject is decodeBody for a body that must be one JSON object:
+// "null", an array or another value is not a valid body, though it would
+// decode into a struct without an error.
+func decodeObject(body io.Reader, v any) error {
+	var raw json.RawMessage
+	if err := decodeBody(body, &raw); err != nil {
+		return err
+	}
+	if b := bytes.TrimLeft(raw, " \t\r\n"); len(b) == 0 || b[0] != '{' {
+		return errors.New("body is not a JSON object")
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return errors.New("body is not a valid JSON object of the expected shape")
 	}
 	return nil
 }

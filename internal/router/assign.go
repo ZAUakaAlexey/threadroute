@@ -104,7 +104,8 @@ func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (
 		}
 		op := pick.id
 		now := s.now(c.QueuedAt)
-		acceptBy := now.Add(s.cfg.machine(s.cfg.AcceptTimeout))
+		cfg := s.config()
+		acceptBy := now.Add(cfg.machine(cfg.AcceptTimeout))
 		o, err := q.InsertOffer(ctx, pgdb.InsertOfferParams{
 			CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession,
 			OperatorID: op, Capacity: pick.capacity, QueuedAt: *c.QueuedAt, OfferedAt: now, AcceptBy: acceptBy,
@@ -312,9 +313,10 @@ func (s *Service) ExpireOffers(ctx context.Context, limit int) (int, error) {
 // It returns the number of missed targets it marked.
 func (s *Service) CheckSLA(ctx context.Context, limit int) (int, error) {
 	now := s.now()
+	cfg := s.config()
 	rows, err := pgdb.New(s.db).SLADue(ctx, pgdb.SLADueParams{
-		AssignmentCutoff: now.Add(-s.cfg.machine(s.cfg.AssignmentTarget)),
-		ResponseCutoff:   now.Add(-s.cfg.machine(s.cfg.FirstResponseTarget)),
+		AssignmentCutoff: now.Add(-cfg.machine(cfg.AssignmentTarget)),
+		ResponseCutoff:   now.Add(-cfg.machine(cfg.FirstResponseTarget)),
 		MaxRows:          int32(limit),
 	})
 	if err != nil {
@@ -379,7 +381,8 @@ func (s *Service) slaMisses(c *pgdb.Conversation, now time.Time) []slaMiss {
 	if c.SlaStartedAt == nil {
 		return nil
 	}
-	elapsed := s.cfg.model(now.Sub(*c.SlaStartedAt))
+	cfg := s.config()
+	elapsed := cfg.model(now.Sub(*c.SlaStartedAt))
 	var out []slaMiss
 	add := func(target event.SLATarget, limit time.Duration) {
 		if elapsed >= limit {
@@ -388,10 +391,10 @@ func (s *Service) slaMisses(c *pgdb.Conversation, now time.Time) []slaMiss {
 	}
 	waitingOrOffered := c.State == stateWaiting || c.State == stateOffered
 	if waitingOrOffered && c.FirstAcceptedAt == nil && !c.SlaAssignmentMissed {
-		add(event.SLAAssignment, s.cfg.AssignmentTarget)
+		add(event.SLAAssignment, cfg.AssignmentTarget)
 	}
 	if (waitingOrOffered || c.State == stateAssigned) && c.FirstRepliedAt == nil && !c.SlaResponseMissed {
-		add(event.SLAFirstResponse, s.cfg.FirstResponseTarget)
+		add(event.SLAFirstResponse, cfg.FirstResponseTarget)
 	}
 	return out
 }
