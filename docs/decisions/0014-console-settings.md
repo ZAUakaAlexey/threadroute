@@ -36,7 +36,7 @@ Choices the project owner made on 2026-11-24, before the options below were writ
 | Load that forms a team | router | 20 | 2 to 500 | at the next team check (10 s) |
 | Load that releases a team | router | 8 | 1 to the form load minus 1 | after the release time |
 | Release time | router | 15 min | 1 min to 2 h | gradual |
-| Team size, min and max | router | 2 and 20 | 1 to 50, min not above max | gradual |
+| Team size, min and max | router | 2 and 20 | 1 to 50, min not above max | at the next team check (10 s) |
 | Share of operators in teams | router | 0.5 | 0.05 to 1 | growth at once, shrinking gradual |
 
 Not in the first version: the speed factor, worker counts and intervals (they can break the stand and do not change the picture), the accept timeout and the two targets (second version), shift lengths and the language spread of the simulator.
@@ -79,6 +79,8 @@ Recommendation: **A**. The cost: a run with changes cannot be repeated from the 
 - **B. Force the teams to the new numbers at once.** The effect is visible in seconds. It is a new routing rule: the router must choose who leaves and what happens to conversations in team queues.
 
 Recommendation: **A** for the first version. If the wait is too long to be useful, B comes as its own change to decision 0009.
+
+The team size is not part of this choice. The size check of decision 0009 already adds and removes members at every team check, so a new min or max size acts at the next check.
 
 In both options the router swaps the whole set in one step, and each team check and each pick reads one consistent set.
 
@@ -139,6 +141,13 @@ On 2026-11-24 the project owner chose the recommended option in every point:
 - **Site sign-in:** the cookie of the opening request (7A), and the role setting for a local stand, tied to loopback origins (L1).
 
 Point 7A replaces "the first message after the connection opens" (point 5C of decision 0012) for the site sign-in. The `hello` message stays the first message of the protocol. It no longer has to carry a site token.
+
+## Details that follow
+
+- **The environment gives the defaults, the store gives the current values.** The team values of the router environment and the values the simulator reports are the defaults. Until the first change the environment values are in effect. After it the stored set wins, also over a new environment value at a restart. "Reset to defaults" in the console brings the environment values back.
+- **A router whose environment values are outside the bounds** runs with them as before and does not offer the settings to the console.
+- **The change log keeps the changed fields** with the old and the new value, the time and a short label of who changed them. The label is shown only to connections that may change settings.
+- **Everyone sees the current values** on both screens. The trends are on the supervisor screen.
 
 ## Protocol changes
 
