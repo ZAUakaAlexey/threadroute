@@ -80,3 +80,33 @@ const (
 	// 1 for live traffic (decision 0009, "Clock").
 	RouterSpeedFactor = 1.0
 )
+
+// Simulated operators in sim (decision 0010). Durations are model time, like
+// the router ones: sim divides them by the speed factor of the router.
+const (
+	// SimOperators is the number of simulated operators. It was sized after
+	// the first live run of stage 2, from the number of open conversations.
+	SimOperators = 200
+	// SimLanguages is the language spread of the operators, as
+	// "lang:count" pairs. It is a starting value: one measured hour at
+	// night (UTC) had 98 percent English posts, and the spread will be
+	// tuned after a full-day measurement of the stream. The counts add up
+	// to SimOperators. Every operator also serves the general queue (und).
+	SimLanguages = "en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3"
+	// SimShiftOnline and SimShiftOffline are the two parts of a shift: an
+	// operator is online this long, then offline this long.
+	SimShiftOnline  = 4 * time.Hour
+	SimShiftOffline = 30 * time.Minute
+	// SimAcceptDelayMin and SimAcceptDelayMax bound the random delay before
+	// an operator accepts an offer.
+	SimAcceptDelayMin = time.Second
+	SimAcceptDelayMax = 8 * time.Second
+	// SimMissedOfferShare is the share of offers that an operator does not
+	// answer at all, so the accept timeout runs out.
+	SimMissedOfferShare = 0.03
+	// SimHandlingMedian is the median time from the accept to the reply
+	// marker.
+	SimHandlingMedian = 45 * time.Second
+	// SimResolveMedian is the median time from the reply to the resolve.
+	SimResolveMedian = 3 * time.Minute
+)
