@@ -59,8 +59,13 @@ function pad(n: number): string {
   return n.toString().padStart(2, '0');
 }
 
+/** The word in the singular for one and in the plural otherwise: "operator", "operators". */
+export function pluralWord(n: number, word: string, pluralForm = `${word}s`): string {
+  return n === 1 ? word : pluralForm;
+}
+
 function plural(n: number, word: string): string {
-  return `${n} ${word}${n === 1 ? '' : 's'}`;
+  return `${n} ${pluralWord(n, word)}`;
 }
 
 function trim(n: number): string {

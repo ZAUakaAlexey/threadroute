@@ -57,6 +57,36 @@ describe('supervisor board', () => {
     expect(h.socket().lastSent()).toMatchObject({ type: 'unwatch', conversation_id: ALICE_BOB });
   });
 
+  it('says operator and conversation in the singular for one and in the plural otherwise', () => {
+    const h = start();
+    const list = screen.getByRole('list', { name: 'Dedicated teams' });
+    expect(within(list).getByRole('listitem')).toHaveTextContent('2 operators, 21 active conversations');
+    h.push({
+      type: 'state',
+      seq: 2,
+      snapshot: false,
+      server_time_us: Date.now() * 1000,
+      teams: {
+        set: [
+          { id: 'did:plc:testalice0000000000000000', members: ['sim-op-0001'], active_load: 1, formed_at_us: Date.now() * 1000 },
+          { id: 'did:plc:testbob000000000000000000', members: [], active_load: 0, formed_at_us: Date.now() * 1000 },
+        ],
+      },
+    });
+    const [one, none] = within(list).getAllByRole('listitem');
+    expect(one).toHaveTextContent('1 operator, 1 active conversation');
+    expect(one).not.toHaveTextContent('operators');
+    expect(none).toHaveTextContent('0 operators, 0 active conversations');
+    expect(screen.getByText('2 companies')).toBeInTheDocument();
+  });
+
+  it('puts the teams list in a focusable region with a name', () => {
+    start();
+    const region = screen.getByRole('group', { name: 'Dedicated teams, scrollable' });
+    expect(region).toHaveAttribute('tabindex', '0');
+    expect(within(region).getByRole('list', { name: 'Dedicated teams' })).toBeInTheDocument();
+  });
+
   it('shows a removed team as gone after an update', () => {
     const h = start();
     expect(screen.getByText('1 company')).toBeInTheDocument();

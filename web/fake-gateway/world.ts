@@ -185,6 +185,22 @@ export class World {
     }
   }
 
+  /**
+   * Adds dedicated teams for companies that open no conversations
+   * (synthcompany1001 and up), so the routing of the world stays the same.
+   * Members are simulated operators without a team; the sizes go 1, 2, 3.
+   * No random numbers: the rest of a seeded world does not change.
+   */
+  addTeams(count: number, nowUs: number): void {
+    const free = [...this.operators.values()].filter((o) => o.kind === 'simulated' && o.team === undefined).map((o) => o.id);
+    const start = [...this.teams.keys()].filter((c) => c >= companyId(1001)).length + 1001;
+    for (let i = 0; i < count; i += 1) {
+      const company = companyId(start + i);
+      const members = Array.from({ length: (i % 3) + 1 }, (_, k) => free[(i * 3 + k) % free.length] ?? 'sim-op-0024');
+      this.teams.set(company, { company, members, formedAtUs: nowUs - 60_000_000 * (i + 1) });
+    }
+  }
+
   addConversation(openedUs: number, nowUs: number, lang = pickLanguage(this.rng)): Conversation {
     const companyN = this.rng.int(1, COMPANIES);
     const company = companyId(companyN);

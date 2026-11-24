@@ -9,6 +9,7 @@ import { CloseIcon, EyeIcon } from '../../ui/icons.tsx';
 import { languageName } from '../../ui/lang.ts';
 import { MessageList } from '../../ui/message-list.tsx';
 import { Panel } from '../../ui/panel.tsx';
+import { Select } from '../../ui/select.tsx';
 import { VirtualTable, type Column } from '../../ui/virtual-table.tsx';
 
 const ALL = 'all';
@@ -50,25 +51,25 @@ export function ConversationsPanel() {
           <label htmlFor={langId} className="sr-only">
             Filter by language
           </label>
-          <select id={langId} value={lang} onChange={handleLangChange} className={SELECT}>
+          <Select id={langId} value={lang} onChange={handleLangChange} width="w-40">
             <option value={ALL}>All languages</option>
             {languages.map((l) => (
               <option key={l} value={l}>
                 {languageName(l)} ({l})
               </option>
             ))}
-          </select>
+          </Select>
           <label htmlFor={stateId} className="sr-only">
             Filter by state
           </label>
-          <select id={stateId} value={state} onChange={handleStateChange} className={SELECT}>
+          <Select id={stateId} value={state} onChange={handleStateChange} width="w-28">
             <option value={ALL}>All states</option>
             {CONVERSATION_STATES.map((s) => (
               <option key={s} value={s}>
                 {s}
               </option>
             ))}
-          </select>
+          </Select>
         </>
       }
     >
@@ -86,8 +87,6 @@ export function ConversationsPanel() {
     </Panel>
   );
 }
-
-const SELECT = 'h-8 rounded-md border border-line-strong bg-panel px-2 text-[13px] text-ink';
 
 const COLUMNS: readonly Column<ConversationRow>[] = [
   {

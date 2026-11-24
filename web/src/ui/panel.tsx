@@ -13,7 +13,7 @@ export function Panel({ title, meta, actions, children, className = '' }: PanelP
   const headingId = useId();
   return (
     <section aria-labelledby={headingId} className={`min-w-0 rounded-lg border border-line bg-panel ${className}`}>
-      <header className="flex min-h-11 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2">
+      <header className="flex min-h-11 shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-2">
         <h2 id={headingId} className="eyebrow">
           {title}
         </h2>

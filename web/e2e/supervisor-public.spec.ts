@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 import { control, signInFull } from './helpers.ts';
 
@@ -58,4 +58,55 @@ test('the public page shows totals only, no keys and no text', async ({ page }) 
   expect(await snapshot.text()).not.toMatch(/ps-|did:|sim-op|web-|Sample/);
   await page.getByRole('link', { name: /try the operator role/i }).click();
   await expect(page.getByRole('heading', { name: 'Your desk' })).toBeVisible();
+});
+
+test.describe('teams panel next to the queues panel', () => {
+  test.use({ viewport: { width: 1400, height: 900 } });
+
+  async function heights(page: Page) {
+    const queues = await page.getByRole('region', { name: 'Queues by language' }).boundingBox();
+    const teams = await page.getByRole('region', { name: 'Dedicated teams' }).boundingBox();
+    expect(queues).not.toBeNull();
+    expect(teams).not.toBeNull();
+    return { queues: queues?.height ?? 0, teams: teams?.height ?? 0 };
+  }
+
+  test('has the height of the queues panel with few teams and does not scroll', async ({ page }) => {
+    await page.goto('#/supervisor');
+    await expect(page.getByText('2 companies')).toBeVisible();
+    await expect(page.getByRole('rowheader', { name: /english/i })).toBeVisible();
+    const h = await heights(page);
+    expect(Math.abs(h.teams - h.queues)).toBeLessThanOrEqual(1);
+    const list = page.getByRole('group', { name: 'Dedicated teams, scrollable' });
+    expect(await list.evaluate((el) => el.scrollHeight - el.clientHeight)).toBeLessThanOrEqual(0);
+  });
+
+  test('keeps the height of the queues panel with many teams and scrolls the list', async ({ page }) => {
+    await page.goto('#/supervisor');
+    await expect(page.getByText('2 companies')).toBeVisible();
+    await control('teams', { count: 60 });
+    await expect(page.getByText('62 companies')).toBeVisible();
+    await expect(page.getByRole('rowheader', { name: /english/i })).toBeVisible();
+    const h = await heights(page);
+    expect(Math.abs(h.teams - h.queues)).toBeLessThanOrEqual(1);
+    const list = page.getByRole('group', { name: 'Dedicated teams, scrollable' });
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+
+    // The keyboard scrolls the list and the header stays in view.
+    await list.focus();
+    await page.keyboard.press('End');
+    await expect.poll(() => list.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
+    await expect(page.getByRole('heading', { name: 'Dedicated teams' })).toBeInViewport();
+    expect(Math.abs((await heights(page)).teams - h.queues)).toBeLessThanOrEqual(1);
+  });
+
+  test('stacked on a narrow screen, the list stops at its maximum height', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto('#/supervisor');
+    await control('teams', { count: 60 });
+    await expect(page.getByText('62 companies')).toBeVisible();
+    const list = page.getByRole('group', { name: 'Dedicated teams, scrollable' });
+    expect(await list.evaluate((el) => el.clientHeight)).toBeLessThanOrEqual(360);
+    expect(await list.evaluate((el) => el.scrollHeight > el.clientHeight)).toBe(true);
+  });
 });

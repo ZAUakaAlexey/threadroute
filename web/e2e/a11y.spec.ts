@@ -32,6 +32,17 @@ for (const colorScheme of ['light', 'dark'] as const) {
       await expectNoViolations(page);
     });
 
+    test('supervisor view with a long, scrolling teams list', async ({ page }) => {
+      await page.setViewportSize({ width: 1400, height: 900 });
+      await page.goto('#/supervisor');
+      await control('teams', { count: 60 });
+      await expect(page.getByText('62 companies')).toBeVisible();
+      await expect(page.getByRole('table', { name: 'Conversations' }).getByRole('row').nth(3)).toBeVisible();
+      await expectNoViolations(page);
+      await page.getByLabel('Filter by language').focus();
+      await expectNoViolations(page);
+    });
+
     test('supervisor view and its dialog', async ({ page }) => {
       await page.goto('#/supervisor');
       await expect(page.getByRole('table', { name: 'Conversations' }).getByRole('row').nth(3)).toBeVisible();

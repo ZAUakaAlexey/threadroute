@@ -491,6 +491,12 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
         world.setPresence(id, 'offline', now);
         return { ok: true };
       }
+      case 'teams': {
+        // Many dedicated teams, for the layout of the teams panel.
+        world.addTeams(typeof body.count === 'number' ? body.count : 60, now);
+        for (const conn of connections) sendState(conn, false);
+        return { ok: true, teams: world.teams.size };
+      }
       case 'rekey':
         world.rekey();
         return { ok: true };

@@ -57,7 +57,7 @@ Screens use hash routes (`#/operator`), so the web server needs no rewrite rules
 src/protocol/   types, run-time parser, message builders, close codes, WebSocket client (no React)
 src/live/       Zustand store of the live view, session glue, shared clock tick, timers, hooks
 src/screens/    operator, supervisor and public screens
-src/ui/         shared components (panel, tables, tiles, message list, icons)
+src/ui/         shared components (panel, tables, tiles, select, message list, icons)
 fake-gateway/   Node fake of the gateway for development and tests (not in the build)
 e2e/            Playwright tests, with axe checks of every screen in light and dark
 ```
@@ -76,7 +76,7 @@ e2e/            Playwright tests, with axe checks of every screen in light and d
 `fake-gateway/` serves the protocol over a synthetic world: 24 simulated operators, two dedicated teams, six language queues, and conversations between invented accounts (`did:plc:synthcompany0001` and so on) with invented sample text. It is deterministic for a seed (`FAKE_SEED`). Every frame it sends goes through the console's own parser first, and demo frames are checked for pseudonyms only, so the fake cannot drift from the protocol without a test failing.
 
 - Scenario mode (default): conversations arrive, simulated operators accept and resolve, a human operator gets an offer every few seconds, and a cycle of two minutes plays a new message, a removed message, an operator going offline, and a stale spell.
-- Manual mode (`FAKE_MANUAL=1`, used by the end-to-end tests): nothing happens until the control API asks: `POST /__control/{reset,offer,customer-message,remove-message,stale,operator-offline,rekey,snapshot,close}`. `snapshot` sends every connection a new snapshot, as the gateway does when it rebuilt its view.
+- Manual mode (`FAKE_MANUAL=1`, used by the end-to-end tests): nothing happens until the control API asks: `POST /__control/{reset,offer,customer-message,remove-message,stale,operator-offline,rekey,snapshot,close,teams}`. `snapshot` sends every connection a new snapshot, as the gateway does when it rebuilt its view. `teams` adds dedicated teams (`{"count": 60}` by default) for companies that open no conversations, to see a long teams list.
 - Levels: the token `synthetic.full.token` gets the full level, any other or none gets the demo level. Like the real gateway of version 1, the fake never closes with 4401 or 4504.
 - `FAKE_SNAPSHOT_FRAME_ROWS` (default 500) is the most conversation rows in one frame of a supervisor snapshot. A larger snapshot comes in several frames: the first has `snapshot: true`, the rest are updates that add rows. The end-to-end tests use 3.
 - Watches follow the real gateway: a repeated `watch` gets `already_done` and a new messages snapshot, an `unwatch` of a conversation that is not watched gets `already_done`, and a watch ends without a message when the operator stops holding the conversation. Only `accept`, `refuse`, `reply` and `resolve` fail with `stale_connection` while the data is stale, with the gateway's texts.
