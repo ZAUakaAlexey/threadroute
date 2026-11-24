@@ -1,0 +1,28 @@
+{
+  "type": "messages",
+  "conversation_id": "ps-k2m3n4p5q6r7",
+  "snapshot": true,
+  "messages": [
+    {
+      "id": "ps-msgaaaa22222",
+      "direction": "customer",
+      "source_us": 1767323045123456,
+      "length": 31,
+      "edited": false
+    },
+    {
+      "id": "ps-msgbbbb33333",
+      "direction": "company",
+      "source_us": 1767323135123456,
+      "length": 24,
+      "edited": false
+    },
+    {
+      "id": "ps-msgcccc44444",
+      "direction": "customer",
+      "source_us": 1767323165123456,
+      "length": 31,
+      "edited": true
+    }
+  ]
+}

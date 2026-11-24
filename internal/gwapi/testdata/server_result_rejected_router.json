@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "request_id": "req-accept",
+  "outcome": "rejected",
+  "code": "offer_expired",
+  "message": "accept: the offer is expired"
+}

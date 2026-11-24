@@ -1,0 +1,250 @@
+[
+  {
+    "file": "client_hello_operator_anonymous.json",
+    "direction": "client",
+    "type": "hello",
+    "level": "",
+    "view": "",
+    "purpose": "first message of an operator screen without sign-in"
+  },
+  {
+    "file": "client_hello_operator_resume.json",
+    "direction": "client",
+    "type": "hello",
+    "level": "",
+    "view": "",
+    "purpose": "operator screen after a page reload, signed in, with the resume token of the earlier Welcome"
+  },
+  {
+    "file": "client_hello_supervisor_signed_in.json",
+    "direction": "client",
+    "type": "hello",
+    "level": "",
+    "view": "",
+    "purpose": "first message of a supervisor screen with a site token"
+  },
+  {
+    "file": "client_watch.json",
+    "direction": "client",
+    "type": "watch",
+    "level": "",
+    "view": "",
+    "purpose": "start watching the messages of one conversation"
+  },
+  {
+    "file": "client_unwatch.json",
+    "direction": "client",
+    "type": "unwatch",
+    "level": "",
+    "view": "",
+    "purpose": "stop watching a conversation"
+  },
+  {
+    "file": "client_action_online.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action online"
+  },
+  {
+    "file": "client_action_offline.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action offline"
+  },
+  {
+    "file": "client_action_set_languages.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action set_languages"
+  },
+  {
+    "file": "client_action_accept.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action accept"
+  },
+  {
+    "file": "client_action_refuse.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action refuse"
+  },
+  {
+    "file": "client_action_reply.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action reply"
+  },
+  {
+    "file": "client_action_resolve.json",
+    "direction": "client",
+    "type": "action",
+    "level": "",
+    "view": "",
+    "purpose": "operator action resolve"
+  },
+  {
+    "file": "server_welcome_operator_demo.json",
+    "direction": "server",
+    "type": "welcome",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "answer to an anonymous operator Hello"
+  },
+  {
+    "file": "server_welcome_supervisor_full.json",
+    "direction": "server",
+    "type": "welcome",
+    "level": "full",
+    "view": "supervisor",
+    "purpose": "answer to a supervisor Hello of an allowed user, load test speed"
+  },
+  {
+    "file": "server_status_fresh.json",
+    "direction": "server",
+    "type": "status",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "the data is current"
+  },
+  {
+    "file": "server_status_stale.json",
+    "direction": "server",
+    "type": "status",
+    "level": "demo",
+    "view": "supervisor",
+    "purpose": "the gateway cannot read the topics; screens show stale data"
+  },
+  {
+    "file": "server_state_operator_snapshot_demo.json",
+    "direction": "server",
+    "type": "state",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "first State of an operator connection: the operator and its offer and assignment"
+  },
+  {
+    "file": "server_state_operator_update_demo.json",
+    "direction": "server",
+    "type": "state",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "later State: a reply was marked, the offer expired and was removed"
+  },
+  {
+    "file": "server_state_supervisor_snapshot_full.json",
+    "direction": "server",
+    "type": "state",
+    "level": "full",
+    "view": "supervisor",
+    "purpose": "first State of a supervisor connection at the full level"
+  },
+  {
+    "file": "server_state_supervisor_update_demo.json",
+    "direction": "server",
+    "type": "state",
+    "level": "demo",
+    "view": "supervisor",
+    "purpose": "later State at the demo level: a conversation closed, an operator and a team changed"
+  },
+  {
+    "file": "server_messages_snapshot_full.json",
+    "direction": "server",
+    "type": "messages",
+    "level": "full",
+    "view": "operator",
+    "purpose": "messages of a watched conversation with text, after Watch"
+  },
+  {
+    "file": "server_messages_snapshot_demo.json",
+    "direction": "server",
+    "type": "messages",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "the same messages at the demo level: length and time, no text"
+  },
+  {
+    "file": "server_messages_snapshot_empty.json",
+    "direction": "server",
+    "type": "messages",
+    "level": "demo",
+    "view": "supervisor",
+    "purpose": "a watched conversation whose text is gone"
+  },
+  {
+    "file": "server_messages_update_full.json",
+    "direction": "server",
+    "type": "messages",
+    "level": "full",
+    "view": "operator",
+    "purpose": "one new message of a watched conversation"
+  },
+  {
+    "file": "server_message_removed_full.json",
+    "direction": "server",
+    "type": "message_removed",
+    "level": "full",
+    "view": "operator",
+    "purpose": "the author deleted a message: drop its text"
+  },
+  {
+    "file": "server_message_removed_demo.json",
+    "direction": "server",
+    "type": "message_removed",
+    "level": "demo",
+    "view": "supervisor",
+    "purpose": "the author was removed, at the demo level"
+  },
+  {
+    "file": "server_result_done.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "an action changed the state"
+  },
+  {
+    "file": "server_result_already_done.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "a repeated action changed nothing"
+  },
+  {
+    "file": "server_result_rejected_router.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "the router rejected an accept because the offer expired"
+  },
+  {
+    "file": "server_result_rejected_gateway.json",
+    "direction": "server",
+    "type": "result",
+    "level": "demo",
+    "view": "operator",
+    "purpose": "the gateway rejected an action over the rate limit"
+  },
+  {
+    "file": "public_snapshot.json",
+    "direction": "public",
+    "type": "public_snapshot",
+    "level": "",
+    "view": "",
+    "purpose": "answer of GET /v1/public/snapshot"
+  }
+]

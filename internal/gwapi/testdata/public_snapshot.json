@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "generated_at_us": 1767323100000001,
+  "stale": false,
+  "speed_factor": 1,
+  "totals": {
+    "messages_per_second": 3.5,
+    "conversations": {
+      "open": 1,
+      "waiting": 3,
+      "offered": 2,
+      "assigned": 7,
+      "resolved": 4
+    },
+    "companies_active": 2,
+    "operators_online": 12,
+    "humans_online": 1,
+    "slots_capacity": 46,
+    "slots_used": 9,
+    "missed_assignment": 1,
+    "missed_first_response": 0,
+    "wait_p50_us": 8000000,
+    "wait_p90_us": 41000000
+  },
+  "queues": [
+    {
+      "lang": "en",
+      "waiting": 3,
+      "offered": 2,
+      "oldest_wait_us": 61000000,
+      "missed_assignment": 1
+    },
+    {
+      "lang": "ja",
+      "waiting": 1,
+      "offered": 0,
+      "oldest_wait_us": 4000000,
+      "missed_assignment": 0
+    }
+  ]
+}

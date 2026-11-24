@@ -1,0 +1,136 @@
+{
+  "type": "state",
+  "seq": 1,
+  "snapshot": true,
+  "server_time_us": 1767323100000001,
+  "conversations": {
+    "set": [
+      {
+        "id": "did:plc:testalice0000000000000000|did:plc:testbob000000000000000000",
+        "company": "did:plc:testalice0000000000000000",
+        "customer": "did:plc:testbob000000000000000000",
+        "lang": "en",
+        "session": 1,
+        "state": "assigned",
+        "team_queue": false,
+        "priority": 0,
+        "operator_id": "sim-op-0001",
+        "queued_at_us": 1767323055000001,
+        "assignment_missed": false,
+        "first_response_missed": false,
+        "customer_messages": 2,
+        "company_messages": 1,
+        "opened_source_us": 1767323045123456
+      },
+      {
+        "id": "did:plc:testalice0000000000000000|did:plc:testcarol00000000000000000",
+        "company": "did:plc:testalice0000000000000000",
+        "customer": "did:plc:testcarol00000000000000000",
+        "lang": "en",
+        "session": 1,
+        "state": "waiting",
+        "team_queue": true,
+        "priority": 0,
+        "queued_at_us": 1767323055000001,
+        "assignment_missed": false,
+        "first_response_missed": false,
+        "customer_messages": 2,
+        "company_messages": 1,
+        "opened_source_us": 1767323045123456
+      }
+    ]
+  },
+  "operators": {
+    "set": [
+      {
+        "id": "sim-op-0001",
+        "kind": "simulated",
+        "languages": [
+          "en",
+          "und"
+        ],
+        "capacity": 4,
+        "presence": "online",
+        "load": 3,
+        "offered": 0,
+        "team": "did:plc:testalice0000000000000000"
+      },
+      {
+        "id": "sim-op-0002",
+        "kind": "simulated",
+        "languages": [
+          "de",
+          "en",
+          "und"
+        ],
+        "capacity": 4,
+        "presence": "offline",
+        "load": 0,
+        "offered": 0
+      },
+      {
+        "id": "web-test0001",
+        "kind": "human",
+        "languages": [
+          "en",
+          "und"
+        ],
+        "capacity": 2,
+        "presence": "online",
+        "load": 2,
+        "offered": 1
+      }
+    ]
+  },
+  "queues": {
+    "set": [
+      {
+        "id": "en",
+        "waiting": 3,
+        "team_waiting": 1,
+        "offered": 2,
+        "oldest_queued_at_us": 1767323039000001,
+        "missed_assignment": 1
+      },
+      {
+        "id": "und",
+        "waiting": 0,
+        "team_waiting": 0,
+        "offered": 0,
+        "missed_assignment": 0
+      }
+    ]
+  },
+  "teams": {
+    "set": [
+      {
+        "id": "did:plc:testalice0000000000000000",
+        "members": [
+          "sim-op-0001",
+          "sim-op-0003"
+        ],
+        "active_load": 21,
+        "formed_at_us": 1767322500000001
+      }
+    ]
+  },
+  "totals": {
+    "messages_per_second": 3.5,
+    "conversations": {
+      "open": 1,
+      "waiting": 3,
+      "offered": 2,
+      "assigned": 7,
+      "resolved": 4
+    },
+    "companies_active": 2,
+    "operators_online": 12,
+    "humans_online": 1,
+    "slots_capacity": 46,
+    "slots_used": 9,
+    "missed_assignment": 1,
+    "missed_first_response": 0,
+    "wait_p50_us": 8000000,
+    "wait_p90_us": 41000000
+  }
+}

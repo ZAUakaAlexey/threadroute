@@ -1,0 +1,15 @@
+{
+  "type": "messages",
+  "conversation_id": "did:plc:testalice0000000000000000|did:plc:testbob000000000000000000",
+  "snapshot": false,
+  "messages": [
+    {
+      "id": "test-msg-0004",
+      "direction": "customer",
+      "source_us": 1767323225123456,
+      "length": 25,
+      "text": "synthetic follow-up three",
+      "edited": false
+    }
+  ]
+}

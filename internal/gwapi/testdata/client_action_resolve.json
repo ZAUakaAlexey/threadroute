@@ -1,0 +1,6 @@
+{
+  "type": "action",
+  "request_id": "req-resolve",
+  "action": "resolve",
+  "offer_id": "of-101"
+}

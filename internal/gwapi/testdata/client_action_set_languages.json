@@ -1,0 +1,10 @@
+{
+  "type": "action",
+  "request_id": "req-set-languages",
+  "action": "set_languages",
+  "languages": [
+    "en",
+    "fr",
+    "und"
+  ]
+}

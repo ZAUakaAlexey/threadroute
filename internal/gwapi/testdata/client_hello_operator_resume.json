@@ -1,0 +1,11 @@
+{
+  "type": "hello",
+  "version": 1,
+  "view": "operator",
+  "token": "synthetic.site.token",
+  "resume_token": "rt_test_0000000000000001",
+  "languages": [
+    "de",
+    "en"
+  ]
+}

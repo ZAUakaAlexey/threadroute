@@ -1,0 +1,6 @@
+{
+  "type": "message_removed",
+  "conversation_id": "did:plc:testalice0000000000000000|did:plc:testbob000000000000000000",
+  "message_id": "test-msg-0001",
+  "reason": "deleted"
+}

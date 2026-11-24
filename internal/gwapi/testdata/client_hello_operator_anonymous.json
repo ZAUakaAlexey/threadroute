@@ -1,0 +1,9 @@
+{
+  "type": "hello",
+  "version": 1,
+  "view": "operator",
+  "languages": [
+    "en",
+    "und"
+  ]
+}

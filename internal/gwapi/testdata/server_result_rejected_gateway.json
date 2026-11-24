@@ -1,0 +1,7 @@
+{
+  "type": "result",
+  "request_id": "req-0003",
+  "outcome": "rejected",
+  "code": "rate_limited",
+  "message": "more than 5 requests per second"
+}

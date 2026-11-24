@@ -1,0 +1,6 @@
+{
+  "type": "hello",
+  "version": 1,
+  "view": "supervisor",
+  "token": "synthetic.site.token"
+}

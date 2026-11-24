@@ -110,3 +110,24 @@ const (
 	// SimResolveMedian is the median time from the reply to the resolve.
 	SimResolveMedian = 3 * time.Minute
 )
+
+// Gateway (decisions 0011 and 0012). Durations are machine time: they are
+// about browsers and connections, not about routing.
+const (
+	// GatewayTick is how often the gateway sends the current state of the
+	// keys that changed to a browser (decision 0011, point 4).
+	GatewayTick = 250 * time.Millisecond
+	// GatewayHelloTimeout closes a connection that has not sent a valid
+	// first message within this time (decision 0012, point 5).
+	GatewayHelloTimeout = 5 * time.Second
+	// GatewayOfflineGrace is how long a human operator stays online after
+	// their connection closed, so a page reload keeps their conversations
+	// (decision 0012, point 4).
+	GatewayOfflineGrace = 15 * time.Second
+	// GatewayDemoOperators is the most demo operators (anyone, without
+	// sign-in) at the same time (decision 0012, point 3).
+	GatewayDemoOperators = 5
+	// GatewayHumanCapacity is the capacity of a human operator (decision
+	// 0012, point 4).
+	GatewayHumanCapacity = 2
+)

@@ -1,0 +1,20 @@
+{
+  "type": "welcome",
+  "version": 1,
+  "level": "demo",
+  "view": "operator",
+  "operator_id": "web-test0001",
+  "resume_token": "rt_test_0000000000000001",
+  "server_time_us": 1767323100000001,
+  "speed_factor": 1,
+  "accept_timeout_us": 20000000,
+  "assignment_target_us": 60000000,
+  "first_response_target_us": 120000000,
+  "tick_ms": 250,
+  "limits": {
+    "max_message_bytes": 4096,
+    "actions_per_second": 5,
+    "action_burst": 10,
+    "max_watched": 4
+  }
+}

@@ -1,0 +1,42 @@
+{
+  "type": "state",
+  "seq": 2,
+  "snapshot": false,
+  "server_time_us": 1767323100250001,
+  "me": {
+    "id": "web-test0001",
+    "kind": "human",
+    "languages": [
+      "en",
+      "und"
+    ],
+    "capacity": 2,
+    "presence": "online",
+    "load": 1,
+    "offered": 0
+  },
+  "my_conversations": {
+    "set": [
+      {
+        "id": "ps-k2m3n4p5q6r7",
+        "company": "ps-abcdefgh2345",
+        "customer": "ps-zyxwvuts7654",
+        "lang": "en",
+        "session": 1,
+        "state": "assigned",
+        "offer_id": "of-101",
+        "accepted_at_us": 1767323070000001,
+        "queued_at_us": 1767323055000001,
+        "first_response_missed": false,
+        "replied": true,
+        "priority": 0,
+        "customer_messages": 2,
+        "company_messages": 0,
+        "last_message_source_us": 1767323045123456
+      }
+    ],
+    "remove": [
+      "ps-c2d3e4f5g6h7"
+    ]
+  }
+}

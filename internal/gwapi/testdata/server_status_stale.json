@@ -1,0 +1,6 @@
+{
+  "type": "status",
+  "stale": true,
+  "reason": "source_unavailable",
+  "lag_us": 12500000
+}

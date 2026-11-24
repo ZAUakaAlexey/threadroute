@@ -1,0 +1,6 @@
+{
+  "type": "action",
+  "request_id": "req-accept",
+  "action": "accept",
+  "offer_id": "of-101"
+}

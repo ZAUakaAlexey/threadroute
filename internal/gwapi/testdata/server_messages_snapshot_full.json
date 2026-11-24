@@ -1,0 +1,31 @@
+{
+  "type": "messages",
+  "conversation_id": "did:plc:testalice0000000000000000|did:plc:testbob000000000000000000",
+  "snapshot": true,
+  "messages": [
+    {
+      "id": "test-msg-0001",
+      "direction": "customer",
+      "source_us": 1767323045123456,
+      "length": 31,
+      "text": "synthetic customer question one",
+      "edited": false
+    },
+    {
+      "id": "test-msg-0002",
+      "direction": "company",
+      "source_us": 1767323135123456,
+      "length": 24,
+      "text": "synthetic company answer",
+      "edited": false
+    },
+    {
+      "id": "test-msg-0003",
+      "direction": "customer",
+      "source_us": 1767323165123456,
+      "length": 31,
+      "text": "synthetic edited question, caf\u00e9",
+      "edited": true
+    }
+  ]
+}

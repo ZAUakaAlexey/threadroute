@@ -1,0 +1,76 @@
+{
+  "type": "state",
+  "seq": 7,
+  "snapshot": false,
+  "server_time_us": 1767323101500001,
+  "conversations": {
+    "set": [
+      {
+        "id": "ps-k2m3n4p5q6r7",
+        "company": "ps-abcdefgh2345",
+        "customer": "ps-zyxwvuts7654",
+        "lang": "en",
+        "session": 1,
+        "state": "resolved",
+        "team_queue": false,
+        "priority": 0,
+        "assignment_missed": false,
+        "first_response_missed": false,
+        "customer_messages": 2,
+        "company_messages": 1,
+        "opened_source_us": 1767323045123456
+      }
+    ],
+    "remove": [
+      "ps-c2d3e4f5g6h7"
+    ]
+  },
+  "operators": {
+    "set": [
+      {
+        "id": "sim-op-0001",
+        "kind": "simulated",
+        "languages": [
+          "en",
+          "und"
+        ],
+        "capacity": 4,
+        "presence": "online",
+        "load": 3,
+        "offered": 0,
+        "team": "ps-abcdefgh2345"
+      }
+    ]
+  },
+  "teams": {
+    "set": [
+      {
+        "id": "ps-abcdefgh2345",
+        "members": [
+          "sim-op-0001"
+        ],
+        "active_load": 9,
+        "formed_at_us": 1767322500000001
+      }
+    ]
+  },
+  "totals": {
+    "messages_per_second": 4.25,
+    "conversations": {
+      "open": 1,
+      "waiting": 3,
+      "offered": 2,
+      "assigned": 7,
+      "resolved": 4
+    },
+    "companies_active": 2,
+    "operators_online": 12,
+    "humans_online": 1,
+    "slots_capacity": 46,
+    "slots_used": 9,
+    "missed_assignment": 1,
+    "missed_first_response": 0,
+    "wait_p50_us": 8000000,
+    "wait_p90_us": 41000000
+  }
+}
