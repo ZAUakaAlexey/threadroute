@@ -86,6 +86,15 @@ On 2026-11-24 the project owner chose the recommended option in every point: the
 - **Outages.** The stage 3 run showed that the router and the simulator did not stop when Kafka was paused, although the configuration says they should. The gateway does not rely on that behaviour. It reports "not ready" on its health endpoint while it cannot read the topics, and browsers show that the data is stale.
 - **Where it runs** is not decided here. It depends on the numbers of the 24-hour measurement and gets its own decision.
 
+## Details fixed before implementation
+
+- **Operators stay in the view.** The topics keep 24 hours, so an operator who does not change for a day would drop out of a view that is built from them. The router publishes the snapshot of every operator again every 6 hours.
+- **A large first state.** The first state of a supervisor can hold thousands of conversations. The gateway may send it in several frames: the first one is marked as a snapshot, and the rest are normal updates that add rows.
+- **Idle connections.** The gateway sends a WebSocket ping every 20 seconds and closes a connection that does not answer.
+- **Supervisor and text.** A supervisor at the full level may watch a conversation with its text, as the table in decision 0012 says.
+- **Removed messages and the router.** A "message removed" event never puts a conversation into a queue. The router only keeps its sequence numbers in step.
+- **The protocol** between gateway and browser is written down in `docs/gateway-protocol.md`, with one JSON example per message in `internal/gwapi/testdata/`. The Go tests and the console tests read the same examples.
+
 ## Contract changes this decision needs
 
 - `internal/event`, conversation events: a new type "message removed" (option 3A).
