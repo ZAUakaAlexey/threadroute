@@ -178,17 +178,25 @@ function MessagesDialog() {
   }
 
   return (
-    <Dialog.Root open={row !== null} onOpenChange={handleOpenChange}>
+    // Open while selected, also between the frames of a snapshot when the row
+    // is not there yet.
+    <Dialog.Root open={selectedId !== null} onOpenChange={handleOpenChange}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-40 bg-ink/30 backdrop-blur-[2px]" />
         <Dialog.Content className="fixed inset-x-3 top-[8vh] z-50 mx-auto flex max-h-[84vh] max-w-xl flex-col rounded-xl border border-line-strong bg-panel shadow-2xl">
-          {row !== null && (
+          {selectedId !== null && (
             <>
               <header className="flex items-start gap-3 border-b border-line px-5 py-4">
                 <div className="min-w-0 flex-1">
-                  <Dialog.Title className="truncate font-mono text-base font-medium">{row.customer}</Dialog.Title>
+                  <Dialog.Title className="truncate font-mono text-base font-medium">{row?.customer ?? 'Conversation'}</Dialog.Title>
                   <Dialog.Description className="truncate text-xs text-ink-3">
-                    {languageName(row.lang)}, {row.state}, writes to <span className="font-mono">{row.company}</span>
+                    {row === null ? (
+                      'Loading the conversation.'
+                    ) : (
+                      <>
+                        {languageName(row.lang)}, {row.state}, writes to <span className="font-mono">{row.company}</span>
+                      </>
+                    )}
                   </Dialog.Description>
                 </div>
                 <Dialog.Close className="rounded-md p-1.5 text-ink-3 hover:bg-sunken hover:text-ink" aria-label="Close">

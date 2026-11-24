@@ -7,6 +7,7 @@ import {
   CONVERSATION_STATES,
   DIRECTIONS,
   HELD_STATES,
+  KNOWN_RESULT_CODES,
   LEVELS,
   OPERATOR_KINDS,
   OUTCOMES,
@@ -426,7 +427,9 @@ function readMessageRemoved(o: Rec): MessageRemoved {
 
 function readResult(o: Rec): Result {
   const outcome = readEnum(o, 'outcome', '', OUTCOMES);
-  const code = readOptString(o, 'code', '', Number.MAX_SAFE_INTEGER);
+  // `code` is an enum like the others: an unknown code is a broken frame
+  // (docs/gateway-protocol.md, "Versioning").
+  const code = readOptEnum(o, 'code', '', KNOWN_RESULT_CODES);
   if (outcome === 'rejected' && code === undefined) throw new ProtocolError('code', 'is not set');
   return compact<Result>({
     type: 'result',

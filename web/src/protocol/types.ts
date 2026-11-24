@@ -42,7 +42,7 @@ export const ACTIONS = ['online', 'offline', 'set_languages', 'accept', 'refuse'
 export type ActionName = (typeof ACTIONS)[number];
 export type OfferActionName = Extract<ActionName, 'accept' | 'refuse' | 'reply' | 'resolve'>;
 
-/** Codes of a rejected request that the protocol defines today. */
+/** Codes of a rejected request that protocol version 1 defines (gwapi.Codes). */
 export const KNOWN_RESULT_CODES = [
   'invalid_request',
   'operator_not_found',
@@ -265,7 +265,10 @@ export interface Result {
   readonly type: 'result';
   readonly request_id: string;
   readonly outcome: Outcome;
-  /** A KnownResultCode today; a newer gateway may add codes. */
+  /**
+   * A KnownResultCode from the gateway (the parser refuses any other), or a
+   * local code of the client such as "connection_lost".
+   */
   readonly code?: string;
   readonly message?: string;
 }

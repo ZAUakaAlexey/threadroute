@@ -113,6 +113,22 @@ describe('GatewayClient handshake', () => {
   });
 });
 
+describe('GatewayClient enum values', () => {
+  it('closes on an enum value the version does not define, and reconnects', () => {
+    const { client, sockets, states, messages } = setup();
+    client.connect();
+    sockets[0]?.serverOpen();
+    sockets[0]?.serverSend(welcomeOperator);
+    sockets[0]?.serverSend({ type: 'result', request_id: 'r1', outcome: 'rejected', code: 'something_new' });
+    expect(messages.map((m) => m.type)).toEqual(['welcome']);
+    expect(sockets[0]?.closedWith).toBe(4000);
+    sockets[0]?.serverClose(4000);
+    expect(states.at(-1)).toMatchObject({ phase: 'waiting' });
+    vi.advanceTimersByTime(30_000);
+    expect(sockets).toHaveLength(2);
+  });
+});
+
 describe('GatewayClient reconnect', () => {
   it('reconnects after a lost connection with backoff', () => {
     const { client, sockets, states } = setup();
@@ -164,14 +180,36 @@ describe('GatewayClient reconnect', () => {
     expect((states.at(-1)?.retryAtMs ?? 0) - Date.now()).toBe(backoffDelayMs({ attempt: 0, random: () => 0.5 }));
   });
 
-  it('drops the site token after 4401 and connects at the demo level', () => {
-    const { client, sockets } = setup('supervisor', { token: 'synthetic.site.token' });
+  it('stops on 4401 and connects again by hand without the site token', () => {
+    const { client, sockets, states } = setup('supervisor', { token: 'synthetic.site.token' });
     client.connect();
     sockets[0]?.serverOpen();
     sockets[0]?.serverClose(4401);
-    vi.advanceTimersByTime(30_000);
+    expect(states.at(-1)).toMatchObject({ phase: 'stopped', closeCode: 4401 });
+    vi.advanceTimersByTime(60_000);
+    expect(sockets).toHaveLength(1);
+    client.connect();
     sockets[1]?.serverOpen();
     expect(sockets[1]?.sent[0]).toEqual({ type: 'hello', version: 1, view: 'supervisor' });
+  });
+
+  it('reconnects with backoff after 4429, 4503 and 4504', () => {
+    for (const code of [4429, 4503, 4504]) {
+      const { client, sockets, states } = setup();
+      client.connect();
+      sockets[0]?.serverOpen();
+      sockets[0]?.serverClose(code);
+      expect(states.at(-1)).toMatchObject({ phase: 'waiting', closeCode: code });
+      vi.advanceTimersByTime(30_000);
+      expect(sockets).toHaveLength(2);
+      client.dispose();
+    }
+  });
+
+  it('treats the browser codes 1005 and 1006 like 1001', () => {
+    for (const code of [1005, 1006]) {
+      expect(closeInfo(code)).toMatchObject({ reaction: closeInfo(1001).reaction, minDelayMs: 0 });
+    }
   });
 
   it('does not reconnect when another tab took the operator (4409)', () => {
@@ -185,11 +223,32 @@ describe('GatewayClient reconnect', () => {
     expect(states.at(-1)?.close?.name).toBe('replaced');
   });
 
-  it('follows the Go reconnect rule for every close code', () => {
-    const reconnect = [1001, 1005, 1006, 1011, 1013, 4401, 4410, 4429, 4503, 4504];
-    const stop = [1000, 1009, 4400, 4408, 4409, 4426];
-    expect(reconnect.every((c) => closeInfo(c).reaction.startsWith('reconnect'))).toBe(true);
-    expect(stop.every((c) => !closeInfo(c).reaction.startsWith('reconnect'))).toBe(true);
+  it('follows the Reconnect column (CloseCode.Reconnect in Go) for every close code', () => {
+    // The table of docs/gateway-protocol.md, "Close codes", plus the browser codes.
+    const table: Readonly<Record<number, readonly [name: string, isReconnect: boolean]>> = {
+      1000: ['normal', false],
+      1001: ['going_away', true],
+      1009: ['message_too_big', false],
+      1011: ['internal', true],
+      1013: ['try_again_later', true],
+      4400: ['bad_message', false],
+      4401: ['unauthorized', false],
+      4408: ['hello_timeout', false],
+      4409: ['replaced', false],
+      4410: ['slow_client', true],
+      4426: ['unsupported_version', false],
+      4429: ['too_many_connections', true],
+      4503: ['no_operator_seat', true],
+      4504: ['auth_unavailable', true],
+      1005: ['connection_lost', true],
+      1006: ['connection_lost', true],
+    };
+    for (const [code, [name, isReconnect]] of Object.entries(table)) {
+      const info = closeInfo(Number(code));
+      expect({ code, name: info.name, isReconnect: info.reaction === 'reconnect' }).toEqual({ code, name, isReconnect });
+    }
+    expect(closeInfo(4426).reaction).toBe('reload');
+    expect(closeInfo(4401).dropsToken).toBe(true);
   });
 
   it('backoff doubles up to 30 seconds', () => {

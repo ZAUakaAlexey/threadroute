@@ -1,11 +1,11 @@
 // Close codes of the gateway (docs/gateway-protocol.md, "Close codes"). The
-// reconnect rule follows CloseCode.Reconnect in internal/gwapi/codes.go.
+// reconnect rule follows CloseCode.Reconnect in internal/gwapi/codes.go: a
+// code reconnects by itself only when the "Reconnect" column says yes. The
+// client never reads the close reason; the code says everything.
 
 export type CloseReaction =
   /** Reconnect by itself with backoff. */
   | 'reconnect'
-  /** Reconnect without the site token (demo level). */
-  | 'reconnect-without-token'
   /** Stop. The user may reconnect by hand. */
   | 'stop'
   /** Stop. A newer console was deployed; the user must reload the page. */
@@ -14,6 +14,8 @@ export type CloseReaction =
 export interface CloseInfo {
   readonly name: string;
   readonly reaction: CloseReaction;
+  /** Forget the site token: the next connection goes at the demo level. */
+  readonly dropsToken?: boolean;
   /** Smallest wait before the next try, in milliseconds. */
   readonly minDelayMs: number;
   /** A short sentence for the user. */
@@ -39,9 +41,10 @@ const CLOSE_CODES: Readonly<Record<number, CloseInfo>> = {
   },
   4401: {
     name: 'unauthorized',
-    reaction: 'reconnect-without-token',
+    reaction: 'stop',
+    dropsToken: true,
     minDelayMs: 0,
-    message: 'Your sign-in was not accepted. Connected at the demo level.',
+    message: 'Your sign-in was not accepted. Connect again to use the demo level.',
   },
   4408: { name: 'hello_timeout', reaction: 'stop', minDelayMs: 0, message: 'The connection timed out at the start.' },
   4409: {
@@ -84,7 +87,11 @@ const LOST: CloseInfo = {
   message: 'The connection to the gateway was lost.',
 };
 
-/** Information about a close code. 1005, 1006 and unknown codes mean a lost connection. */
+/**
+ * Information about a close code. 1005 and 1006 come from the browser only
+ * (no code, or no close frame); they and unknown codes mean a lost
+ * connection, handled like 1001.
+ */
 export function closeInfo(code: number): CloseInfo {
   return CLOSE_CODES[code] ?? LOST;
 }

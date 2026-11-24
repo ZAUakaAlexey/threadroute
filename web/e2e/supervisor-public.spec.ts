@@ -12,6 +12,10 @@ test('supervisor sees flow, queues, operators and filters conversations', async 
   await expect(page.getByRole('table', { name: 'Operators' }).getByRole('row').nth(5)).toBeVisible();
   const conversations = page.getByRole('table', { name: 'Conversations' });
   await expect(conversations.getByRole('row').nth(3)).toBeVisible();
+  // The fake sends three rows per snapshot frame; every frame was applied.
+  const shown = page.getByText(/^\d+ of \d+ shown$/);
+  await expect(shown).toHaveText(/^(\d+) of \1 shown$/);
+  expect(Number((await shown.textContent())?.split(' ')[0])).toBeGreaterThan(3);
 
   await page.getByLabel('Filter by state').selectOption('resolved');
   await expect(conversations.getByRole('row')).toHaveCount(1);
@@ -33,6 +37,12 @@ test('supervisor at the full level reads messages in a dialog', async ({ page })
   await page.goto('#/supervisor');
   await page.getByRole('button', { name: /view messages/i }).first().click();
   const dialog = page.getByRole('dialog');
+  await expect(dialog.getByRole('list', { name: 'Messages' })).toContainText('Sample');
+  // A new snapshot in several frames ends every watch; the console watches
+  // the shown conversation again and keeps the dialog open.
+  const title = await dialog.getByRole('heading').textContent();
+  await control('snapshot');
+  await expect(dialog.getByRole('heading')).toHaveText(title ?? '');
   await expect(dialog.getByRole('list', { name: 'Messages' })).toContainText('Sample');
   await page.keyboard.press('Escape');
   await expect(dialog).toBeHidden();

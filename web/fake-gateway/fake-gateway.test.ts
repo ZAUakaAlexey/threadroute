@@ -122,6 +122,72 @@ describe('fake gateway', () => {
     peer.close();
   });
 
+  it('answers repeated watches and unwatches like the real gateway, and ends a watch by itself', async () => {
+    const peer = await connect({ view: 'operator', languages: ['en'] });
+    await peer.next((m) => m.type === 'state' && m.snapshot);
+    peer.send({ type: 'action', request_id: 'on', action: 'online' });
+    await peer.next(isResult('on'));
+    peer.send({ type: 'unwatch', request_id: 'u0', conversation_id: 'ps-aaaaaaaaaaaa' });
+    expect(await peer.next(isResult('u0'))).toMatchObject({ outcome: 'already_done' });
+
+    const offer = (await (await fetch(`${gateway.url}/__control/offer`, { method: 'POST' })).json()) as { offer_id: string };
+    peer.send({ type: 'action', request_id: 'acc', action: 'accept', offer_id: offer.offer_id });
+    await peer.next(isResult('acc'));
+    const state = await peer.next((m) => m.type === 'state' && (m.my_conversations?.set ?? []).some((c) => c.state === 'assigned'));
+    const id = state.type === 'state' ? (state.my_conversations?.set?.[0]?.id ?? '') : '';
+
+    peer.send({ type: 'watch', request_id: 'w1', conversation_id: id });
+    expect(await peer.next(isResult('w1'))).toMatchObject({ outcome: 'done' });
+    expect(await peer.next(isType('messages'))).toMatchObject({ conversation_id: id, snapshot: true });
+    peer.send({ type: 'watch', request_id: 'w2', conversation_id: id });
+    expect(await peer.next(isResult('w2'))).toMatchObject({ outcome: 'already_done' });
+    expect(await peer.next(isType('messages'))).toMatchObject({ conversation_id: id, snapshot: true });
+
+    // Resolving ends the watch without a message.
+    const framesBefore = peer.frames.length;
+    peer.send({ type: 'action', request_id: 'res', action: 'resolve', offer_id: offer.offer_id });
+    await peer.next(isResult('res'));
+    await peer.next((m) => m.type === 'state' && (m.my_conversations?.remove ?? []).includes(id));
+    expect(peer.frames.slice(framesBefore).some((f) => f.includes('"messages"') || f.includes('message_removed'))).toBe(false);
+    peer.send({ type: 'unwatch', request_id: 'u1', conversation_id: id });
+    expect(await peer.next(isResult('u1'))).toMatchObject({ outcome: 'already_done' });
+    peer.send({ type: 'watch', request_id: 'w3', conversation_id: id });
+    expect(await peer.next(isResult('w3'))).toMatchObject({ outcome: 'rejected', code: 'unknown_conversation' });
+    peer.close();
+  });
+
+  it('rejects only offer actions while stale, with the gateway text', async () => {
+    const peer = await connect({ view: 'operator', languages: ['en'] });
+    await peer.next((m) => m.type === 'state' && m.snapshot);
+    await fetch(`${gateway.url}/__control/stale`, { method: 'POST', body: JSON.stringify({ stale: true }) });
+    expect(await peer.next((m) => m.type === 'status' && m.stale)).toMatchObject({ reason: 'source_unavailable', lag_us: 4_000_000 });
+    peer.send({ type: 'action', request_id: 'on', action: 'online' });
+    expect(await peer.next(isResult('on'))).toMatchObject({ outcome: 'done' });
+    peer.send({ type: 'action', request_id: 'acc', action: 'accept', offer_id: 'of-1' });
+    expect(await peer.next(isResult('acc'))).toMatchObject({
+      outcome: 'rejected',
+      code: 'stale_connection',
+      message: 'accept: the gateway data is stale',
+    });
+    peer.close();
+  });
+
+  it('gives a rejected token the demo level, like the real gateway', async () => {
+    const peer = await connect({ view: 'supervisor', token: 'synthetic.rejected.token' });
+    expect(await peer.next(isType('welcome'))).toMatchObject({ level: 'demo' });
+    peer.close();
+  });
+
+  it('sends the code name as the close reason', async () => {
+    const ws = new WebSocket(`${gateway.url.replace('http', 'ws')}/v1/ws`);
+    const closed = new Promise<[number, string]>((resolve) => ws.on('close', (code, reason) => resolve([code, reason.toString('utf8')])));
+    await new Promise((resolve) => ws.on('open', resolve));
+    ws.send(JSON.stringify({ type: 'hello', version: 1, view: 'supervisor' }));
+    await new Promise((resolve) => ws.once('message', resolve));
+    await fetch(`${gateway.url}/__control/close`, { method: 'POST', body: JSON.stringify({ code: 1013 }) });
+    expect(await closed).toEqual([1013, 'try_again_later']);
+  });
+
   it('lets an offer expire', async () => {
     const peer = await connect({ view: 'operator', languages: ['en'] });
     await peer.next((m) => m.type === 'state' && m.snapshot);
@@ -173,6 +239,32 @@ describe('fake gateway', () => {
     const body = await (await fetch(`${gateway.url}/v1/public/snapshot`)).text();
     expect(Object.keys(JSON.parse(body) as object).sort()).toEqual(['generated_at_us', 'queues', 'speed_factor', 'stale', 'totals', 'version']);
     expect(body).not.toMatch(/did:|ps-|sim-op|web-/);
+  });
+});
+
+describe('fake gateway, a snapshot in several frames', () => {
+  it('sends the first frame as the snapshot and the other rows as updates', async () => {
+    await gateway.close();
+    gateway = await startFakeGateway({ port: 0, seed: 11, speedFactor: 4, isManual: true, tickMs: 60_000, snapshotFrameRows: 2 });
+    const total = gateway.world.conversations.size;
+    expect(total).toBeGreaterThan(4);
+    const peer = await connect({ view: 'supervisor' });
+    const states: Extract<ServerMessage, { type: 'state' }>[] = [];
+    while (states.reduce((n, m) => n + (m.conversations?.set?.length ?? 0), 0) < total) {
+      const m = await peer.next(isType('state'));
+      if (m.type === 'state') states.push(m);
+    }
+    expect(states.map((m) => m.seq)).toEqual(states.map((_, i) => i + 1));
+    expect(states.map((m) => m.snapshot)).toEqual(states.map((_, i) => i === 0));
+    expect(states.every((m) => (m.conversations?.set?.length ?? 0) <= 2)).toBe(true);
+    expect(states[0]?.operators?.set?.length).toBeGreaterThan(0);
+    expect(states.slice(1).every((m) => Object.keys(m).sort().join() === 'conversations,seq,server_time_us,snapshot,type')).toBe(true);
+
+    // A later snapshot (the gateway rebuilt its view) is split the same way.
+    await fetch(`${gateway.url}/__control/snapshot`, { method: 'POST' });
+    const again = await peer.next((m) => m.type === 'state' && m.snapshot);
+    expect(again.type === 'state' && again.seq).toBe(states.length + 1);
+    peer.close();
   });
 });
 

@@ -18,14 +18,29 @@ const MESSAGES: Readonly<Record<string, string>> = {
   not_allowed: 'This is not allowed on this screen.',
   rate_limited: 'Too many requests. Wait a second and try again.',
   unknown_offer: 'This offer is no longer live.',
-  stale_connection: 'The data is stale, so the gateway could not check the request.',
+  stale_connection: 'The gateway could not check the request. Reconnect and try again.',
   unknown_conversation: 'This conversation is no longer in your view.',
   too_many_watched: 'Too many conversations are open at the same time.',
   not_connected: 'Not connected to the gateway.',
   connection_lost: 'The connection was lost before the gateway answered.',
 };
 
+// `stale_connection` has two causes, told apart by the text of `message`
+// (docs/gateway-protocol.md, "stale_connection"). The gateway puts the
+// action name in front, for example "accept: the gateway data is stale".
+const STALE_OWNER_TEXT = 'the operator moved to another connection';
+const STALE_DATA_TEXT = 'the gateway data is stale';
+
 export function resultMessage(result: Result): string {
   const code = result.code ?? '';
+  if (code === 'stale_connection') return staleConnectionMessage(result.message ?? '');
   return MESSAGES[code] ?? `The request was rejected (${code}).`;
+}
+
+function staleConnectionMessage(text: string): string {
+  if (text.includes(STALE_OWNER_TEXT)) return 'This operator session moved to another tab or window.';
+  if (text.includes(STALE_DATA_TEXT)) {
+    return 'The data is stale, so the gateway could not check the request. Try again when the data is current.';
+  }
+  return MESSAGES.stale_connection ?? '';
 }

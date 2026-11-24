@@ -6,6 +6,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { WebSocketServer, type RawData, type WebSocket } from 'ws';
 
+import { closeInfo } from '../src/protocol/close-codes.ts';
 import { parseClientMessage, parsePublicSnapshot, parseServerMessage } from '../src/protocol/parse.ts';
 import type {
   Changes,
@@ -25,15 +26,25 @@ export interface FakeGatewayOptions extends WorldOptions {
   readonly port: number;
   readonly host?: string;
   readonly tickMs?: number;
+  /**
+   * The most conversation rows in one frame of a supervisor snapshot, like
+   * GATEWAY_SNAPSHOT_FRAME_ROWS of the real gateway. A larger snapshot comes
+   * in several frames: the first is the snapshot, the rest are updates.
+   */
+  readonly snapshotFrameRows?: number;
   readonly log?: (line: string) => void;
 }
 
 export const FULL_TOKEN = 'synthetic.full.token';
-export const REJECTED_TOKEN = 'synthetic.rejected.token';
 const MAX_DEMO_OPERATORS = 5;
 const OFFLINE_GRACE_MS = 15_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const MAX_WATCHED = 4;
+const DEFAULT_SNAPSHOT_FRAME_ROWS = 500;
+/** The fixed texts of the real gateway (internal/gateway/client.go). */
+const STALE_OWNER_TEXT = 'the operator moved to another connection';
+const STALE_DATA_TEXT = 'the gateway data is stale';
+const OFFER_ACTIONS: ReadonlySet<string> = new Set(['accept', 'refuse', 'reply', 'resolve']);
 
 type Collections = 'my_conversations' | 'conversations' | 'operators' | 'queues' | 'teams';
 
@@ -164,10 +175,37 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       }
       conn.totalsJson = json;
     }
-    if (!hasChange) return;
+    // A snapshot ends every watch, without a message.
     if (isSnapshot) conn.watched.clear();
+    else pruneWatches(conn);
+    if (!hasChange) return;
+    const parts = isSnapshot ? splitConversations(message, options.snapshotFrameRows ?? DEFAULT_SNAPSHOT_FRAME_ROWS) : [];
     conn.seq += 1;
     send(conn, { type: 'state', seq: conn.seq, snapshot: isSnapshot, server_time_us: nowUs(), ...message });
+    // The rest of a large snapshot: updates that only add rows, as the real
+    // gateway sends them (docs/gateway-protocol.md, "A snapshot in several frames").
+    for (const part of parts) {
+      conn.seq += 1;
+      send(conn, { type: 'state', seq: conn.seq, snapshot: false, server_time_us: nowUs(), conversations: { set: part } });
+    }
+  }
+
+  /** May this connection watch the conversation now? Like mayWatch of the real gateway. */
+  function mayWatch(conn: Connection, key: string): boolean {
+    const conv = world.conversations.get(key);
+    if (conv === undefined) return false;
+    if (conn.view === 'supervisor') return true;
+    return conv.state === 'assigned' && conv.operatorId !== undefined && conv.operatorId === conn.operatorId;
+  }
+
+  /**
+   * Ends, without a message, every watch the connection may no longer hold:
+   * the operator stopped holding the conversation, or the world forgot it.
+   */
+  function pruneWatches(conn: Connection): void {
+    for (const [publicId, key] of conn.watched) {
+      if (!mayWatch(conn, key)) conn.watched.delete(publicId);
+    }
   }
 
   // ------------------------------------------------------------ world events
@@ -184,6 +222,7 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
           break;
         case 'message_added':
         case 'message_removed': {
+          pruneWatches(conn);
           const publicId = [...conn.watched].find(([, key]) => key === event.key)?.[0];
           if (publicId === undefined) break;
           if (event.kind === 'message_added') {
@@ -266,10 +305,8 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
 
   function handleHello(conn: Connection, hello: Extract<ClientMessage, { type: 'hello' }>): void {
     clearTimeout(conn.helloTimer);
-    if (hello.token === REJECTED_TOKEN) {
-      conn.ws.close(4401, 'unauthorized');
-      return;
-    }
+    // Like the real gateway of version 1: any token other than the full one
+    // (a rejected one too) gives the demo level. 4401 is never sent.
     conn.level = hello.token === FULL_TOKEN ? 'full' : 'demo';
     let resumeToken: string | undefined;
     if (hello.view === 'operator') {
@@ -317,12 +354,18 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
 
   function handleAction(conn: Connection, action: Extract<ClientMessage, { type: 'action' }>): void {
     const result = (outcome: Parameters<typeof resultMessage>[1]) => send(conn, resultMessage(action.request_id, outcome));
-    if (conn.view !== 'operator' || conn.operatorId === undefined) {
-      result({ outcome: 'rejected', code: conn.view === 'operator' ? 'stale_connection' : 'not_allowed', message: 'actions need an operator connection' });
+    if (conn.view !== 'operator') {
+      result({ outcome: 'rejected', code: 'not_allowed', message: 'actions are allowed on an operator connection only' });
       return;
     }
-    if (world.status.stale) {
-      result({ outcome: 'rejected', code: 'stale_connection', message: 'the data is stale' });
+    if (conn.operatorId === undefined) {
+      result({ outcome: 'rejected', code: 'stale_connection', message: `${action.action}: ${STALE_OWNER_TEXT}` });
+      return;
+    }
+    // Only offer actions are checked against the view, so only they fail
+    // while the data is stale.
+    if (OFFER_ACTIONS.has(action.action) && world.status.stale) {
+      result({ outcome: 'rejected', code: 'stale_connection', message: `${action.action}: ${STALE_DATA_TEXT}` });
       return;
     }
     if (action.action === 'set_languages') {
@@ -336,23 +379,26 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
   }
 
   function handleWatch(conn: Connection, type: 'watch' | 'unwatch', requestId: string, publicId: string): void {
+    pruneWatches(conn);
     if (type === 'unwatch') {
+      // A conversation that is not watched (never, or no longer) is not an error.
       const isWatched = conn.watched.delete(publicId);
-      send(conn, isWatched ? resultMessage(requestId, { outcome: 'done' }) : rejected(requestId, 'unknown_conversation', 'not watched'));
+      send(conn, resultMessage(requestId, { outcome: isWatched ? 'done' : 'already_done' }));
       return;
     }
     const conv = [...world.conversations.values()].find((c) => label(conn, c.key) === publicId);
-    const isAllowed = conv !== undefined && (conn.view === 'supervisor' || (conv.state === 'assigned' && conv.operatorId === conn.operatorId));
-    if (!isAllowed) {
-      send(conn, rejected(requestId, 'unknown_conversation', 'the conversation is not in this view'));
+    if (conv === undefined || !mayWatch(conn, conv.key)) {
+      send(conn, rejected(requestId, 'unknown_conversation', 'the conversation is not in this view or may not be watched'));
       return;
     }
-    if (!conn.watched.has(publicId) && conn.watched.size >= MAX_WATCHED) {
-      send(conn, rejected(requestId, 'too_many_watched', 'four conversations are watched'));
+    const isRepeated = conn.watched.has(publicId);
+    if (!isRepeated && conn.watched.size >= MAX_WATCHED) {
+      send(conn, rejected(requestId, 'too_many_watched', '4 conversations are watched already'));
       return;
     }
     conn.watched.set(publicId, conv.key);
-    send(conn, resultMessage(requestId, { outcome: 'done' }));
+    // A repeated watch is "already_done" and still gets a new snapshot.
+    send(conn, resultMessage(requestId, { outcome: isRepeated ? 'already_done' : 'done' }));
     send(conn, { type: 'messages', conversation_id: publicId, snapshot: true, messages: conv.messages.map((m) => textMessage(conn, m)) });
   }
 
@@ -450,9 +496,14 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
         return { ok: true };
       case 'close': {
         const code = typeof body.code === 'number' ? body.code : 1001;
-        for (const conn of connections) conn.ws.close(code, 'test');
+        // The close reason is always the name of the code.
+        for (const conn of connections) conn.ws.close(code, closeInfo(code).name);
         return { ok: true };
       }
+      case 'snapshot':
+        // The gateway rebuilt its view: every connection gets a new snapshot.
+        for (const conn of connections) sendState(conn, true);
+        return { ok: true };
       default:
         return { ok: false, error: 'unknown control' };
     }
@@ -477,6 +528,21 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       await new Promise<void>((resolve) => server.close(() => resolve()));
     },
   };
+}
+
+/**
+ * Takes the conversation rows over the first frameRows out of a snapshot
+ * message and returns them in parts of frameRows. Like builder.snapshot of
+ * the real gateway, only the conversations of the supervisor view are split.
+ */
+function splitConversations(message: Record<string, unknown>, frameRows: number): ConversationRow[][] {
+  const changes = message.conversations as Changes<ConversationRow> | undefined;
+  const rows = changes?.set ?? [];
+  if (rows.length <= frameRows) return [];
+  message.conversations = { set: rows.slice(0, frameRows) };
+  const parts: ConversationRow[][] = [];
+  for (let i = frameRows; i < rows.length; i += frameRows) parts.push(rows.slice(i, i + frameRows));
+  return parts;
 }
 
 function diff(previous: Map<string, string>, current: Map<string, unknown>, isSnapshot: boolean): Changes<{ id: string }> | undefined {

@@ -50,10 +50,12 @@ export function createLiveSession(options: LiveSessionOptions): LiveSession {
     if (message.type !== 'state') return;
     const s = store.getState();
     if (message.snapshot) {
-      // The snapshot ended every watch; watch the shown one again.
-      if (s.selectedId !== null) watch(s.selectedId);
+      // The snapshot ended every watch; watch the shown one again. Its row
+      // may come in a later frame of the snapshot, so the gateway decides.
+      if (s.selectedId !== null) watch(s.selectedId, false);
     } else {
       // The shown conversation left the view (resolved, returned, closed).
+      // The gateway may have ended the watch by itself already.
       for (const id of before) {
         if (s.selectedId !== id) unwatch(id);
       }
@@ -67,26 +69,37 @@ export function createLiveSession(options: LiveSessionOptions): LiveSession {
     if (first !== undefined) session.select(first.id);
   }
 
-  async function send(request: ClientRequest, busyKey: string | null): Promise<Result> {
+  async function send(request: ClientRequest, busyKey: string | null, isNoticeShown = true): Promise<Result> {
     const s = store.getState();
     if (busyKey !== null) s.setBusy(busyKey, true);
     const result = await client.request(request);
     if (busyKey !== null) store.getState().setBusy(busyKey, false);
-    if (result.outcome === 'rejected') store.getState().showNotice('error', resultMessage(result));
+    if (result.outcome === 'rejected' && isNoticeShown) store.getState().showNotice('error', resultMessage(result));
     return result;
   }
 
-  function watch(id: string): void {
+  /**
+   * Watches a conversation. "already_done" (a repeated watch) also brings a
+   * new messages snapshot, so it counts as success. When the gateway does
+   * not know the conversation, the selection goes.
+   */
+  function watch(id: string, isNoticeShown = true): void {
     store.getState().setWatched(id, true);
-    void send(buildWatch(client.nextRequestId(), id), null).then((result) => {
-      if (result.outcome === 'rejected') store.getState().setWatched(id, false);
+    void send(buildWatch(client.nextRequestId(), id), null, isNoticeShown).then((result) => {
+      if (result.outcome !== 'rejected') return;
+      store.getState().setWatched(id, false);
+      if (result.code === 'unknown_conversation' && store.getState().selectedId === id) {
+        session.select(null);
+        if (options.view === 'operator') selectFirstHeld();
+      }
     });
   }
 
   function unwatch(id: string): void {
     if (!store.getState().watched.has(id)) return;
     store.getState().setWatched(id, false);
-    // The gateway may have ended the watch already; its answer does not matter.
+    // The gateway may have ended the watch already ("already_done"); its
+    // answer does not matter.
     void client.request(buildUnwatch(client.nextRequestId(), id));
   }
 

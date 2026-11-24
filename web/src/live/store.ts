@@ -185,7 +185,11 @@ function reduceState(s: LiveState, m: State, nowMs: number): LiveState {
       watched: EMPTY_SET,
       messages: EMPTY_MAP,
     };
-    return { ...next, selectedId: isInView(next, s.selectedId) ? s.selectedId : null };
+    // The selection stays even when this frame does not list it: a large
+    // snapshot comes in several frames, and the row may be in a later one.
+    // The session watches it again; the gateway answers
+    // unknown_conversation when it is really gone.
+    return next;
   }
   const next: LiveState = {
     ...s,
@@ -199,7 +203,9 @@ function reduceState(s: LiveState, m: State, nowMs: number): LiveState {
     teams: applyChanges(s.teams, m.teams),
     totals: m.totals ?? s.totals,
   };
-  if (isInView(next, s.selectedId)) return next;
+  // Only a conversation that was in the view can leave it. One that is not
+  // there yet may still come in the next frame of a snapshot.
+  if (!isInView(s, s.selectedId) || isInView(next, s.selectedId)) return next;
   return { ...next, selectedId: null, messages: keepOnly(next.messages, next.watched, s.selectedId) };
 }
 

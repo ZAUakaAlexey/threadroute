@@ -1,19 +1,13 @@
 // What the user must know about the connection: the access level, whether
 // the data is current, and what happens after a loss.
 
-import { formatShortDuration } from '../lib/format.ts';
 import { ROUTES } from '../app/route.ts';
 import { Button } from '../ui/button.tsx';
 import { AlertIcon, CloseIcon, InfoIcon } from '../ui/icons.tsx';
 import { Tooltip } from '../ui/tooltip.tsx';
 import { useLive, useSession } from './hooks.ts';
+import { staleDetail } from './stale-text.ts';
 import { isLive } from './store.ts';
-
-const STALE_REASONS = {
-  catching_up: 'The gateway is still reading the event history.',
-  source_unavailable: 'The gateway cannot read its data source.',
-  lagging: 'The gateway is behind its data source.',
-} as const;
 
 /** Level and connection, for the header. */
 export function LiveStatus() {
@@ -111,11 +105,10 @@ export function ConnectionBanner() {
       return { tone: 'wait' as const, title: 'Reconnecting to the gateway.', detail: 'Timers are stopped until the new data arrives.' };
     }
     if (connection.phase === 'open' && status?.stale === true) {
-      const lag = status.lag_us === undefined ? '' : ` It is ${formatShortDuration(status.lag_us)} behind.`;
       return {
         tone: 'wait' as const,
         title: 'The data is stale.',
-        detail: `${status.reason === undefined ? '' : STALE_REASONS[status.reason]}${lag} Timers are stopped.`,
+        detail: `${staleDetail(status)} Timers are stopped.`,
       };
     }
     return null;

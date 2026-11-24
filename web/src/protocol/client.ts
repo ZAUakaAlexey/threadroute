@@ -248,12 +248,9 @@ export class GatewayClient {
     // backs off.
     if (this.welcomedAtMs !== null && Date.now() - this.welcomedAtMs >= STABLE_AFTER_MS) this.failStreak = 0;
     this.welcomedAtMs = null;
+    if (info.dropsToken === true) this.isTokenDropped = true;
     switch (info.reaction) {
       case 'reconnect':
-        this.scheduleRetry(info, code);
-        return;
-      case 'reconnect-without-token':
-        this.isTokenDropped = true;
         this.scheduleRetry(info, code);
         return;
       case 'stop':
