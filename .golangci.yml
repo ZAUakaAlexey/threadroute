@@ -20,9 +20,8 @@ linters:
     - unconvert
     - unused
   settings:
-    misspell:
-      # No locale: British and American spelling are both fine.
-      locale: ""
+    # misspell has no settings: without a locale, British and American
+    # spelling are both fine.
     revive:
       rules:
         - name: exported
