@@ -59,6 +59,8 @@ The numbers are checked again after the 24-hour measurement and before load test
 
 What the bursts are was measured on 2026-11-24 in a 65-minute run (324,251 raw events). Each burst is 96 to 99 percent records of one account: 10,000 to 53,000 "create" operations within about 10 seconds. The source then sends the same records again, with the same event IDs, 8 to 45 minutes later. In that hour 82,386 raw records were such repeats, 63,091 of them later than 10 minutes, and five accounts produced 57 percent of all raw records. The reader did not reconnect or change host in that time. Almost all of these records are posts without a reply, so `normalize` drops them before it looks at the deduplication key, and they add no keys to Redis. The few repeats that are replies and arrive after 10 minutes pass `normalize` (417 in that hour) and are dropped by `conv`, which remembers applied event IDs for 7 hours (decision 0007). So the 10-minute lifetime is not the only protection, and the estimate of the key count above is an upper bound.
 
+The project owner decided on 2026-11-24 to keep the 10-minute lifetime for now and to review it after the load tests.
+
 A replay of the same recording twice within 10 minutes would be dropped as duplicates, because the event IDs repeat. The replay tool (stage 5) must deal with that.
 
 ## Consequences
