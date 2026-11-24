@@ -28,6 +28,10 @@ func TestIntegrationStage4(t *testing.T) {
 		{name: "operator events of put, online and offline", fn: testOperatorEvents},
 		{name: "operator events of a team join and leave", cfg: func(c *Config) {
 			c.Capacity, c.TeamFormLoad, c.TeamReleaseLoad, c.TeamMinSize, c.TeamMaxSize = 1, 3, 1, 1, 1
+			// The test is about operator events, not the cap: with one
+			// operator online the default share of one half gives a cap of
+			// 0, and no team could form.
+			c.TeamMaxShare = 1
 		}, fn: testOperatorTeamEvents},
 		{name: "operator refresh", fn: testOperatorRefresh},
 		{name: "operator created before operator events", fn: testLegacyOperator},

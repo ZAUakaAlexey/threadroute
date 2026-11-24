@@ -40,6 +40,7 @@ const (
 	EnvTeamReleaseAfter    = Prefix + "ROUTER_TEAM_RELEASE_AFTER"
 	EnvTeamMinSize         = Prefix + "ROUTER_TEAM_MIN_SIZE"
 	EnvTeamMaxSize         = Prefix + "ROUTER_TEAM_MAX_SIZE"
+	EnvTeamMaxShare        = Prefix + "ROUTER_TEAM_MAX_SHARE"
 
 	EnvAssignWorkers   = Prefix + "ROUTER_ASSIGN_WORKERS"
 	EnvAssignInterval  = Prefix + "ROUTER_ASSIGN_INTERVAL"
@@ -199,6 +200,7 @@ func Load(lookup LookupFunc) (Config, error) {
 			TeamReleaseAfter:    r.duration(EnvTeamReleaseAfter, d.TeamReleaseAfter),
 			TeamMinSize:         r.intBetween(EnvTeamMinSize, d.TeamMinSize, 1, math.MaxInt32),
 			TeamMaxSize:         r.intBetween(EnvTeamMaxSize, d.TeamMaxSize, 1, math.MaxInt32),
+			TeamMaxShare:        r.teamMaxShare(EnvTeamMaxShare, d.TeamMaxShare),
 		},
 		AssignWorkers:   r.intBetween(EnvAssignWorkers, DefaultAssignWorkers, 1, maxAssignWorkers),
 		AssignInterval:  r.duration(EnvAssignInterval, DefaultAssignInterval),
@@ -402,6 +404,28 @@ func (r *reader) speedFactor(key string, def float64) float64 {
 	}
 	probe := router.DefaultConfig()
 	probe.SpeedFactor = f
+	if err := probe.Validate(); err != nil {
+		r.fail(key, err)
+		return 0
+	}
+	return f
+}
+
+// teamMaxShare reads the share of the online operators that all teams may
+// hold (decision 0009, "A cap on the operators that teams hold"): a number
+// above 0 and at most 1. 1 turns the cap off.
+func (r *reader) teamMaxShare(key string, def float64) float64 {
+	v, ok := r.get(key)
+	if !ok {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
+		r.fail(key, fmt.Errorf("%q is not a number", v))
+		return 0
+	}
+	probe := router.DefaultConfig()
+	probe.TeamMaxShare = f
 	if err := probe.Validate(); err != nil {
 		r.fail(key, err)
 		return 0

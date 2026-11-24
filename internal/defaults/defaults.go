@@ -76,6 +76,10 @@ const (
 	// TeamMinSize and TeamMaxSize bound the size of a team.
 	TeamMinSize = 2
 	TeamMaxSize = 20
+	// TeamMaxShare is the share of the online operators that all teams
+	// together may hold (decision 0009, "A cap on the operators that teams
+	// hold"). 1 turns the cap off.
+	TeamMaxShare = 0.5
 	// RouterSpeedFactor multiplies the machine clock of the router timers.
 	// 1 for live traffic (decision 0009, "Clock").
 	RouterSpeedFactor = 1.0

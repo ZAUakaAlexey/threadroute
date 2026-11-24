@@ -40,6 +40,7 @@ func run(ctx context.Context, cfg routersvc.Config, logger *slog.Logger, reg *pr
 		"team_release_load", rc.TeamReleaseLoad,
 		"team_release_after", rc.TeamReleaseAfter.String(),
 		"team_size", []int{rc.TeamMinSize, rc.TeamMaxSize},
+		"team_max_share", rc.TeamMaxShare,
 		"assign_workers", cfg.AssignWorkers,
 		"outage_limit", cfg.OutageLimit.String(),
 		"operator_refresh", cfg.OperatorRefresh.String(),

@@ -1509,36 +1509,75 @@ func (q *Queries) SetPresence(ctx context.Context, arg SetPresenceParams) (int64
 	return result.RowsAffected(), nil
 }
 
-const teamCompanies = `-- name: TeamCompanies :many
-SELECT c.company_id FROM companies AS c WHERE c.team_active
-UNION
-SELECT cv.company_id FROM conversations AS cv
-WHERE cv.state IN ('waiting', 'offered', 'assigned')
-GROUP BY cv.company_id
-HAVING count(*) >= $1::bigint
-UNION
-SELECT cv.company_id FROM conversations AS cv
-WHERE cv.state = 'waiting' AND cv.team_queue
-  AND NOT EXISTS (SELECT 1 FROM companies AS c WHERE c.company_id = cv.company_id AND c.team_active)
-ORDER BY 1
+const teamCapCounts = `-- name: TeamCapCounts :one
+SELECT
+    count(*) FILTER (WHERE presence = 'online')::bigint AS online,
+    count(*) FILTER (WHERE presence = 'online' AND dedicated_company_id IS NOT NULL)::bigint AS in_team
+FROM operators
 `
+
+type TeamCapCountsRow struct {
+	Online int64
+	InTeam int64
+}
+
+// TeamCapCounts counts, on one snapshot, the online operators and the
+// online operators that are dedicated to a team, for the team cap
+// (decision 0009, "A cap on the operators that teams hold"). Run it after
+// TeamLock: every join to a team happens under that lock, so the count
+// includes every join that committed before.
+func (q *Queries) TeamCapCounts(ctx context.Context) (TeamCapCountsRow, error) {
+	row := q.db.QueryRow(ctx, teamCapCounts)
+	var i TeamCapCountsRow
+	err := row.Scan(&i.Online, &i.InTeam)
+	return i, err
+}
+
+const teamCompanies = `-- name: TeamCompanies :many
+SELECT t.company_id, l.n AS active_load
+FROM (
+    SELECT c.company_id FROM companies AS c WHERE c.team_active
+    UNION
+    SELECT cv.company_id FROM conversations AS cv
+    WHERE cv.state IN ('waiting', 'offered', 'assigned')
+    GROUP BY cv.company_id
+    HAVING count(*) >= $1::bigint
+    UNION
+    SELECT cv.company_id FROM conversations AS cv
+    WHERE cv.state = 'waiting' AND cv.team_queue
+      AND NOT EXISTS (SELECT 1 FROM companies AS c WHERE c.company_id = cv.company_id AND c.team_active)
+) AS t
+CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS n FROM conversations AS cv
+    WHERE cv.company_id = t.company_id AND cv.state IN ('waiting', 'offered', 'assigned')
+) AS l
+ORDER BY l.n DESC, t.company_id
+`
+
+type TeamCompaniesRow struct {
+	CompanyID  string
+	ActiveLoad int64
+}
 
 // TeamCompanies lists the companies a team check looks at: those with an
 // active team, those whose active load reaches the form threshold, and
 // those with a waiting conversation in a team queue but no active team.
-func (q *Queries) TeamCompanies(ctx context.Context, formLoad int64) ([]string, error) {
+// The highest active load comes first, then the company ID, so when the
+// team cap does not leave room for every company, the busiest one gets it
+// (decision 0009, "A cap on the operators that teams hold").
+func (q *Queries) TeamCompanies(ctx context.Context, formLoad int64) ([]TeamCompaniesRow, error) {
 	rows, err := q.db.Query(ctx, teamCompanies, formLoad)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	items := []string{}
+	items := []TeamCompaniesRow{}
 	for rows.Next() {
-		var company_id string
-		if err := rows.Scan(&company_id); err != nil {
+		var i TeamCompaniesRow
+		if err := rows.Scan(&i.CompanyID, &i.ActiveLoad); err != nil {
 			return nil, err
 		}
-		items = append(items, company_id)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

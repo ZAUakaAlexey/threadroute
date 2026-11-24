@@ -2,6 +2,7 @@ package router
 
 import (
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"testing"
@@ -21,13 +22,18 @@ func TestConfigValidate(t *testing.T) {
 		{name: "default", edit: func(*Config) {}},
 		{name: "zero", edit: func(c *Config) { *c = Config{} }, errs: []string{
 			"speed factor", "capacity 0", "accept timeout", "assignment target", "first response target",
-			"team release time", "team release load", "team min size",
+			"team release time", "team release load", "team min size", "team max share",
 		}},
 		{name: "thresholds equal", edit: func(c *Config) { c.TeamFormLoad = c.TeamReleaseLoad }, errs: []string{"not above"}},
 		{name: "sizes swapped", edit: func(c *Config) { c.TeamMinSize, c.TeamMaxSize = 5, 4 }, errs: []string{"max size"}},
 		{name: "sub-microsecond", edit: func(c *Config) { c.AcceptTimeout = 1500 * time.Nanosecond }, errs: []string{"microseconds"}},
 		{name: "capacity too big", edit: func(c *Config) { c.Capacity = opapi.MaxCapacity + 1 }, errs: []string{"capacity"}},
 		{name: "factor too big", edit: func(c *Config) { c.SpeedFactor = 1e6 }, errs: []string{"speed factor"}},
+		{name: "share 1", edit: func(c *Config) { c.TeamMaxShare = 1 }},
+		{name: "share 0", edit: func(c *Config) { c.TeamMaxShare = 0 }, errs: []string{"team max share"}},
+		{name: "share negative", edit: func(c *Config) { c.TeamMaxShare = -0.1 }, errs: []string{"team max share"}},
+		{name: "share above 1", edit: func(c *Config) { c.TeamMaxShare = 1.5 }, errs: []string{"team max share"}},
+		{name: "share NaN", edit: func(c *Config) { c.TeamMaxShare = math.NaN() }, errs: []string{"team max share"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -58,6 +64,7 @@ func TestDefaultConfigValues(t *testing.T) {
 		SpeedFactor: 1, Capacity: 4, AcceptTimeout: 20 * time.Second,
 		AssignmentTarget: 60 * time.Second, FirstResponseTarget: 120 * time.Second,
 		TeamFormLoad: 20, TeamReleaseLoad: 8, TeamReleaseAfter: 15 * time.Minute, TeamMinSize: 2, TeamMaxSize: 20,
+		TeamMaxShare: 0.5,
 	}
 	if c != want {
 		t.Errorf("DefaultConfig() = %+v, want the values of decisions 0009 and 0010 %+v", c, want)
@@ -101,6 +108,33 @@ func TestTeamSize(t *testing.T) {
 	}{{0, 2}, {1, 2}, {8, 2}, {9, 3}, {20, 5}, {21, 6}, {80, 20}, {81, 20}, {1000, 20}} {
 		if got := c.teamSize(tt.load); got != tt.want {
 			t.Errorf("teamSize(%d) = %d, want %d", tt.load, got, tt.want)
+		}
+	}
+}
+
+func TestTeamCap(t *testing.T) {
+	for _, tt := range []struct {
+		share  float64
+		online int64
+		want   int64
+	}{
+		{0.5, 0, 0}, {0.5, 1, 0}, {0.5, 3, 1}, {0.5, 4, 2}, {0.5, 11, 5}, {0.5, 180, 90}, {0.5, 200, 100},
+		// Rounded down.
+		{0.2, 9, 1}, {0.2, 10, 2}, {0.2, 14, 2}, {1.0 / 3, 10, 3},
+		// Products that are a hair below a whole number in floating point.
+		{0.29, 100, 29}, {0.7, 10, 7}, {0.3, 10, 3}, {0.57, 100, 57},
+		// Below the minimum team size of 2: no new team can form.
+		{0.1, 15, 1}, {0.05, 30, 1},
+		// Share 1 turns the cap off: every online operator.
+		{1, 0, 0}, {1, 1, 1}, {1, 7, 7}, {1, 180, 180},
+	} {
+		c := DefaultConfig()
+		c.TeamMaxShare = tt.share
+		if err := c.Validate(); err != nil {
+			t.Fatal(err)
+		}
+		if got := c.TeamCap(tt.online); got != tt.want {
+			t.Errorf("share %v: TeamCap(%d) = %d, want %d", tt.share, tt.online, got, tt.want)
 		}
 	}
 }

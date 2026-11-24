@@ -39,6 +39,7 @@ func TestLoadDefaults(t *testing.T) {
 		{"release", cfg.Router.TeamReleaseLoad, 8},
 		{"release after", cfg.Router.TeamReleaseAfter, 15 * time.Minute},
 		{"team size", [2]int{cfg.Router.TeamMinSize, cfg.Router.TeamMaxSize}, [2]int{2, 20}},
+		{"team max share", cfg.Router.TeamMaxShare, 0.5},
 		{"workers", cfg.AssignWorkers, 4},
 		{"outbox keep", cfg.OutboxKeep, time.Hour},
 		{"outage", cfg.OutageLimit, 2 * time.Minute},
@@ -90,6 +91,24 @@ func TestLoadValues(t *testing.T) {
 	}
 }
 
+func TestLoadTeamMaxShare(t *testing.T) {
+	for _, tt := range []struct {
+		v    string
+		want float64
+	}{
+		{"", 0.5}, {"1", 1}, {"0.2", 0.2}, {" 0.75 ", 0.75}, {"1e-1", 0.1},
+	} {
+		cfg, err := Load(lookupFrom(map[string]string{EnvTeamMaxShare: tt.v}))
+		if err != nil {
+			t.Errorf("Load(%s=%q) error = %v", EnvTeamMaxShare, tt.v, err)
+			continue
+		}
+		if cfg.Router.TeamMaxShare != tt.want {
+			t.Errorf("Load(%s=%q) share = %v, want %v", EnvTeamMaxShare, tt.v, cfg.Router.TeamMaxShare, tt.want)
+		}
+	}
+}
+
 func TestLoadErrors(t *testing.T) {
 	tests := []struct {
 		name string
@@ -115,6 +134,12 @@ func TestLoadErrors(t *testing.T) {
 		{"max conns", map[string]string{pg.EnvMaxConns: "0"}, []string{pg.EnvMaxConns}},
 		{"refresh not positive", map[string]string{EnvOperatorRefresh: "-1h"}, []string{EnvOperatorRefresh}},
 		{"several", map[string]string{EnvOutageLimit: "0s", EnvPruneInterval: "x"}, []string{EnvOutageLimit, EnvPruneInterval}},
+		{"share zero", map[string]string{EnvTeamMaxShare: "0"}, []string{EnvTeamMaxShare}},
+		{"share negative", map[string]string{EnvTeamMaxShare: "-0.5"}, []string{EnvTeamMaxShare}},
+		{"share above 1", map[string]string{EnvTeamMaxShare: "1.01"}, []string{EnvTeamMaxShare}},
+		{"share not a number", map[string]string{EnvTeamMaxShare: "half"}, []string{EnvTeamMaxShare}},
+		{"share NaN", map[string]string{EnvTeamMaxShare: "NaN"}, []string{EnvTeamMaxShare}},
+		{"share Inf", map[string]string{EnvTeamMaxShare: "Inf"}, []string{EnvTeamMaxShare}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

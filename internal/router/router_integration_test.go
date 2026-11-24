@@ -38,9 +38,15 @@ func TestIntegrationRouter(t *testing.T) {
 		{name: "queue order", fn: testQueueOrder},
 		{name: "speed factor", cfg: func(c *Config) { c.SpeedFactor = 50 }, fn: testSpeedFactor},
 		{name: "capacity cut below the load", fn: testCapacityCut},
-		{name: "teams form resize release and the language rule", fn: testTeams},
+		// These two tests are about the team rules before the cap. Under the
+		// default share of one half the cap would stop the growth to 7 of
+		// 11 online operators in the first and the team of the only online
+		// operator in the second, so they run with the cap off (share 1).
+		// The cap has its own tests in teamcap_integration_test.go.
+		{name: "teams form resize release and the language rule", cfg: func(c *Config) { c.TeamMaxShare = 1 }, fn: testTeams},
 		{name: "a full team queue does not hide the shared queue", cfg: func(c *Config) {
 			c.Capacity, c.TeamFormLoad, c.TeamReleaseLoad, c.TeamMinSize, c.TeamMaxSize = 1, 3, 1, 1, 1
+			c.TeamMaxShare = 1
 		}, fn: testFullTeamQueue},
 		{name: "outbox read side", fn: testOutbox},
 		{name: "counts", fn: testCounts},

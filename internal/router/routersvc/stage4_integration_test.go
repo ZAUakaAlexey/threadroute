@@ -31,6 +31,11 @@ func testOperatorEventsInTopic(t *testing.T, h *harness) {
 	sc.rcfg.TeamReleaseAfter = 24 * time.Hour
 	// Small teams, so three conversations of one company form one.
 	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1
+	// The test is about operator events, not the team cap. When the team
+	// forms, one of the two operators is offline, and the default share of
+	// one half of one online operator gives a cap of 0, so the cap is off
+	// here.
+	sc.rcfg.TeamMaxShare = 1
 	r := sc.start()
 	ctx := t.Context()
 	api := r.api

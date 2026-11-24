@@ -387,17 +387,38 @@ WHERE company_id = @company_id;
 -- TeamCompanies lists the companies a team check looks at: those with an
 -- active team, those whose active load reaches the form threshold, and
 -- those with a waiting conversation in a team queue but no active team.
-SELECT c.company_id FROM companies AS c WHERE c.team_active
-UNION
-SELECT cv.company_id FROM conversations AS cv
-WHERE cv.state IN ('waiting', 'offered', 'assigned')
-GROUP BY cv.company_id
-HAVING count(*) >= @form_load::bigint
-UNION
-SELECT cv.company_id FROM conversations AS cv
-WHERE cv.state = 'waiting' AND cv.team_queue
-  AND NOT EXISTS (SELECT 1 FROM companies AS c WHERE c.company_id = cv.company_id AND c.team_active)
-ORDER BY 1;
+-- The highest active load comes first, then the company ID, so when the
+-- team cap does not leave room for every company, the busiest one gets it
+-- (decision 0009, "A cap on the operators that teams hold").
+SELECT t.company_id, l.n AS active_load
+FROM (
+    SELECT c.company_id FROM companies AS c WHERE c.team_active
+    UNION
+    SELECT cv.company_id FROM conversations AS cv
+    WHERE cv.state IN ('waiting', 'offered', 'assigned')
+    GROUP BY cv.company_id
+    HAVING count(*) >= @form_load::bigint
+    UNION
+    SELECT cv.company_id FROM conversations AS cv
+    WHERE cv.state = 'waiting' AND cv.team_queue
+      AND NOT EXISTS (SELECT 1 FROM companies AS c WHERE c.company_id = cv.company_id AND c.team_active)
+) AS t
+CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS n FROM conversations AS cv
+    WHERE cv.company_id = t.company_id AND cv.state IN ('waiting', 'offered', 'assigned')
+) AS l
+ORDER BY l.n DESC, t.company_id;
+
+-- name: TeamCapCounts :one
+-- TeamCapCounts counts, on one snapshot, the online operators and the
+-- online operators that are dedicated to a team, for the team cap
+-- (decision 0009, "A cap on the operators that teams hold"). Run it after
+-- TeamLock: every join to a team happens under that lock, so the count
+-- includes every join that committed before.
+SELECT
+    count(*) FILTER (WHERE presence = 'online')::bigint AS online,
+    count(*) FILTER (WHERE presence = 'online' AND dedicated_company_id IS NOT NULL)::bigint AS in_team
+FROM operators;
 
 -- name: CompanyLangLoad :many
 -- CompanyLangLoad counts the active load of a company by language, most

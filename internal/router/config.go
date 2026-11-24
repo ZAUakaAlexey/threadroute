@@ -45,6 +45,9 @@ type Config struct {
 	// TeamMinSize and TeamMaxSize bound the size of a team.
 	TeamMinSize int
 	TeamMaxSize int
+	// TeamMaxShare is the share of the online operators that all teams
+	// together may hold, in (0, 1]. 1 turns the cap off.
+	TeamMaxShare float64
 }
 
 // DefaultConfig returns the starting values of decisions 0009 and 0010.
@@ -60,6 +63,7 @@ func DefaultConfig() Config {
 		TeamReleaseAfter:    defaults.TeamReleaseAfter,
 		TeamMinSize:         defaults.TeamMinSize,
 		TeamMaxSize:         defaults.TeamMaxSize,
+		TeamMaxShare:        defaults.TeamMaxShare,
 	}
 }
 
@@ -105,6 +109,9 @@ func (c Config) Validate() error {
 	if c.TeamMaxSize < c.TeamMinSize {
 		errs = append(errs, fmt.Errorf("team max size %d is less than the min size %d", c.TeamMaxSize, c.TeamMinSize))
 	}
+	if math.IsNaN(c.TeamMaxShare) || c.TeamMaxShare <= 0 || c.TeamMaxShare > 1 {
+		errs = append(errs, fmt.Errorf("team max share %v is not in (0, 1]", c.TeamMaxShare))
+	}
 	return errors.Join(errs...)
 }
 
@@ -135,6 +142,24 @@ func (c Config) model(machine time.Duration) time.Duration {
 		return 0
 	}
 	return time.Duration(float64(machine) * c.SpeedFactor).Truncate(time.Microsecond)
+}
+
+// capOff reports whether the team cap is turned off (a share of 1).
+func (c Config) capOff() bool { return c.TeamMaxShare >= 1 }
+
+// TeamCap returns the most online operators that all teams together may
+// hold (decision 0009, "A cap on the operators that teams hold"): the share
+// times the online operators, rounded down. The small tolerance keeps a
+// product such as 0.29 * 100, which is 28.999999999999996 in floating
+// point, at 29.
+func (c Config) TeamCap(online int64) int64 {
+	if online <= 0 {
+		return 0
+	}
+	if c.capOff() {
+		return online
+	}
+	return min(int64(math.Floor(c.TeamMaxShare*float64(online)+1e-9)), online)
 }
 
 // teamSize returns the team size for an active load (decision 0009): the

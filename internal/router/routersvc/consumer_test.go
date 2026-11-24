@@ -173,7 +173,7 @@ func TestObserveCounts(t *testing.T) {
 			{Presence: opapi.PresenceOnline, N: 5, Capacity: 20},
 			{Presence: opapi.PresenceOnline, InTeam: true, N: 2, Capacity: 8},
 		},
-		LiveSlots: 7, ActiveTeams: 2, UnsentOutbox: 3, OldestUnsent: now.Add(-time.Second),
+		LiveSlots: 7, ActiveTeams: 2, TeamOnline: 2, TeamCap: 3, UnsentOutbox: 3, OldestUnsent: now.Add(-time.Second),
 	}, now)
 	checks := []struct {
 		name string
@@ -188,6 +188,8 @@ func TestObserveCounts(t *testing.T) {
 		{"team capacity", testutil.ToFloat64(m.capacity.WithLabelValues("online", groupTeam)), 8},
 		{"live slots", testutil.ToFloat64(m.liveSlots), 7},
 		{"outbox oldest", testutil.ToFloat64(m.outboxOldest), 1},
+		{"team operators online", testutil.ToFloat64(m.teamOnline), 2},
+		{"team cap", testutil.ToFloat64(m.teamCap), 3},
 	}
 	for _, c := range checks {
 		if c.got != c.want {
@@ -198,6 +200,27 @@ func TestObserveCounts(t *testing.T) {
 	m.observeCounts(router.Counts{Conversations: map[string]int64{}}, now)
 	if n := testutil.CollectAndCount(m.queueWaiting); n != 0 {
 		t.Errorf("queue series after an empty sample = %d, want 0", n)
+	}
+}
+
+func TestObserveTeamsCapStops(t *testing.T) {
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := testutil.CollectAndCount(m.teamCapStops); n != 2 {
+		t.Errorf("cap stop series at start = %d, want 2 (form and grow at 0)", n)
+	}
+	m.observeTeams(router.TeamResult{Formed: 1, CapForm: 2, CapGrow: 1})
+	m.observeTeams(router.TeamResult{CapGrow: 3})
+	if got := testutil.ToFloat64(m.teamCapStops.WithLabelValues(capForm)); got != 2 {
+		t.Errorf("form stops = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.teamCapStops.WithLabelValues(capGrow)); got != 4 {
+		t.Errorf("grow stops = %v, want 4", got)
+	}
+	if got := testutil.ToFloat64(m.teamChange.WithLabelValues("formed")); got != 1 {
+		t.Errorf("formed = %v, want 1", got)
 	}
 }
 

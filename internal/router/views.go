@@ -107,6 +107,11 @@ type Counts struct {
 	// LiveSlots counts offers and assignments that use a slot.
 	LiveSlots   int64
 	ActiveTeams int64
+	// TeamOnline counts the online operators that are dedicated to a team,
+	// and TeamCap is the cap of decision 0009 for the online operators
+	// (Config.TeamCap). Both come from the Operators rows.
+	TeamOnline int64
+	TeamCap    int64
 	// UnsentOutbox counts routing events not yet published, and
 	// OldestUnsent is the time of the oldest one, or zero.
 	UnsentOutbox int64
@@ -136,11 +141,19 @@ func (s *Service) Counts(ctx context.Context) (Counts, error) {
 	if err != nil {
 		return c, fmt.Errorf("counts: %w", err)
 	}
+	var online int64
 	for _, r := range ops {
 		c.Operators = append(c.Operators, OperatorCount{
 			Presence: opapi.Presence(r.Presence), InTeam: r.InTeam, N: r.N, Capacity: r.Capacity,
 		})
+		if opapi.Presence(r.Presence) == opapi.PresenceOnline {
+			online += r.N
+			if r.InTeam {
+				c.TeamOnline += r.N
+			}
+		}
 	}
+	c.TeamCap = s.cfg.TeamCap(online)
 	if c.LiveSlots, err = q.CountLiveSlots(ctx); err != nil {
 		return c, fmt.Errorf("counts: %w", err)
 	}

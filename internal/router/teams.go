@@ -148,13 +148,29 @@ type TeamResult struct {
 	// Moved is the number of waiting conversations that moved between the
 	// team queue and the shared queue.
 	Moved int
+	// CapForm counts companies that reached the form threshold but got no
+	// team, because the team cap left less room than the minimum team
+	// size. CapGrow counts teams, new or existing, that got fewer operators
+	// than their size because of the cap. Each is counted once per company
+	// and check.
+	CapForm, CapGrow int
 }
 
 // CheckTeams forms, resizes and releases dedicated teams by the rules of
 // decision 0009, and moves waiting conversations to the queue the team
 // rules give. Call it at a fixed interval. Each company is one transaction,
 // and every team transaction of every router holds one advisory lock, so
-// team changes happen one at a time.
+// team changes happen one at a time. Companies are checked by active load,
+// highest first, so the busiest company gets the room the team cap leaves.
+//
+// The team cap (decision 0009, "A cap on the operators that teams hold") is
+// read inside each company transaction, after the advisory lock, from the
+// operators table: the online operators and the online team members. Every
+// join to a team happens under that lock, and a statement under READ
+// COMMITTED sees every transaction that committed before it started, so
+// the count includes every join of an earlier transaction, in this process
+// or another. No join can take the team members above the cap computed in
+// the same transaction.
 //
 // Offers and assignments are never touched: an operator who joins or
 // leaves a team keeps what it holds, and an offer that is out runs to its
@@ -165,7 +181,8 @@ func (s *Service) CheckTeams(ctx context.Context) (TeamResult, error) {
 	if err != nil {
 		return res, fmt.Errorf("check teams: %w", err)
 	}
-	for _, company := range companies {
+	for _, row := range companies {
+		company := row.CompanyID
 		var r TeamResult
 		err := s.inTx(ctx, func(q *pgdb.Queries) error {
 			r = TeamResult{}
@@ -178,6 +195,8 @@ func (s *Service) CheckTeams(ctx context.Context) (TeamResult, error) {
 		res.Resized += r.Resized
 		res.Released += r.Released
 		res.Moved += r.Moved
+		res.CapForm += r.CapForm
+		res.CapGrow += r.CapGrow
 	}
 	return res, nil
 }
@@ -297,6 +316,18 @@ func (s *Service) poolCandidates(ctx context.Context, q *pgdb.Queries, loads []l
 	return out, nil
 }
 
+// teamRoom returns how many more online operators the teams may hold under
+// the cap, at least 0. The caller holds the team lock. When pool operators
+// went offline, or offline members came back online, the teams can hold
+// more than the cap; the room is then 0 and nobody is taken out.
+func (s *Service) teamRoom(ctx context.Context, q *pgdb.Queries) (int, error) {
+	c, err := q.TeamCapCounts(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("team cap counts: %w", err)
+	}
+	return int(max(s.cfg.TeamCap(c.Online)-c.InTeam, 0)), nil
+}
+
 // join moves the chosen candidates into the team and returns those that
 // joined. Each one gets an operator_updated event, because its dedicated
 // company changed.
@@ -338,7 +369,25 @@ func leave(ctx context.Context, q *pgdb.Queries, ob *outbox, company string, ids
 func (s *Service) formTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Company, ob *outbox,
 	loads []langLoad, load int64, now time.Time, res *TeamResult,
 ) error {
-	joined, err := s.join(ctx, q, ob, co.CompanyID, loads, s.cfg.teamSize(load), nil, now)
+	size := s.cfg.teamSize(load)
+	if !s.cfg.capOff() {
+		room, err := s.teamRoom(ctx, q)
+		if err != nil {
+			return err
+		}
+		if room < s.cfg.TeamMinSize {
+			// The company stays in the shared queues. The next check tries
+			// again.
+			res.CapForm++
+			s.logger.DebugContext(ctx, "team cap stops a new team", "company", co.CompanyID, "room", room, "active_load", load)
+			return nil
+		}
+		if room < size {
+			res.CapGrow++
+			size = room
+		}
+	}
+	joined, err := s.join(ctx, q, ob, co.CompanyID, loads, size, nil, now)
 	if err != nil || len(joined) == 0 {
 		// No online operator of the shared pool has a language of the
 		// company. The next check tries again.
@@ -360,7 +409,21 @@ func (s *Service) resizeTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Comp
 	changed := false
 	switch {
 	case target > len(members):
-		joined, err := s.join(ctx, q, ob, co.CompanyID, loads, target-len(members), members, now)
+		k := target - len(members)
+		if !s.cfg.capOff() {
+			room, err := s.teamRoom(ctx, q)
+			if err != nil {
+				return err
+			}
+			if room < k {
+				res.CapGrow++
+				k = room
+			}
+		}
+		if k == 0 {
+			break
+		}
+		joined, err := s.join(ctx, q, ob, co.CompanyID, loads, k, members, now)
 		if err != nil {
 			return err
 		}

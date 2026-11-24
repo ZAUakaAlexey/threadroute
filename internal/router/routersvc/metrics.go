@@ -31,6 +31,12 @@ const (
 	typeUnknown    = "unknown"
 )
 
+// Cases of team_cap_stops_total.
+const (
+	capForm = "form"
+	capGrow = "grow"
+)
+
 // Queue groups of the gauges.
 const (
 	groupTeam   = "team"
@@ -49,6 +55,7 @@ type metrics struct {
 	expired      prometheus.Counter
 	slaMarked    prometheus.Counter
 	teamChange   *prometheus.CounterVec
+	teamCapStops *prometheus.CounterVec
 
 	published     *prometheus.CounterVec
 	slaMissed     *prometheus.CounterVec
@@ -66,6 +73,8 @@ type metrics struct {
 	capacity      *prometheus.GaugeVec
 	liveSlots     prometheus.Gauge
 	activeTeams   prometheus.Gauge
+	teamOnline    prometheus.Gauge
+	teamCap       prometheus.Gauge
 	outboxUnsent  prometheus.Gauge
 	outboxOldest  prometheus.Gauge
 }
@@ -101,6 +110,10 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		teamChange: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_changes_total",
 			"Team changes made by the team loop of this process (formed, resized, released, moved).")),
 			[]string{"change"}),
+		teamCapStops: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_cap_stops_total",
+			"Team checks of this process in which the team cap stopped a company: form (no new team, the cap left less "+
+				"than the minimum size) or grow (a new or existing team got fewer operators than its size). Once per company and check.")),
+			[]string{"case"}),
 
 		published: prometheus.NewCounterVec(prometheus.CounterOpts(opts("routing_published_total",
 			"Routing events acknowledged by Kafka, by type. A row sent again after a crash counts again.")),
@@ -128,17 +141,20 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			"Operators by presence and group (team or pool), sampled.")), []string{"presence", "group"}),
 		capacity: prometheus.NewGaugeVec(prometheus.GaugeOpts(opts("operator_capacity",
 			"Sum of operator capacity by presence and group, sampled.")), []string{"presence", "group"}),
-		liveSlots:    gauge("live_slots", "Offers and assignments that use a slot, sampled."),
-		activeTeams:  gauge("active_teams", "Companies with a dedicated team, sampled."),
+		liveSlots:   gauge("live_slots", "Offers and assignments that use a slot, sampled."),
+		activeTeams: gauge("active_teams", "Companies with a dedicated team, sampled."),
+		teamOnline:  gauge("team_operators_online", "Online operators that are dedicated to a team, sampled."),
+		teamCap: gauge("team_cap_operators",
+			"The most online operators that all teams may hold: the team max share times the online operators, rounded down, sampled."),
 		outboxUnsent: gauge("outbox_unsent", "Routing events not yet published, sampled."),
 		outboxOldest: gauge("outbox_oldest_unsent_seconds", "Machine time since the oldest unsent routing event was written, or 0, sampled."),
 	}
 	for _, c := range []prometheus.Collector{
 		m.applied, m.fetchErrors, m.catchUpActive, m.catchUpSeconds, m.catchUpQueued,
-		m.offers, m.generalQueue, m.expired, m.slaMarked, m.teamChange,
+		m.offers, m.generalQueue, m.expired, m.slaMarked, m.teamChange, m.teamCapStops,
 		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.refreshed, m.loopErrors,
 		m.conversations, m.queueWaiting, m.queueOldest, m.operators, m.capacity,
-		m.liveSlots, m.activeTeams, m.outboxUnsent, m.outboxOldest,
+		m.liveSlots, m.activeTeams, m.teamOnline, m.teamCap, m.outboxUnsent, m.outboxOldest,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register router metrics: %w", err)
@@ -154,6 +170,9 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	m.applied.WithLabelValues(typeUnknown, resultInvalid)
 	for _, c := range []string{"formed", "resized", "released", "moved"} {
 		m.teamChange.WithLabelValues(c)
+	}
+	for _, c := range []string{capForm, capGrow} {
+		m.teamCapStops.WithLabelValues(c)
 	}
 	for _, t := range []event.RoutingType{
 		event.TypeQueued, event.TypeOffered, event.TypeAccepted, event.TypeOfferExpired, event.TypeReplied,
@@ -194,6 +213,8 @@ func (m *metrics) observeTeams(r router.TeamResult) {
 	m.teamChange.WithLabelValues("resized").Add(float64(r.Resized))
 	m.teamChange.WithLabelValues("released").Add(float64(r.Released))
 	m.teamChange.WithLabelValues("moved").Add(float64(r.Moved))
+	m.teamCapStops.WithLabelValues(capForm).Add(float64(r.CapForm))
+	m.teamCapStops.WithLabelValues(capGrow).Add(float64(r.CapGrow))
 }
 
 // observeCounts sets the gauges from one snapshot. The vectors are reset
@@ -238,6 +259,8 @@ func (m *metrics) observeCounts(c router.Counts, now time.Time) {
 	}
 	m.liveSlots.Set(float64(c.LiveSlots))
 	m.activeTeams.Set(float64(c.ActiveTeams))
+	m.teamOnline.Set(float64(c.TeamOnline))
+	m.teamCap.Set(float64(c.TeamCap))
 	m.outboxUnsent.Set(float64(c.UnsentOutbox))
 	if c.OldestUnsent.IsZero() {
 		m.outboxOldest.Set(0)
