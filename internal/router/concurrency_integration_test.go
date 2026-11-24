@@ -33,6 +33,10 @@ const (
 	ccDefaultSeed   = 20261124
 	ccEnvSeed       = "THREADROUTE_TEST_SEED"
 	ccCheckInterval = 10 * time.Millisecond
+	// ccMinOverflow is the floor of offers from a team queue to the shared
+	// pool in one mix. It is set to about half of the smallest value seen
+	// in 10 local runs (51).
+	ccMinOverflow = 25
 )
 
 // ccKind is one kind of operation in the mix.
@@ -75,6 +79,7 @@ type ccStats struct {
 	unexpected    []string
 	offers        int
 	generalQueue  int
+	overflow      int
 	expired       int
 	missed        int
 	formed        int
@@ -232,6 +237,12 @@ func TestIntegrationConcurrency(t *testing.T) {
 				violations = append(violations, "check failed: "+err.Error())
 				return
 			}
+			more, err = ccCheckGroups(ctx, pool)
+			bad = append(bad, more...)
+			if err != nil {
+				violations = append(violations, "check failed: "+err.Error())
+				return
+			}
 			if len(violations) < 50 {
 				violations = append(violations, bad...)
 			}
@@ -302,8 +313,8 @@ func TestIntegrationConcurrency(t *testing.T) {
 	for k := range ccKinds {
 		t.Logf("  %-10s runs %4d done %4d already %4d", ccNames[k], stats.runs[k], stats.done[k], stats.already[k])
 	}
-	t.Logf("  offers made %d (%d under the general queue rule), offers expired %d, SLA misses %d, teams formed %d resized %d released %d",
-		stats.offers, stats.generalQueue, stats.expired, stats.missed, stats.formed, stats.resized, stats.released)
+	t.Logf("  offers made %d (%d under the general queue rule, %d team overflow), offers expired %d, SLA misses %d, teams formed %d resized %d released %d",
+		stats.offers, stats.generalQueue, stats.overflow, stats.expired, stats.missed, stats.formed, stats.resized, stats.released)
 	var opEvents, opKeys int
 	if err := pool.QueryRow(ctx, `SELECT count(*), count(DISTINCT record_key) FROM outbox WHERE family = 'operator'`).
 		Scan(&opEvents, &opKeys); err != nil {
@@ -329,7 +340,11 @@ func TestIntegrationConcurrency(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, b := range bad {
+	more, err := ccCheckGroups(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range append(bad, more...) {
 		t.Error(b)
 	}
 
@@ -338,10 +353,10 @@ func TestIntegrationConcurrency(t *testing.T) {
 	// machine that interleaves differently does not fail here.
 	if stats.offers < 90 || stats.done[kAccept] < 50 || stats.expired < 4 || stats.done[kOffline] == 0 ||
 		stats.done[kRefuse] == 0 || stats.done[kResolve] == 0 || stats.formed == 0 || stats.refreshed == 0 ||
-		stats.generalQueue < 8 {
-		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d refreshed %d general %d",
+		stats.generalQueue < 8 || stats.overflow < ccMinOverflow {
+		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d refreshed %d general %d overflow %d",
 			stats.offers, stats.done[kAccept], stats.expired, stats.done[kOffline], stats.done[kRefuse], stats.done[kResolve],
-			stats.formed, stats.refreshed, stats.generalQueue)
+			stats.formed, stats.refreshed, stats.generalQueue, stats.overflow)
 	}
 }
 
@@ -377,6 +392,7 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 		stats.mu.Lock()
 		stats.offers += r.Offered
 		stats.generalQueue += r.GeneralQueue
+		stats.overflow += r.Overflow
 		stats.mu.Unlock()
 		return done(r.Offered, err)
 	case kAccept, kRefuse, kReply, kResolve:
@@ -446,8 +462,10 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 // ccCheckLanguages checks the language rule of every live offer, on one
 // snapshot. It holds only in this test, where the languages of an
 // operator never change: the operator of a live offer has the language of
-// the conversation, or "und" when the conversation is in the shared queue
-// (the general queue rule). A team queue never uses the general queue.
+// the conversation, or "und" (the general queue rule, which the shared
+// pool uses for a shared queue and for the overflow of a team queue).
+// ccCheckGroups checks the stricter rule per group at the time of the
+// offer.
 func ccCheckLanguages(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	rows, err := pool.Query(ctx, `
 		SELECT 'live offer to an operator without the language: ' || f.id || ' ' || f.operator_id || ' ' || cv.lang
@@ -455,10 +473,46 @@ func ccCheckLanguages(ctx context.Context, pool *pgxpool.Pool) ([]string, error)
 		JOIN conversations AS cv ON cv.company_id = f.company_id AND cv.customer_id = f.customer_id
 		WHERE f.state IN ('offered', 'accepted')
 		  AND NOT EXISTS (SELECT 1 FROM operator_languages AS ol
-		                  WHERE ol.operator_id = f.operator_id
-		                    AND (ol.lang = cv.lang OR (ol.lang = 'und' AND NOT cv.team_queue)))`)
+		                  WHERE ol.operator_id = f.operator_id AND ol.lang IN (cv.lang, 'und'))`)
 	if err != nil {
 		return nil, fmt.Errorf("language rule: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
+}
+
+// ccCheckGroups checks the group of the operator of every offer at the
+// time of the offer, from the outbox: the group is the dedicated company
+// of the newest operator event of that operator before the offered event.
+// That event is the state the offer saw: every change of a group writes an
+// operator event under the row lock of the operator, and the offer takes
+// the same lock before it writes its event, so the outbox IDs of one
+// operator follow the order of those locks. The rule (decision 0009,
+// "Overflow from a team to the shared pool"): an operator of the shared
+// pool may take any conversation; a member of a team may take only a
+// conversation in the team queue of its company, and only with its
+// language (a member never serves through the general queue). Operators
+// never change their languages in this test.
+func ccCheckGroups(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT 'offer to an operator of the wrong group: ' || (o.j->>'offer_id') || ' to ' || (o.j->>'operator_id')
+		       || ' in ' || COALESCE(g.grp, 'the pool') || ', team queue ' || (o.j->>'team_queue')
+		       || ' of ' || (o.j->>'company_id') || ' in ' || (o.j->>'lang')
+		FROM (SELECT id, convert_from(payload, 'UTF8')::jsonb AS j FROM outbox
+		      WHERE family = 'conversation' AND event_type = 'offered') AS o
+		LEFT JOIN LATERAL (
+		    SELECT convert_from(x.payload, 'UTF8')::jsonb->>'dedicated_company_id' AS grp, true AS found
+		    FROM outbox AS x
+		    WHERE x.family = 'operator' AND x.record_key = convert_to(o.j->>'operator_id', 'UTF8') AND x.id < o.id
+		    ORDER BY x.seq DESC
+		    LIMIT 1
+		) AS g ON true
+		WHERE g.found IS NULL
+		   OR NOT (g.grp IS NULL
+		           OR ((o.j->>'team_queue')::boolean AND g.grp = o.j->>'company_id'
+		               AND EXISTS (SELECT 1 FROM operator_languages AS ol
+		                           WHERE ol.operator_id = o.j->>'operator_id' AND ol.lang = o.j->>'lang')))`)
+	if err != nil {
+		return nil, fmt.Errorf("group rule: %w", err)
 	}
 	return pgx.CollectRows(rows, pgx.RowTo[string])
 }

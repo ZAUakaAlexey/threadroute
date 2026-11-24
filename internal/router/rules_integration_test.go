@@ -247,18 +247,22 @@ func testGeneralQueueTeam(t *testing.T, e *env) {
 			t.Fatalf("team conversation offered to %q, want %s", op, tm)
 		}
 	}
-	// A team queue never uses the general queue: with its only member
-	// full, a fifth conversation waits although u is free.
+	// A member never serves through the general queue, but the shared pool
+	// takes the overflow of the team by its own rules: with the only member
+	// full, the fifth conversation goes to u through the general queue
+	// (decision 0009, "Overflow from a team to the shared pool").
 	for i := 3; i <= 4; i++ {
 		e.apply(newStream(company(0), customer(i), "pl").opened(), false)
 	}
 	r = e.assign()
-	if r.Offered != 1 || r.GeneralQueue != 0 {
-		t.Fatalf("assign = %+v, want 1 team offer", r)
+	if r.Offered != 2 || r.GeneralQueue != 1 || r.Overflow != 1 {
+		t.Fatalf("assign = %+v, want 1 team offer and 1 overflow under the general queue rule", r)
 	}
-	last := newStream(company(0), customer(4), "pl")
-	if _, op, _ := e.liveOffer(last); op != "" || e.convState(last) != stateWaiting {
-		t.Fatalf("fifth team conversation offered to %q, state %s; want it waiting", op, e.convState(last))
+	if _, op, _ := e.liveOffer(newStream(company(0), customer(3), "pl")); op != tm {
+		t.Fatalf("fourth team conversation offered to %q, want %s", op, tm)
+	}
+	if _, op, _ := e.liveOffer(newStream(company(0), customer(4), "pl")); op != u {
+		t.Fatalf("fifth team conversation offered to %q, want %s", op, u)
 	}
 }
 
@@ -433,8 +437,13 @@ func (e *env) whoCanServe(s *convStream) [3]bool {
 		e.t.Fatal(err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	var team *string
+	if c.TeamQueue {
+		team = &c.CompanyID
+	}
 	_, err = q.WithTx(tx).PickOperator(ctx, pgdb.PickOperatorParams{
-		Lang: c.Lang, CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession, Exclude: []string{},
+		Lang: c.Lang, TeamCompanyID: team, CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession,
+		Exclude: []string{},
 	})
 	switch {
 	case err == nil:
@@ -443,7 +452,7 @@ func (e *env) whoCanServe(s *convStream) [3]bool {
 		e.t.Fatal(err)
 	}
 	out[2], err = q.UnskippedOperatorExists(ctx, pgdb.UnskippedOperatorExistsParams{
-		Lang: c.Lang, CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession,
+		Lang: c.Lang, TeamCompanyID: team, CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession,
 	})
 	if err != nil {
 		e.t.Fatal(err)

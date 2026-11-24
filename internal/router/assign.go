@@ -27,6 +27,12 @@ type AssignResult struct {
 	// conversation, because no online operator of the shared pool had it
 	// (decision 0009, "A language that no online operator has").
 	GeneralQueue int
+	// Overflow is the number of offers of a team-queue conversation that
+	// went to an operator of the shared pool, because no member of the team
+	// could take it (decision 0009, "Overflow from a team to the shared
+	// pool"). An offer can be both: it then counts here and in
+	// GeneralQueue.
+	Overflow int
 }
 
 // Assign offers waiting conversations to operators, in queue order
@@ -51,15 +57,18 @@ func (s *Service) Assign(ctx context.Context, limit int) (AssignResult, error) {
 		}
 		for _, r := range rows {
 			res.Scanned++
-			ok, general, err := s.assignOne(ctx, r.CompanyID, r.CustomerID)
+			pick, err := s.assignOne(ctx, r.CompanyID, r.CustomerID)
 			if err != nil {
 				return res, fmt.Errorf("assign: %w", err)
 			}
-			if ok {
+			if pick.id != "" {
 				res.Offered++
 			}
-			if general {
+			if pick.generalQueue {
 				res.GeneralQueue++
+			}
+			if pick.overflow {
+				res.Overflow++
 			}
 		}
 		if len(rows) < int(arg.MaxRows) {
@@ -74,11 +83,12 @@ func (s *Service) Assign(ctx context.Context, limit int) (AssignResult, error) {
 	return res, nil
 }
 
-// assignOne tries to offer one conversation. It reports whether an offer
-// was made, and whether it was made under the general queue rule.
-func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (offered, general bool, err error) {
-	err = s.inTx(ctx, func(q *pgdb.Queries) error {
-		offered, general = false, false
+// assignOne tries to offer one conversation. It returns the operator of
+// the offer that was made, or an empty pick when none was made.
+func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (picked, error) {
+	var done picked
+	err := s.inTx(ctx, func(q *pgdb.Queries) error {
+		done = picked{}
 		c, err := q.TryLockWaitingConversation(ctx, pgdb.TryLockWaitingConversationParams{
 			CompanyID: companyID, CustomerID: customerID,
 		})
@@ -119,13 +129,13 @@ func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (
 		if err := ob.flush(ctx, q, now); err != nil {
 			return err
 		}
-		offered, general = true, pick.generalQueue
+		done = pick
 		return nil
 	})
 	if err != nil {
-		return false, false, err
+		return picked{}, err
 	}
-	return offered, general, nil
+	return done, nil
 }
 
 // picked is the operator that pickOperator locked.
@@ -135,6 +145,9 @@ type picked struct {
 	// generalQueue: the operator does not have the language and serves
 	// the conversation through the general queue rule.
 	generalQueue bool
+	// overflow: the conversation is in a team queue and the operator is
+	// in the shared pool.
+	overflow bool
 }
 
 // pickOperator picks and locks an operator for the locked conversation c
@@ -174,21 +187,52 @@ func (s *Service) pickOperator(ctx context.Context, q *pgdb.Queries, c *pgdb.Con
 		if err != nil {
 			return picked{}, fmt.Errorf("operator slots: %w", err)
 		}
-		if slots.Presence == presenceOnline && slots.Live < slots.Capacity &&
-			deref(slots.DedicatedCompanyID) == deref(team) {
-			return picked{id: row.ID, capacity: slots.Capacity, generalQueue: row.GeneralQueue}, nil
+		if ok, overflow := fitsQueue(slots, team, row.GeneralQueue); ok {
+			return picked{id: row.ID, capacity: slots.Capacity, generalQueue: row.GeneralQueue, overflow: overflow}, nil
 		}
 		arg.Exclude = append(arg.Exclude, row.ID)
 	}
 	return picked{}, nil
 }
 
+// fitsQueue checks again, on the operator row read under its lock, the
+// part of "who can serve" (internal/pg/queries/routing.sql) that a
+// concurrent change can break: the operator is online, has a free slot and
+// is in a group that serves the queue. team is the company of a team
+// queue, or nil for a shared queue. generalQueue is the flag of the pick:
+// the operator does not have the language.
+//
+// An operator of the shared pool fits every queue; for a team queue that
+// is the overflow (decision 0009, "Overflow from a team to the shared
+// pool"). A member fits only the team queue of its company, and only with
+// the language itself, because a member never serves through the general
+// queue. A member of another team fits nothing, so an operator who joined
+// another team between the pick and the lock is rejected.
+func fitsQueue(slots pgdb.OperatorSlotsRow, team *string, generalQueue bool) (ok, overflow bool) {
+	if slots.Presence != presenceOnline || slots.Live >= slots.Capacity {
+		return false, false
+	}
+	switch group := deref(slots.DedicatedCompanyID); {
+	case group == "":
+		return true, team != nil
+	case team != nil && group == *team:
+		return !generalQueue, false
+	}
+	return false, false
+}
+
 // clearSkipsIfStuck clears the skipped operators of the session when every
 // online operator who could serve the conversation was skipped, so a small
 // queue does not keep it waiting until the session ends. "Could serve"
-// includes the operators of the general queue when the general queue rule
-// applies (UnskippedOperatorExists uses the same rule as PickOperator). It reports
-// whether it cleared anything.
+// does not look at the load, and it includes the operators of the general
+// queue when the general queue rule applies (UnskippedOperatorExists uses
+// the same rule as PickOperator). For a team queue it is every online
+// member with the language and every online pool operator with the serving
+// language, because the pool takes the overflow. So the skips are cleared
+// only when the members and the pool have all been skipped, and a team
+// whose members refuse does not keep the conversation going round between
+// them while the pool could take it. It reports whether it cleared
+// anything.
 func clearSkipsIfStuck(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, team *string) (bool, error) {
 	key := pgdb.HasSkipsParams{CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession}
 	has, err := q.HasSkips(ctx, key)

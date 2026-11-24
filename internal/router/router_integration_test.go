@@ -1003,11 +1003,13 @@ func testFullTeamQueue(t *testing.T, e *env) {
 	}
 	// The only member is full. Two older team conversations wait ahead of
 	// a conversation of another company, which a free shared operator can
-	// take.
-	e.putOperator(operator(1), 0, "en")
+	// take. That operator has neither "en" nor "und", so it cannot take
+	// the overflow of the team (decision 0009, "Overflow from a team to
+	// the shared pool"), and nobody can serve the team conversations now.
+	e.putOperator(operator(1), 0, "de")
 	e.online(operator(1))
 	e.clock.Advance(time.Second)
-	other := newStream(company(1), customer(10), "en")
+	other := newStream(company(1), customer(10), "de")
 	e.apply(other.opened(), false)
 	r, err := e.svc.Assign(ctx, 2)
 	if err != nil || r.Offered != 1 || r.Scanned != 1 {

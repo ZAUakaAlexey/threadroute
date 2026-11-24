@@ -49,9 +49,11 @@
 // # Rules where the decision records are silent
 //
 //   - An operator is skipped for the rest of the session after a timeout
-//     or a refusal. When every online operator of the right group and
-//     language has been skipped, the skips of the session are cleared, so
-//     the conversation does not wait forever in a small queue.
+//     or a refusal. When every online operator who could serve the
+//     conversation has been skipped, the skips of the session are cleared,
+//     so the conversation does not wait forever in a small queue. For a
+//     team queue that is every member with the language and every
+//     operator of the shared pool that could take the overflow.
 //   - The preferred operator must pass every rule (online, language, group,
 //     free slot, not skipped). Among the operators that pass, it wins over
 //     a lower load. The preference ends with the next offer.

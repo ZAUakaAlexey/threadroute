@@ -52,6 +52,7 @@ type metrics struct {
 
 	offers       prometheus.Counter
 	generalQueue prometheus.Counter
+	overflow     prometheus.Counter
 	expired      prometheus.Counter
 	slaMarked    prometheus.Counter
 	teamChange   *prometheus.CounterVec
@@ -105,6 +106,9 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		generalQueue: counter("offers_general_queue_total",
 			"Offers of offers_total made to an operator of the general queue (und) without the language of the conversation, "+
 				"because no online operator of the shared pool had that language."),
+		overflow: counter("offers_team_overflow_total",
+			"Offers of offers_total of a conversation in a team queue made to an operator of the shared pool, because no member "+
+				"of the team could take it. An offer that is also under the general queue rule counts here and in offers_general_queue_total."),
 		expired:   counter("offers_expired_total", "Offers that the expiry loop of this process ended after the accept timeout."),
 		slaMarked: counter("sla_marked_total", "Missed SLA targets that the SLA loop of this process marked."),
 		teamChange: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_changes_total",
@@ -151,7 +155,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	}
 	for _, c := range []prometheus.Collector{
 		m.applied, m.fetchErrors, m.catchUpActive, m.catchUpSeconds, m.catchUpQueued,
-		m.offers, m.generalQueue, m.expired, m.slaMarked, m.teamChange, m.teamCapStops,
+		m.offers, m.generalQueue, m.overflow, m.expired, m.slaMarked, m.teamChange, m.teamCapStops,
 		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.refreshed, m.loopErrors,
 		m.conversations, m.queueWaiting, m.queueOldest, m.operators, m.capacity,
 		m.liveSlots, m.activeTeams, m.teamOnline, m.teamCap, m.outboxUnsent, m.outboxOldest,

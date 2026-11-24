@@ -394,3 +394,37 @@ func TestNowNeverBefore(t *testing.T) {
 		t.Errorf("now() = %s, not whole microseconds", got)
 	}
 }
+
+func TestFitsQueue(t *testing.T) {
+	team, other := "test-co-0001", "test-co-0002"
+	row := func(presence string, live int32, group *string) pgdb.OperatorSlotsRow {
+		return pgdb.OperatorSlotsRow{Capacity: 2, Presence: presence, DedicatedCompanyID: group, Live: live}
+	}
+	tests := []struct {
+		name         string
+		slots        pgdb.OperatorSlotsRow
+		team         *string
+		generalQueue bool
+		ok, overflow bool
+	}{
+		{name: "pool operator, shared queue", slots: row(presenceOnline, 0, nil), ok: true},
+		{name: "pool operator, team queue: overflow", slots: row(presenceOnline, 1, nil), team: &team, ok: true, overflow: true},
+		{name: "pool operator through und, team queue", slots: row(presenceOnline, 0, nil), team: &team, generalQueue: true,
+			ok: true, overflow: true},
+		{name: "member, its team queue", slots: row(presenceOnline, 1, &team), team: &team, ok: true},
+		{name: "member without the language, its team queue", slots: row(presenceOnline, 0, &team), team: &team,
+			generalQueue: true},
+		{name: "member of another team, team queue", slots: row(presenceOnline, 0, &other), team: &team},
+		{name: "member of a team, shared queue", slots: row(presenceOnline, 0, &team)},
+		{name: "full", slots: row(presenceOnline, 2, nil), team: &team},
+		{name: "offline", slots: row(presenceOffline, 0, &team), team: &team},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ok, overflow := fitsQueue(tt.slots, tt.team, tt.generalQueue)
+			if ok != tt.ok || overflow != tt.overflow {
+				t.Errorf("fitsQueue = %v, %v; want %v, %v", ok, overflow, tt.ok, tt.overflow)
+			}
+		})
+	}
+}

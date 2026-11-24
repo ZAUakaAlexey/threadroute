@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/event"
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
@@ -71,5 +72,85 @@ func testRoutingRules(t *testing.T, h *harness) {
 	}
 	if got := testutil.ToFloat64(r.svc.m.generalQueue); got != 1 {
 		t.Errorf("offers_general_queue_total = %v, want 1", got)
+	}
+}
+
+// testTeamOverflow: the overflow from a team to the shared pool through
+// the running service (decision 0009, "Overflow from a team to the shared
+// pool"). A team of one member serves three conversations of its company;
+// what the member cannot hold goes to the other operator, who is in the
+// shared pool. The conversations stay in the team queue, and
+// offers_team_overflow_total counts exactly the offers of a team-queue
+// conversation to the pool operator. Whether the team forms before or
+// after the first offers depends on the loops, so the test counts the
+// overflow offers in the topic and compares.
+func testTeamOverflow(t *testing.T, h *harness) {
+	sc := h.newScenario(t)
+	sc.rcfg.AcceptTimeout = longAcceptTimeout
+	sc.rcfg.TeamReleaseAfter = 24 * time.Hour
+	// Three active conversations form a team of one. The cap of one half
+	// of two online operators leaves room for it.
+	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1
+	r := sc.start()
+	ctx := t.Context()
+	api := r.api
+	sc.operator(opID(1), 1, "en")
+	sc.operator(opID(2), 1, "en")
+	rd := sc.reader()
+
+	co := company(1)
+	var streams []*convStream
+	for i := range 3 {
+		s := newStream(co, customer(i))
+		streams = append(streams, s)
+		sc.produce(s.opened())
+	}
+	formed := rd.waitEvent(co, "team formed", isType(event.TypeTeamFormed))
+	if len(formed.Members) != 1 {
+		t.Fatalf("team_formed %+v", formed)
+	}
+	member := formed.Members[0]
+
+	// Free the slot of the pool operator after each of its offers, until
+	// every conversation had an offer. The member keeps what it holds.
+	done := map[string]bool{}
+	rd.waitFor(30*time.Second, "an offer for every conversation", func(recs []*kgo.Record) bool {
+		evs := checkOrder(t, recs)
+		all := true
+		for _, s := range streams {
+			offered := false
+			for _, ev := range evs[s.key()] {
+				if ev.Type != event.TypeOffered {
+					continue
+				}
+				offered = true
+				if ev.OperatorID == member || done[ev.OfferID] {
+					continue
+				}
+				done[ev.OfferID] = true
+				wantResult(t, "accept "+ev.OfferID, opapi.ResultDone)(api.Accept(ctx, ev.OperatorID, ev.OfferID))
+				wantResult(t, "resolve "+ev.OfferID, opapi.ResultDone)(api.Resolve(ctx, ev.OperatorID, ev.OfferID))
+			}
+			all = all && offered
+		}
+		return all
+	})
+
+	var overflow int
+	for _, s := range streams {
+		for _, ev := range rd.events(s.key()) {
+			if ev.Type == event.TypeOffered && ev.TeamQueue && ev.OperatorID != member {
+				overflow++
+			}
+		}
+	}
+	if overflow == 0 {
+		t.Fatal("no offer of a team-queue conversation went to the pool operator")
+	}
+	waitFor(t, 10*time.Second, "overflow counter", func() bool {
+		return testutil.ToFloat64(r.svc.m.overflow) == float64(overflow)
+	})
+	if got := testutil.ToFloat64(r.svc.m.generalQueue); got != 0 {
+		t.Errorf("offers_general_queue_total = %v, want 0", got)
 	}
 }

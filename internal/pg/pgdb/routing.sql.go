@@ -248,33 +248,48 @@ type GetConversationParams struct {
 // # Who can serve a conversation
 //
 // One rule decides which operators can serve a conversation (decision
-// 0009, "Assignment", step 2, and "A language that no online operator
-// has"). PickOperator, WaitingConversations and UnskippedOperatorExists
-// each write it out, in the same form, so they cannot disagree. Keep the
-// three in step.
+// 0009, "Assignment", step 2, "A language that no online operator has" and
+// "Overflow from a team to the shared pool"). PickOperator,
+// WaitingConversations and UnskippedOperatorExists each write it out with
+// the same two branches, so they cannot disagree. Keep the three in step.
 //
-// The operator is online and in the group of the queue: the team of the
-// company for a team queue (dedicated_company_id = company), the shared
-// pool otherwise (dedicated_company_id IS NULL). And the operator has the
-// serving language of the conversation:
+// The operator is online, and it is one of:
 //
-//	CASE WHEN <shared queue> AND <language> <> ALL (ARRAY(
-//	         SELECT DISTINCT x.lang FROM operator_languages AS x
-//	         JOIN operators AS xo ON xo.id = x.operator_id
-//	         WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
-//	     THEN 'und' ELSE <language> END
+//  1. A member of the team, for a team queue only: dedicated_company_id
+//     is the company of the conversation, and the operator has the
+//     language of the conversation itself. A member never serves through
+//     the general queue: a conversation whose language no member has is
+//     already in the shared queue (decision 0009, "Languages in a team").
 //
-// So it is the language of the conversation, or 'und' (the general queue)
-// when the queue is shared and no online operator of the shared pool has
-// the language. That test looks only at presence, group and language, not
-// at load, skips or locks: a language whose operators are all busy or all
-// skipped still waits for them. The ARRAY sub-select does not depend on
-// the conversation, so PostgreSQL runs it once per statement and not once
-// per waiting conversation (README, stage 4, has the numbers). The conversation keeps its language and
-// its place in the queue; nothing is stored, and the rule is checked again
-// at every pick. A team queue never uses the general queue: a conversation
-// whose language no team member has is already in the shared queue
-// (decision 0009, "Languages in a team").
+//  2. An operator of the shared pool (dedicated_company_id IS NULL), for
+//     every queue, with the serving language of the conversation:
+//
+//     CASE WHEN <language> <> ALL (ARRAY(
+//     SELECT DISTINCT x.lang FROM operator_languages AS x
+//     JOIN operators AS xo ON xo.id = x.operator_id
+//     WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+//     THEN 'und' ELSE <language> END
+//
+//     So it is the language of the conversation, or 'und' (the general
+//     queue) when no online operator of the shared pool has the language.
+//     That test looks only at presence, group and language, not at load,
+//     skips or locks: a language whose operators are all busy or all
+//     skipped still waits for them.
+//
+// For a team queue the pool branch is the overflow: a pool operator may
+// take the conversation only while no online member with the language has
+// a free slot and is not skipped for it. Where load and skips do not count
+// (UnskippedOperatorExists) the rule is the union of both branches, and
+// WaitingConversations, which looks at free slots but not at skips, lists a
+// team-queue conversation when either branch has an operator with a free
+// slot. PickOperator applies the overflow condition, without locks, and
+// orders the members first.
+//
+// The ARRAY sub-selects and the overflow condition do not depend on the
+// operator or on the waiting conversation, so PostgreSQL runs each of them
+// once per statement (an InitPlan) and not once per row (README, stage 4,
+// has the numbers). The conversation keeps its queue, its language and its
+// place; nothing is stored, and the rule is checked again at every pick.
 func (q *Queries) GetConversation(ctx context.Context, arg GetConversationParams) (Conversation, error) {
 	row := q.db.QueryRow(ctx, getConversation, arg.CompanyID, arg.CustomerID)
 	var i Conversation
@@ -1042,15 +1057,38 @@ SELECT
     ))::boolean AS general_queue
 FROM operators AS o
 WHERE o.presence = 'online'
-  AND o.dedicated_company_id IS NOT DISTINCT FROM $2::text
-  AND EXISTS (
-      SELECT 1 FROM operator_languages AS ol
-      WHERE ol.operator_id = o.id
-        AND ol.lang = (CASE WHEN $2::text IS NULL AND $1 <> ALL (ARRAY(
-                           SELECT DISTINCT x.lang FROM operator_languages AS x
-                           JOIN operators AS xo ON xo.id = x.operator_id
-                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
-                       THEN 'und' ELSE $1 END)
+  AND (
+      -- A member of the team, with the language.
+      (o.dedicated_company_id = $2::text
+       AND EXISTS (
+           SELECT 1 FROM operator_languages AS ol
+           WHERE ol.operator_id = o.id AND ol.lang = $1
+       ))
+      -- An operator of the shared pool, with the serving language.
+      OR (o.dedicated_company_id IS NULL
+          AND EXISTS (
+              SELECT 1 FROM operator_languages AS ol
+              WHERE ol.operator_id = o.id
+                AND ol.lang = (CASE WHEN $1 <> ALL (ARRAY(
+                                   SELECT DISTINCT x.lang FROM operator_languages AS x
+                                   JOIN operators AS xo ON xo.id = x.operator_id
+                                   WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+                               THEN 'und' ELSE $1 END)
+          )
+          -- For a team queue: only while no member can take it.
+          AND ($2::text IS NULL OR NOT EXISTS (
+              SELECT 1 FROM operators AS m
+              JOIN operator_languages AS ml ON ml.operator_id = m.id AND ml.lang = $1
+              WHERE m.presence = 'online'
+                AND m.dedicated_company_id = $2::text
+                AND (SELECT count(*) FROM offers AS f
+                     WHERE f.operator_id = m.id AND f.state IN ('offered', 'accepted')) < m.capacity
+                AND (NOT $3::boolean OR NOT EXISTS (
+                    SELECT 1 FROM offer_skips AS s
+                    WHERE s.company_id = $4 AND s.customer_id = $5
+                      AND s.session = $6 AND s.operator_id = m.id
+                ))
+          )))
   )
   AND (NOT $3::boolean OR NOT EXISTS (
       SELECT 1 FROM offer_skips AS s
@@ -1062,6 +1100,7 @@ WHERE o.presence = 'online'
        WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')) < o.capacity
 ORDER BY
     (o.id = $8::text) DESC,
+    (o.dedicated_company_id IS NOT NULL) DESC,
     (SELECT count(*) FROM offers AS f
      WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')),
     o.priority DESC,
@@ -1088,13 +1127,19 @@ type PickOperatorRow struct {
 
 // PickOperator picks and locks the operator for a conversation (decision
 // 0009, "Assignment", step 2): an operator who can serve it (see "Who can
-// serve a conversation" above), not skipped, with a free slot. The order
-// is: the preferred operator first, then the lowest load, then the highest
-// priority, then the operator ID. The load in this statement is read from
-// the snapshot of the statement, so the caller counts it again with
-// OperatorSlots after the lock is held. general_queue reports an operator
-// who serves the conversation only through the general queue rule: it
-// does not have the language.
+// serve a conversation" above), not skipped, with a free slot. For a team
+// queue (team_company_id set) a pool operator qualifies only while no
+// online member with the language has a free slot and is not skipped. That
+// condition reads the snapshot without locks, so a free member whose row
+// another worker holds still keeps the conversation in the team: this
+// statement then finds nobody and the conversation waits for the next
+// pass. The order is: the preferred operator first, then a member of the
+// team, then the lowest load, then the highest priority, then the operator
+// ID. The load in this statement is read from the snapshot of the
+// statement, so the caller counts it again with OperatorSlots after the
+// lock is held. general_queue reports an operator who serves the
+// conversation only through the general queue rule: it does not have the
+// language.
 func (q *Queries) PickOperator(ctx context.Context, arg PickOperatorParams) (PickOperatorRow, error) {
 	row := q.db.QueryRow(ctx, pickOperator,
 		arg.Lang,
@@ -1751,14 +1796,24 @@ const unskippedOperatorExists = `-- name: UnskippedOperatorExists :one
 SELECT EXISTS (
     SELECT 1
     FROM operators AS o
-    JOIN operator_languages AS ol ON ol.operator_id = o.id
-        AND ol.lang = (CASE WHEN $1::text IS NULL AND $2 <> ALL (ARRAY(
-                           SELECT DISTINCT x.lang FROM operator_languages AS x
-                           JOIN operators AS xo ON xo.id = x.operator_id
-                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
-                       THEN 'und' ELSE $2 END)
     WHERE o.presence = 'online'
-      AND o.dedicated_company_id IS NOT DISTINCT FROM $1::text
+      AND (
+          (o.dedicated_company_id = $1::text
+           AND EXISTS (
+               SELECT 1 FROM operator_languages AS ol
+               WHERE ol.operator_id = o.id AND ol.lang = $2
+           ))
+          OR (o.dedicated_company_id IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM operator_languages AS ol
+                  WHERE ol.operator_id = o.id
+                    AND ol.lang = (CASE WHEN $2 <> ALL (ARRAY(
+                                       SELECT DISTINCT x.lang FROM operator_languages AS x
+                                       JOIN operators AS xo ON xo.id = x.operator_id
+                                       WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+                                   THEN 'und' ELSE $2 END)
+              ))
+      )
       AND NOT EXISTS (
           SELECT 1 FROM offer_skips AS s
           WHERE s.company_id = $3 AND s.customer_id = $4
@@ -1777,8 +1832,11 @@ type UnskippedOperatorExistsParams struct {
 
 // UnskippedOperatorExists reports whether an operator who can serve the
 // conversation (see "Who can serve a conversation" above) is not skipped
-// for the session, whatever its load. Without a lock: it only decides
-// whether the skips are cleared.
+// for the session, whatever its load. For a team queue that is a member
+// with the language or an operator of the shared pool with the serving
+// language: the overflow condition depends on load and skips, so here both
+// branches count. Without a lock: it only decides whether the skips are
+// cleared.
 func (q *Queries) UnskippedOperatorExists(ctx context.Context, arg UnskippedOperatorExistsParams) (bool, error) {
 	row := q.db.QueryRow(ctx, unskippedOperatorExists,
 		arg.TeamCompanyID,
@@ -1803,19 +1861,25 @@ WHERE cv.state = 'waiting'
           AND (cv.queued_at, cv.company_id, cv.customer_id)
               > ($3::timestamptz, $4::text, $5::text))
   )
-  AND EXISTS (
-      SELECT 1
-      FROM operator_languages AS ol
-      JOIN operators AS o ON o.id = ol.operator_id
-      WHERE ol.lang = (CASE WHEN NOT cv.team_queue AND cv.lang <> ALL (ARRAY(
-                           SELECT DISTINCT x.lang FROM operator_languages AS x
-                           JOIN operators AS xo ON xo.id = x.operator_id
-                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
-                       THEN 'und' ELSE cv.lang END)
-        AND o.presence = 'online'
-        AND o.dedicated_company_id IS NOT DISTINCT FROM (CASE WHEN cv.team_queue THEN cv.company_id END)
-        AND (SELECT count(*) FROM offers AS f
-             WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')) < o.capacity
+  AND (
+      -- The shared pool, for every queue.
+      (CASE WHEN cv.lang <> ALL (ARRAY(
+                SELECT DISTINCT x.lang FROM operator_languages AS x
+                JOIN operators AS xo ON xo.id = x.operator_id
+                WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+            THEN 'und' ELSE cv.lang END) = ANY (ARRAY(
+          SELECT DISTINCT ol.lang FROM operator_languages AS ol
+          JOIN operators AS o ON o.id = ol.operator_id
+          WHERE o.presence = 'online' AND o.dedicated_company_id IS NULL
+            AND (SELECT count(*) FROM offers AS f
+                 WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')) < o.capacity))
+      -- The team of the company, for a team queue.
+      OR (cv.team_queue AND (cv.company_id, cv.lang) IN (
+          SELECT o.dedicated_company_id, ol.lang FROM operator_languages AS ol
+          JOIN operators AS o ON o.id = ol.operator_id
+          WHERE o.presence = 'online' AND o.dedicated_company_id IS NOT NULL
+            AND (SELECT count(*) FROM offers AS f
+                 WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')) < o.capacity))
   )
 ORDER BY cv.priority DESC, cv.queued_at, cv.company_id, cv.customer_id
 LIMIT $6
@@ -1843,7 +1907,10 @@ type WaitingConversationsRow struct {
 // a free slot are listed, so a queue that nobody can serve now does not
 // hide the ones behind it. Skipped operators are not filtered here,
 // because assignment clears the skips of a conversation that every
-// operator has skipped.
+// operator has skipped. Both branches are read once per statement: the
+// languages of the online pool operators with a free slot as an array,
+// and the (company, language) pairs of the online members with a free
+// slot as a hashed sub-select.
 func (q *Queries) WaitingConversations(ctx context.Context, arg WaitingConversationsParams) ([]WaitingConversationsRow, error) {
 	rows, err := q.db.Query(ctx, waitingConversations,
 		arg.First,
