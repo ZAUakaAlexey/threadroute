@@ -761,7 +761,7 @@ func (e SettingsErrorResponse) Validate() error {
 	case e.Code != CodeSettingsConflict && e.Settings != nil:
 		errs = append(errs, fmt.Errorf("settings: only with code %s", CodeSettingsConflict))
 	case e.Settings != nil:
-		if err := e.Settings.Validate(); err != nil {
+		if err := errors.Join(e.Settings.Validate(), e.Settings.ValidateStand()); err != nil {
 			errs = append(errs, fmt.Errorf("settings: %w", err))
 		} else if e.Settings.Stand == nil {
 			errs = append(errs, errors.New("settings.stand is not set"))

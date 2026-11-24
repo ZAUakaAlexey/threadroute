@@ -375,9 +375,42 @@ func TestStandStateValidate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assertErrors(t, tt.in.Validate(), tt.errs...)
 			withStand := Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 4, Stand: &tt.in}
-			if (withStand.Validate() != nil) != (len(tt.errs) > 0) {
-				t.Errorf("Settings.Validate() = %v", withStand.Validate())
+			if (withStand.ValidateStand() != nil) != (len(tt.errs) > 0) {
+				t.Errorf("Settings.ValidateStand() = %v", withStand.ValidateStand())
 			}
+			// A broken block never breaks the base settings.
+			if err := withStand.Validate(); err != nil {
+				t.Errorf("Settings.Validate() = %v, want nil", err)
+			}
+		})
+	}
+}
+
+// TestSettingsValidateSplit checks that the base settings and the stand
+// block are checked apart: a broken block does not break the base, and a
+// broken base does not hide a valid block.
+func TestSettingsValidateSplit(t *testing.T) {
+	base := Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 4}
+	broken := &StandState{Version: -1, Current: defaultSet(), Defaults: defaultSet()}
+	tests := []struct {
+		name      string
+		in        Settings
+		baseErrs  []string
+		standErrs []string
+	}{
+		{name: "no stand", in: base},
+		{name: "valid stand", in: testSettings(2)},
+		{name: "broken stand", in: Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 4, Stand: broken},
+			standErrs: []string{"stand: version: -1"}},
+		{name: "broken base, valid stand", in: Settings{Stand: testSettings(0).Stand},
+			baseErrs: []string{"speed_factor", "accept_timeout_us", "capacity_default"}},
+		{name: "both broken", in: Settings{Stand: broken},
+			baseErrs: []string{"speed_factor"}, standErrs: []string{"stand: version: -1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertErrors(t, tt.in.Validate(), tt.baseErrs...)
+			assertErrors(t, tt.in.ValidateStand(), tt.standErrs...)
 		})
 	}
 }
@@ -474,6 +507,11 @@ func TestSettingsErrorResponse(t *testing.T) {
 			errs: []string{"settings is not set"}},
 		{name: "conflict without stand", in: SettingsErrorResponse{ErrorResponse: ErrorResponse{Code: CodeSettingsConflict},
 			Settings: &Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 1}}, errs: []string{"settings.stand is not set"}},
+		{name: "conflict with a broken stand", in: SettingsErrorResponse{ErrorResponse: ErrorResponse{Code: CodeSettingsConflict},
+			Settings: &Settings{SpeedFactor: 1, AcceptTimeoutUS: 1, CapacityDefault: 1, Stand: &StandState{Version: -1}}},
+			errs: []string{"settings: stand: version: -1"}},
+		{name: "conflict with a broken base", in: SettingsErrorResponse{ErrorResponse: ErrorResponse{Code: CodeSettingsConflict},
+			Settings: &Settings{Stand: cur.Stand}}, errs: []string{"settings: speed_factor"}},
 		{name: "details with the wrong codes", in: SettingsErrorResponse{
 			ErrorResponse: ErrorResponse{Code: CodeUnavailable},
 			Fields:        []FieldError{{Field: FieldBy, Reason: "x"}}, Settings: &cur, RetryAfterMS: 5,
@@ -518,7 +556,7 @@ func TestSettingsSizes(t *testing.T) {
 	worst(&big.Stand.Current)
 	worst(&big.Stand.Defaults)
 	big.Stand.Version = 1 << 40
-	if err := big.Validate(); err != nil {
+	if err := errors.Join(big.Validate(), big.ValidateStand()); err != nil {
 		t.Fatal(err)
 	}
 	b, err := json.Marshal(big)
@@ -541,7 +579,7 @@ func TestSettingsSizes(t *testing.T) {
 		c.ChangedAtUS = math.MaxInt64 / 1000
 		big.Stand.Changes = append(big.Stand.Changes, c)
 	}
-	if err := big.Validate(); err != nil {
+	if err := errors.Join(big.Validate(), big.ValidateStand()); err != nil {
 		t.Fatal(err)
 	}
 	resp := SettingsChangeResponse{Result: ResultDone, Settings: big}
@@ -598,7 +636,7 @@ func TestSettingsAnswersFormat(t *testing.T) {
 	if got != want {
 		t.Errorf("json =\n%s\nwant\n%s", got, want)
 	}
-	if err := s.Validate(); err != nil {
+	if err := errors.Join(s.Validate(), s.ValidateStand()); err != nil {
 		t.Error(err)
 	}
 	if got := SimDefaultsPath(); got != "/v1/settings/sim-defaults" {

@@ -39,7 +39,9 @@
 // 0014 does not serve them: it answers PatternPutSettings with HTTP 405
 // and PatternPutSimDefaults with HTTP 404, both without an ErrorResponse,
 // and its PatternSettings answer has no "stand". A caller treats those
-// three like CodeSettingsOff.
+// three like CodeSettingsOff. A PatternSettings answer whose "stand" is not
+// valid (Settings.ValidateStand) counts as one without "stand"; its base
+// settings stay usable when Settings.Validate passes.
 //
 // # Offers and assignments
 //
@@ -396,6 +398,7 @@ type Settings struct {
 	// Stand is the stand settings block of decision 0014. It is optional:
 	// a router from before decision 0014, or one that does not offer stand
 	// settings, does not send it. Absent means "stand settings are off".
+	// Validate does not check it; ValidateStand does.
 	Stand *StandState `json:"stand,omitempty"`
 }
 
@@ -404,8 +407,11 @@ func (s Settings) AcceptTimeout() time.Duration {
 	return time.Duration(s.AcceptTimeoutUS) * time.Microsecond
 }
 
-// Validate reports every invalid field. The simulator does not start with
-// invalid settings (decision 0010).
+// Validate reports every invalid field of the base settings, all fields
+// but Stand. The simulator does not start with invalid base settings
+// (decision 0010). The stand block is checked on its own by ValidateStand,
+// so that a broken block turns only the stand settings off and does not
+// stop the simulator or the gateway.
 func (s Settings) Validate() error {
 	var errs []error
 	if !(s.SpeedFactor > 0) {
@@ -423,12 +429,20 @@ func (s Settings) Validate() error {
 	if s.FirstResponseTargetUS < 0 {
 		errs = append(errs, fmt.Errorf("first_response_target_us: %d is negative", s.FirstResponseTargetUS))
 	}
-	if s.Stand != nil {
-		if err := s.Stand.Validate(); err != nil {
-			errs = append(errs, fmt.Errorf("stand: %w", err))
-		}
-	}
 	return errors.Join(errs...)
+}
+
+// ValidateStand reports every invalid field of the stand block. An absent
+// block is valid: it means "stand settings are off". A reader treats a
+// block that is not valid like an absent one.
+func (s Settings) ValidateStand() error {
+	if s.Stand == nil {
+		return nil
+	}
+	if err := s.Stand.Validate(); err != nil {
+		return fmt.Errorf("stand: %w", err)
+	}
+	return nil
 }
 
 // ErrorCode is the machine-readable code of an error answer.
