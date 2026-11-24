@@ -22,6 +22,11 @@ type AssignResult struct {
 	Scanned int
 	// Offered is the number of offers made.
 	Offered int
+	// GeneralQueue is the number of those offers that went to an operator
+	// of the general queue (und) who does not have the language of the
+	// conversation, because no online operator of the shared pool had it
+	// (decision 0009, "A language that no online operator has").
+	GeneralQueue int
 }
 
 // Assign offers waiting conversations to operators, in queue order
@@ -46,12 +51,15 @@ func (s *Service) Assign(ctx context.Context, limit int) (AssignResult, error) {
 		}
 		for _, r := range rows {
 			res.Scanned++
-			ok, err := s.assignOne(ctx, r.CompanyID, r.CustomerID)
+			ok, general, err := s.assignOne(ctx, r.CompanyID, r.CustomerID)
 			if err != nil {
 				return res, fmt.Errorf("assign: %w", err)
 			}
 			if ok {
 				res.Offered++
+			}
+			if general {
+				res.GeneralQueue++
 			}
 		}
 		if len(rows) < int(arg.MaxRows) {
@@ -67,11 +75,10 @@ func (s *Service) Assign(ctx context.Context, limit int) (AssignResult, error) {
 }
 
 // assignOne tries to offer one conversation. It reports whether an offer
-// was made.
-func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (bool, error) {
-	offered := false
-	err := s.inTx(ctx, func(q *pgdb.Queries) error {
-		offered = false
+// was made, and whether it was made under the general queue rule.
+func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (offered, general bool, err error) {
+	err = s.inTx(ctx, func(q *pgdb.Queries) error {
+		offered, general = false, false
 		c, err := q.TryLockWaitingConversation(ctx, pgdb.TryLockWaitingConversationParams{
 			CompanyID: companyID, CustomerID: customerID,
 		})
@@ -81,15 +88,16 @@ func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (
 		if err != nil {
 			return fmt.Errorf("lock conversation: %w", err)
 		}
-		op, capacity, err := s.pickOperator(ctx, q, &c)
-		if err != nil || op == "" {
+		pick, err := s.pickOperator(ctx, q, &c)
+		if err != nil || pick.id == "" {
 			return err
 		}
+		op := pick.id
 		now := s.now(c.QueuedAt)
 		acceptBy := now.Add(s.cfg.machine(s.cfg.AcceptTimeout))
 		o, err := q.InsertOffer(ctx, pgdb.InsertOfferParams{
 			CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession,
-			OperatorID: op, Capacity: capacity, QueuedAt: *c.QueuedAt, OfferedAt: now, AcceptBy: acceptBy,
+			OperatorID: op, Capacity: pick.capacity, QueuedAt: *c.QueuedAt, OfferedAt: now, AcceptBy: acceptBy,
 		})
 		if err != nil {
 			return fmt.Errorf("insert offer: %w", err)
@@ -108,19 +116,34 @@ func (s *Service) assignOne(ctx context.Context, companyID, customerID string) (
 		if err := saveConv(ctx, q, &c, now); err != nil {
 			return err
 		}
-		offered = true
-		return ob.flush(ctx, q, now)
+		if err := ob.flush(ctx, q, now); err != nil {
+			return err
+		}
+		offered, general = true, pick.generalQueue
+		return nil
 	})
-	return offered, err
+	if err != nil {
+		return false, false, err
+	}
+	return offered, general, nil
+}
+
+// picked is the operator that pickOperator locked.
+type picked struct {
+	id       string
+	capacity int32
+	// generalQueue: the operator does not have the language and serves
+	// the conversation through the general queue rule.
+	generalQueue bool
 }
 
 // pickOperator picks and locks an operator for the locked conversation c
-// and returns it with its capacity, or "" when no operator can take it
-// now. The pick locks the operator row with SKIP LOCKED. Its load was read
+// and returns it with its capacity, or an empty ID when no operator can
+// take it now. The pick locks the operator row with SKIP LOCKED. Its load was read
 // from the snapshot of the pick, so it is counted again here, in a new
 // statement, while the lock is held: every transaction that adds a slot to
 // this operator holds the same lock, so this count is exact.
-func (s *Service) pickOperator(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation) (string, int32, error) {
+func (s *Service) pickOperator(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation) (picked, error) {
 	var team *string
 	if c.TeamQueue {
 		team = &c.CompanyID
@@ -132,37 +155,39 @@ func (s *Service) pickOperator(ctx context.Context, q *pgdb.Queries, c *pgdb.Con
 	}
 	skipsChecked := false
 	for range pickAttempts {
-		op, err := q.PickOperator(ctx, arg)
+		row, err := q.PickOperator(ctx, arg)
 		if isNoRows(err) {
 			if skipsChecked {
-				return "", 0, nil
+				return picked{}, nil
 			}
 			skipsChecked = true
 			cleared, err := clearSkipsIfStuck(ctx, q, c, team)
 			if err != nil || !cleared {
-				return "", 0, err
+				return picked{}, err
 			}
 			continue
 		}
 		if err != nil {
-			return "", 0, fmt.Errorf("pick operator: %w", err)
+			return picked{}, fmt.Errorf("pick operator: %w", err)
 		}
-		slots, err := q.OperatorSlots(ctx, op)
+		slots, err := q.OperatorSlots(ctx, row.ID)
 		if err != nil {
-			return "", 0, fmt.Errorf("operator slots: %w", err)
+			return picked{}, fmt.Errorf("operator slots: %w", err)
 		}
 		if slots.Presence == presenceOnline && slots.Live < slots.Capacity &&
 			deref(slots.DedicatedCompanyID) == deref(team) {
-			return op, slots.Capacity, nil
+			return picked{id: row.ID, capacity: slots.Capacity, generalQueue: row.GeneralQueue}, nil
 		}
-		arg.Exclude = append(arg.Exclude, op)
+		arg.Exclude = append(arg.Exclude, row.ID)
 	}
-	return "", 0, nil
+	return picked{}, nil
 }
 
 // clearSkipsIfStuck clears the skipped operators of the session when every
 // online operator who could serve the conversation was skipped, so a small
-// queue does not keep it waiting until the session ends. It reports
+// queue does not keep it waiting until the session ends. "Could serve"
+// includes the operators of the general queue when the general queue rule
+// applies (UnskippedOperatorExists uses the same rule as PickOperator). It reports
 // whether it cleared anything.
 func clearSkipsIfStuck(ctx context.Context, q *pgdb.Queries, c *pgdb.Conversation, team *string) (bool, error) {
 	key := pgdb.HasSkipsParams{CompanyID: c.CompanyID, CustomerID: c.CustomerID, Session: c.ConvSession}

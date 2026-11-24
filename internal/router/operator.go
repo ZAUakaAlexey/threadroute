@@ -17,12 +17,17 @@ import (
 // answers. Any other error is a database error. A late or repeated call
 // changes nothing.
 
-// PutOperator creates an operator or sets its languages and capacity
-// (opapi.PatternPutOperator). A new operator is offline. A capacity of 0
-// takes Config.Capacity. Lowering the capacity below the current load ends
-// nothing: the operator gets no new slot until the load is below the new
-// capacity. A real change writes an operator_updated event; a call that
-// changes nothing writes none.
+// PutOperator creates an operator or sets its languages, capacity and
+// priority (opapi.PatternPutOperator). A new operator is offline. A
+// capacity of 0 takes Config.Capacity. The priority is replaced like the
+// other fields, so a request without one sets it to 0. Lowering the
+// capacity below the current load ends nothing: the operator gets no new
+// slot until the load is below the new capacity. A change of the
+// languages or the capacity, and a new operator, write an
+// operator_updated event. A change of the priority alone answers
+// opapi.ResultDone but writes no event, because the operator event does
+// not carry the priority (decision 0011); a call that changes nothing
+// answers opapi.ResultAlreadyDone and writes none.
 //
 // Locks: the operator row first when it exists, so the upsert compares
 // with the state that it then overwrites.
@@ -43,7 +48,7 @@ func (s *Service) PutOperator(ctx context.Context, id string, req opapi.Operator
 			return fmt.Errorf("lock operator: %w", err)
 		}
 		r, err := q.UpsertOperator(ctx, pgdb.UpsertOperatorParams{
-			ID: id, Capacity: int32(capacity), Languages: req.Languages,
+			ID: id, Capacity: int32(capacity), Priority: int32(req.Priority), Languages: req.Languages,
 		})
 		if err != nil {
 			return fmt.Errorf("upsert: %w", err)
@@ -54,10 +59,14 @@ func (s *Service) PutOperator(ctx context.Context, id string, req opapi.Operator
 		}
 		resp.Result = opapi.ResultAlreadyDone
 		resp.Operator = operatorView(op)
-		if !r.Created && !r.CapacityChanged && r.LanguagesAdded == 0 && r.LanguagesRemoved == 0 {
+		inEvent := r.Created || r.CapacityChanged || r.LanguagesAdded > 0 || r.LanguagesRemoved > 0
+		if !inEvent && !r.PriorityChanged {
 			return nil
 		}
 		resp.Result = opapi.ResultDone
+		if !inEvent {
+			return nil
+		}
 		now := s.now()
 		var ob outbox
 		if err := addOperatorEvents(ctx, q, &ob, []string{id}, event.TypeOperatorUpdated, now); err != nil {
@@ -91,6 +100,7 @@ func operatorView(op pgdb.GetOperatorRow) opapi.Operator {
 		ID:            op.ID,
 		Languages:     langs,
 		Capacity:      int(op.Capacity),
+		Priority:      int(op.Priority),
 		Presence:      opapi.Presence(op.Presence),
 		TeamCompanyID: deref(op.DedicatedCompanyID),
 	}

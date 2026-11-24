@@ -44,10 +44,11 @@ type metrics struct {
 	catchUpSeconds prometheus.Gauge
 	catchUpQueued  prometheus.Gauge
 
-	offers     prometheus.Counter
-	expired    prometheus.Counter
-	slaMarked  prometheus.Counter
-	teamChange *prometheus.CounterVec
+	offers       prometheus.Counter
+	generalQueue prometheus.Counter
+	expired      prometheus.Counter
+	slaMarked    prometheus.Counter
+	teamChange   *prometheus.CounterVec
 
 	published     *prometheus.CounterVec
 	slaMissed     *prometheus.CounterVec
@@ -91,7 +92,10 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		catchUpQueued: gauge("catchup_queued",
 			"Conversations that entered their queue at the end of the last catch-up."),
 
-		offers:    counter("offers_total", "Offers made by the assignment workers of this process."),
+		offers: counter("offers_total", "Offers made by the assignment workers of this process."),
+		generalQueue: counter("offers_general_queue_total",
+			"Offers of offers_total made to an operator of the general queue (und) without the language of the conversation, "+
+				"because no online operator of the shared pool had that language."),
 		expired:   counter("offers_expired_total", "Offers that the expiry loop of this process ended after the accept timeout."),
 		slaMarked: counter("sla_marked_total", "Missed SLA targets that the SLA loop of this process marked."),
 		teamChange: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_changes_total",
@@ -131,7 +135,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	}
 	for _, c := range []prometheus.Collector{
 		m.applied, m.fetchErrors, m.catchUpActive, m.catchUpSeconds, m.catchUpQueued,
-		m.offers, m.expired, m.slaMarked, m.teamChange,
+		m.offers, m.generalQueue, m.expired, m.slaMarked, m.teamChange,
 		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.refreshed, m.loopErrors,
 		m.conversations, m.queueWaiting, m.queueOldest, m.operators, m.capacity,
 		m.liveSlots, m.activeTeams, m.outboxUnsent, m.outboxOldest,

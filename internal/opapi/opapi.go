@@ -60,8 +60,8 @@ const (
 // wildcards). Operator IDs and offer IDs follow event.ValidRoutingID, so
 // they never need escaping in a path.
 const (
-	// PatternPutOperator creates an operator or updates its languages and
-	// capacity. Body: OperatorRequest. Answer: OperatorResponse. The
+	// PatternPutOperator creates an operator or updates its languages,
+	// capacity and priority. Body: OperatorRequest. Answer: OperatorResponse. The
 	// simulator calls it for each of its operators at start. A new
 	// operator is offline.
 	PatternPutOperator = "PUT /v1/operators/{operator_id}"
@@ -148,6 +148,8 @@ const (
 	MaxCapacity = 100
 	// MaxReplyIDLen is the longest reply ID.
 	MaxReplyIDLen = 64
+	// MaxPriority is the highest priority of one operator. The lowest is 0.
+	MaxPriority = 9
 )
 
 // ValidID reports whether s can be an operator ID or an offer ID. It is
@@ -182,6 +184,12 @@ type OperatorRequest struct {
 	// from 1 to MaxCapacity. 0 or absent takes the router default
 	// (Settings.CapacityDefault).
 	Capacity int `json:"capacity,omitempty"`
+	// Priority breaks a tie between operators with the same lowest load:
+	// the higher one gets the offer (decision 0009, "An operator
+	// priority"). From 0 to MaxPriority. 0 or absent is the lowest. Like
+	// the languages and the capacity, a request replaces it, so a request
+	// without it sets it back to 0.
+	Priority int `json:"priority,omitempty"`
 }
 
 // Validate reports every invalid field.
@@ -206,6 +214,9 @@ func (r OperatorRequest) Validate() error {
 	if r.Capacity < 0 || r.Capacity > MaxCapacity {
 		errs = append(errs, fmt.Errorf("capacity: %d is not between 0 and %d", r.Capacity, MaxCapacity))
 	}
+	if r.Priority < 0 || r.Priority > MaxPriority {
+		errs = append(errs, fmt.Errorf("priority: %d is not between 0 and %d", r.Priority, MaxPriority))
+	}
 	return errors.Join(errs...)
 }
 
@@ -215,7 +226,9 @@ type Operator struct {
 	// Languages are sorted.
 	Languages []string `json:"languages"`
 	// Capacity is the effective capacity, after the default was applied.
-	Capacity int      `json:"capacity"`
+	Capacity int `json:"capacity"`
+	// Priority is the stored priority, 0 when none was sent.
+	Priority int      `json:"priority"`
 	Presence Presence `json:"presence"`
 	// TeamCompanyID is the company of the dedicated team the operator is
 	// in, or empty in the shared pool.
@@ -224,7 +237,8 @@ type Operator struct {
 
 // OperatorResponse is the answer of PatternPutOperator. Result is
 // ResultDone when the operator was created or changed, and
-// ResultAlreadyDone when it already had these languages and capacity.
+// ResultAlreadyDone when it already had these languages, capacity and
+// priority.
 type OperatorResponse struct {
 	Result   Result   `json:"result"`
 	Operator Operator `json:"operator"`

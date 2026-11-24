@@ -74,6 +74,7 @@ type ccStats struct {
 	serialization int
 	unexpected    []string
 	offers        int
+	generalQueue  int
 	expired       int
 	missed        int
 	formed        int
@@ -172,8 +173,11 @@ func TestIntegrationConcurrency(t *testing.T) {
 	}
 	ctx := t.Context()
 
-	// Operators: few, with overlapping languages. Nobody has "pt", so that
-	// queue never moves and must not block the others.
+	// Operators: few, with overlapping languages. Nobody has "pt", so
+	// those conversations go only to operators of the general queue (und),
+	// and only while one of them is online (decision 0009, "A language
+	// that no online operator has"). The "ja" queue also uses the general
+	// queue whenever every operator with "ja" is offline.
 	opLangs := [][]string{
 		{"en", "und"}, {"en", "ja"}, {"ja", "und"}, {"en"},
 		{"ja"}, {"en", "und"}, {"en", "ja", "und"}, {"ja", "und"},
@@ -218,6 +222,12 @@ func TestIntegrationConcurrency(t *testing.T) {
 			}
 			bad, err := checkInvariants(ctx, pool)
 			checks++
+			if err != nil {
+				violations = append(violations, "check failed: "+err.Error())
+				return
+			}
+			more, err := ccCheckLanguages(ctx, pool)
+			bad = append(bad, more...)
 			if err != nil {
 				violations = append(violations, "check failed: "+err.Error())
 				return
@@ -292,8 +302,8 @@ func TestIntegrationConcurrency(t *testing.T) {
 	for k := range ccKinds {
 		t.Logf("  %-10s runs %4d done %4d already %4d", ccNames[k], stats.runs[k], stats.done[k], stats.already[k])
 	}
-	t.Logf("  offers made %d, offers expired %d, SLA misses %d, teams formed %d resized %d released %d",
-		stats.offers, stats.expired, stats.missed, stats.formed, stats.resized, stats.released)
+	t.Logf("  offers made %d (%d under the general queue rule), offers expired %d, SLA misses %d, teams formed %d resized %d released %d",
+		stats.offers, stats.generalQueue, stats.expired, stats.missed, stats.formed, stats.resized, stats.released)
 	var opEvents, opKeys int
 	if err := pool.QueryRow(ctx, `SELECT count(*), count(DISTINCT record_key) FROM outbox WHERE family = 'operator'`).
 		Scan(&opEvents, &opKeys); err != nil {
@@ -315,15 +325,23 @@ func TestIntegrationConcurrency(t *testing.T) {
 			stats.deadlocks, stats.serialization)
 	}
 	requireInvariants(t, pool)
+	bad, err := ccCheckLanguages(ctx, pool)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range bad {
+		t.Error(b)
+	}
 
 	// The mix must have exercised the paths it is meant to test. The floors
 	// are about half of the smallest values seen in 10 local runs, so a slower
 	// machine that interleaves differently does not fail here.
 	if stats.offers < 90 || stats.done[kAccept] < 50 || stats.expired < 4 || stats.done[kOffline] == 0 ||
-		stats.done[kRefuse] == 0 || stats.done[kResolve] == 0 || stats.formed == 0 || stats.refreshed == 0 {
-		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d refreshed %d",
+		stats.done[kRefuse] == 0 || stats.done[kResolve] == 0 || stats.formed == 0 || stats.refreshed == 0 ||
+		stats.generalQueue < 8 {
+		t.Errorf("the mix did too little: offers %d accepts %d expired %d offline %d refuse %d resolve %d teams %d refreshed %d general %d",
 			stats.offers, stats.done[kAccept], stats.expired, stats.done[kOffline], stats.done[kRefuse], stats.done[kResolve],
-			stats.formed, stats.refreshed)
+			stats.formed, stats.refreshed, stats.generalQueue)
 	}
 }
 
@@ -358,6 +376,7 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 		r, err := svc.Assign(ctx, 10)
 		stats.mu.Lock()
 		stats.offers += r.Offered
+		stats.generalQueue += r.GeneralQueue
 		stats.mu.Unlock()
 		return done(r.Offered, err)
 	case kAccept, kRefuse, kReply, kResolve:
@@ -390,7 +409,10 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 		return svc.Online(ctx, opIDs[rng.IntN(len(opIDs))])
 	case kCapacity:
 		i := rng.IntN(len(opIDs))
-		r, err := svc.PutOperator(ctx, opIDs[i], opapi.OperatorRequest{Languages: opLangs[i], Capacity: 1 + rng.IntN(4)})
+		// The priority changes too, so picks run against changes of it.
+		r, err := svc.PutOperator(ctx, opIDs[i], opapi.OperatorRequest{
+			Languages: opLangs[i], Capacity: 1 + rng.IntN(4), Priority: rng.IntN(opapi.MaxPriority + 1),
+		})
 		return r.Result, err
 	case kConv:
 		return ccConvEvent(ctx, svc, rng, own)
@@ -419,6 +441,26 @@ func ccRun(ctx context.Context, svc *Service, pool *pgxpool.Pool, clock *fakeClo
 		return done(n, err)
 	}
 	return "", fmt.Errorf("unknown kind %d", k)
+}
+
+// ccCheckLanguages checks the language rule of every live offer, on one
+// snapshot. It holds only in this test, where the languages of an
+// operator never change: the operator of a live offer has the language of
+// the conversation, or "und" when the conversation is in the shared queue
+// (the general queue rule). A team queue never uses the general queue.
+func ccCheckLanguages(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx, `
+		SELECT 'live offer to an operator without the language: ' || f.id || ' ' || f.operator_id || ' ' || cv.lang
+		FROM offers AS f
+		JOIN conversations AS cv ON cv.company_id = f.company_id AND cv.customer_id = f.customer_id
+		WHERE f.state IN ('offered', 'accepted')
+		  AND NOT EXISTS (SELECT 1 FROM operator_languages AS ol
+		                  WHERE ol.operator_id = f.operator_id
+		                    AND (ol.lang = cv.lang OR (ol.lang = 'und' AND NOT cv.team_queue)))`)
+	if err != nil {
+		return nil, fmt.Errorf("language rule: %w", err)
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // ccRandomOffer picks one of the newest offers, live or not, so late and

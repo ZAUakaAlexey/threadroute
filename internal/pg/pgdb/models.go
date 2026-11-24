@@ -77,6 +77,7 @@ type Operator struct {
 	PresenceChangedAt  time.Time
 	OpSeq              int64
 	OpEventAt          *time.Time
+	Priority           int32
 }
 
 type OperatorLanguage struct {

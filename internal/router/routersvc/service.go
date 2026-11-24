@@ -327,6 +327,7 @@ func (s *Service) routingLoops() []loopSpec {
 			step: func(ctx context.Context) (bool, error) {
 				r, err := s.core.Assign(ctx, assignBatch)
 				s.m.offers.Add(float64(r.Offered))
+				s.m.generalQueue.Add(float64(r.GeneralQueue))
 				return r.Scanned >= assignBatch && r.Offered > 0, err
 			},
 		})

@@ -1,19 +1,22 @@
 -- name: UpsertOperator :one
--- UpsertOperator creates the operator, or sets its capacity and its
--- languages, in one statement. A new operator is offline. The result says
+-- UpsertOperator creates the operator, or sets its capacity, its priority
+-- and its languages, in one statement. A new operator is offline. The result says
 -- what changed, so the operator API can answer "done" or "already done".
 -- @languages must not be empty and must hold no duplicates. PostgreSQL
 -- runs every data-modifying CTE, even one the final SELECT does not read.
 WITH prev AS (
     -- Always one row: n is 0 for a new operator.
-    SELECT count(*) AS n, COALESCE(max(o.capacity), 0)::integer AS capacity
+    SELECT
+        count(*) AS n,
+        COALESCE(max(o.capacity), 0)::integer AS capacity,
+        COALESCE(max(o.priority), 0)::integer AS priority
     FROM operators AS o
     WHERE o.id = @id
 ), op AS (
-    INSERT INTO operators (id, capacity)
-    VALUES (@id, @capacity)
+    INSERT INTO operators (id, capacity, priority)
+    VALUES (@id, @capacity, @priority)
     ON CONFLICT (id) DO UPDATE
-        SET capacity = EXCLUDED.capacity, updated_at = now()
+        SET capacity = EXCLUDED.capacity, priority = EXCLUDED.priority, updated_at = now()
     RETURNING operators.id
 ), removed AS (
     DELETE FROM operator_languages AS ol
@@ -32,6 +35,7 @@ WITH prev AS (
 SELECT
     prev.n = 0 AS created,
     (prev.n > 0 AND prev.capacity <> @capacity::integer)::boolean AS capacity_changed,
+    (prev.n > 0 AND prev.priority <> @priority::integer)::boolean AS priority_changed,
     removed_count.n AS languages_removed,
     added_count.n AS languages_added
 FROM prev, removed_count, added_count;
@@ -49,6 +53,7 @@ WHERE id = @id AND presence <> @presence;
 SELECT
     o.id,
     o.capacity,
+    o.priority,
     o.presence,
     o.dedicated_company_id,
     o.created_at,

@@ -145,6 +145,8 @@ func routes() []route {
 	return []route{
 		{"put operator", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en","und"],"capacity":3}`,
 			call{method: "put", operator: testOperator, req: opapi.OperatorRequest{Languages: []string{"en", "und"}, Capacity: 3}}},
+		{"put operator with priority 9", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"priority":9}`,
+			call{method: "put", operator: testOperator, req: opapi.OperatorRequest{Languages: []string{"en"}, Priority: 9}}},
 		{"online", http.MethodPost, opapi.OnlinePath(testOperator), "", call{method: "online", operator: testOperator}},
 		{"offline", http.MethodPost, opapi.OfflinePath(testOperator), "", call{method: "offline", operator: testOperator}},
 		{"accept", http.MethodPost, opapi.AcceptPath(testOperator, testOffer), "",
@@ -258,6 +260,9 @@ func TestBadRequests(t *testing.T) {
 		{"put duplicate language", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en","en"]}`},
 		{"put capacity too big", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"capacity":101}`},
 		{"put negative capacity", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"capacity":-1}`},
+		{"put priority too big", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"priority":10}`},
+		{"put negative priority", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"priority":-1}`},
+		{"put priority not a whole number", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"priority":1.5}`},
 		{"put oversized", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"],"x":"` + long + `"}`},
 		{"put oversized after object", http.MethodPut, opapi.OperatorPath(testOperator), `{"languages":["en"]}` + strings.Repeat(" ", opapi.MaxBodyBytes)},
 		{"reply without body", http.MethodPost, opapi.ReplyPath(testOperator, testOffer), ""},

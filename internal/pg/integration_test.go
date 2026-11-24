@@ -86,6 +86,18 @@ func testOperatorQueries(t *testing.T, pool *pgxpool.Pool) {
 			want:  pgdb.UpsertOperatorRow{CapacityChanged: true, LanguagesRemoved: 1, LanguagesAdded: 1},
 			langs: []string{"ja", "und"},
 		},
+		{
+			name:  "change priority",
+			arg:   pgdb.UpsertOperatorParams{ID: id, Capacity: 6, Priority: 1, Languages: []string{"ja", "und"}},
+			want:  pgdb.UpsertOperatorRow{PriorityChanged: true},
+			langs: []string{"ja", "und"},
+		},
+		{
+			name:  "priority back to 0",
+			arg:   pgdb.UpsertOperatorParams{ID: id, Capacity: 6, Languages: []string{"ja", "und"}},
+			want:  pgdb.UpsertOperatorRow{PriorityChanged: true},
+			langs: []string{"ja", "und"},
+		},
 	}
 	for _, u := range upserts {
 		got, err := q.UpsertOperator(ctx, u.arg)
@@ -99,8 +111,8 @@ func testOperatorQueries(t *testing.T, pool *pgxpool.Pool) {
 		if err != nil {
 			t.Fatalf("%s: GetOperator() error = %v", u.name, err)
 		}
-		if op.Capacity != u.arg.Capacity || !slices.Equal(op.Languages, u.langs) {
-			t.Errorf("%s: operator = %+v, want capacity %d languages %v", u.name, op, u.arg.Capacity, u.langs)
+		if op.Capacity != u.arg.Capacity || op.Priority != u.arg.Priority || !slices.Equal(op.Languages, u.langs) {
+			t.Errorf("%s: operator = %+v, want capacity %d priority %d languages %v", u.name, op, u.arg.Capacity, u.arg.Priority, u.langs)
 		}
 		if op.Presence != "offline" || op.DedicatedCompanyID != nil {
 			t.Errorf("%s: presence %q, dedicated company %v", u.name, op.Presence, op.DedicatedCompanyID)
@@ -139,6 +151,7 @@ func testOperatorQueries(t *testing.T, pool *pgxpool.Pool) {
 		{ID: "op/1", Capacity: 4, Languages: []string{"en"}},
 		{ID: "sim-op-0002", Capacity: 0, Languages: []string{"en"}},
 		{ID: "sim-op-0003", Capacity: 4, Languages: []string{"EN"}},
+		{ID: "sim-op-0004", Capacity: 4, Priority: 10, Languages: []string{"en"}},
 	}
 	for _, arg := range bad {
 		if _, err := q.UpsertOperator(ctx, arg); err == nil {
@@ -261,5 +274,78 @@ func TestIntegrationOperatorEventsMigration(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx, `UPDATE operators SET op_seq = -1 WHERE id = 'sim-op-0001'`); err == nil {
 		t.Error("negative op_seq: no error, want a check violation")
+	}
+}
+
+// TestIntegrationOperatorPriorityMigration checks migration 00004 up and
+// down on a database that already holds an operator: the operator gets
+// priority 0, the range is checked, and the down step removes the column
+// and keeps the operator.
+func TestIntegrationOperatorPriorityMigration(t *testing.T) {
+	pool := pgtest.Open(t, pgtest.Start(t))
+	ctx := t.Context()
+	files, err := pg.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { _ = db.Close() })
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, files, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 3); err != nil {
+		t.Fatalf("migrate to 3: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `INSERT INTO operators (id, capacity) VALUES ('sim-op-0001', 4)`); err != nil {
+		t.Fatal(err)
+	}
+	hasColumn := func() bool {
+		t.Helper()
+		var n int
+		err := pool.QueryRow(ctx, `SELECT count(*) FROM information_schema.columns
+			WHERE table_name = 'operators' AND column_name = 'priority'`).Scan(&n)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return n == 1
+	}
+
+	if _, err := provider.UpTo(ctx, 4); err != nil {
+		t.Fatalf("migrate to 4: %v", err)
+	}
+	var p int
+	if err := pool.QueryRow(ctx, `SELECT priority FROM operators WHERE id = 'sim-op-0001'`).Scan(&p); err != nil || p != 0 {
+		t.Fatalf("priority of an existing operator = %d, %v; want 0", p, err)
+	}
+	for _, v := range []int{0, 9} {
+		if _, err := pool.Exec(ctx, `UPDATE operators SET priority = $1 WHERE id = 'sim-op-0001'`, v); err != nil {
+			t.Errorf("priority %d: %v", v, err)
+		}
+	}
+	for _, v := range []int{-1, 10} {
+		if _, err := pool.Exec(ctx, `UPDATE operators SET priority = $1 WHERE id = 'sim-op-0001'`, v); err == nil {
+			t.Errorf("priority %d: no error, want a check violation", v)
+		}
+	}
+	if _, err := pool.Exec(ctx, `UPDATE operators SET priority = NULL WHERE id = 'sim-op-0001'`); err == nil {
+		t.Error("priority NULL: no error, want a not-null violation")
+	}
+
+	if _, err := provider.DownTo(ctx, 3); err != nil {
+		t.Fatalf("down to 3: %v", err)
+	}
+	if hasColumn() {
+		t.Error("the priority column is still there after the down step")
+	}
+	var n int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM operators`).Scan(&n); err != nil || n != 1 {
+		t.Errorf("operators after the down step = %d, %v; want 1", n, err)
+	}
+	if err := pg.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("Migrate() after the down step: %v", err)
+	}
+	if !hasColumn() {
+		t.Error("the priority column is missing after migrating up again")
 	}
 }

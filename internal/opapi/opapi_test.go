@@ -103,11 +103,44 @@ func TestOperatorRequestValidate(t *testing.T) {
 		{name: "too many languages", in: OperatorRequest{Languages: manyLangs(MaxLanguages + 1)}, errs: []string{"more than"}},
 		{name: "negative capacity", in: OperatorRequest{Languages: []string{"en"}, Capacity: -1}, errs: []string{"capacity"}},
 		{name: "capacity too large", in: OperatorRequest{Languages: []string{"en"}, Capacity: MaxCapacity + 1}, errs: []string{"capacity"}},
+		{name: "priority 0", in: OperatorRequest{Languages: []string{"en"}, Priority: 0}},
+		{name: "priority 9", in: OperatorRequest{Languages: []string{"en"}, Priority: MaxPriority}},
+		{name: "priority 10", in: OperatorRequest{Languages: []string{"en"}, Priority: MaxPriority + 1},
+			errs: []string{"priority: 10 is not between 0 and 9"}},
+		{name: "negative priority", in: OperatorRequest{Languages: []string{"en"}, Priority: -1}, errs: []string{"priority"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assertErrors(t, tt.in.Validate(), tt.errs...)
 		})
+	}
+}
+
+// TestOperatorRequestPriorityJSON decodes request bodies as a caller sends
+// them: a body without the field (the simulator, and every caller from
+// before the field) has priority 0, like an explicit 0.
+func TestOperatorRequestPriorityJSON(t *testing.T) {
+	tests := []struct {
+		body    string
+		want    int
+		invalid bool
+	}{
+		{body: `{"languages":["en"],"capacity":4}`, want: 0},
+		{body: `{"languages":["en"],"capacity":4,"priority":0}`, want: 0},
+		{body: `{"languages":["en"],"priority":9}`, want: 9},
+		{body: `{"languages":["en"],"priority":10}`, want: 10, invalid: true},
+	}
+	for _, tt := range tests {
+		var r OperatorRequest
+		if err := json.Unmarshal([]byte(tt.body), &r); err != nil {
+			t.Fatalf("%s: %v", tt.body, err)
+		}
+		if r.Priority != tt.want {
+			t.Errorf("%s: priority = %d, want %d", tt.body, r.Priority, tt.want)
+		}
+		if err := r.Validate(); (err != nil) != tt.invalid {
+			t.Errorf("%s: Validate() = %v, want invalid %v", tt.body, err, tt.invalid)
+		}
 	}
 }
 
@@ -248,9 +281,14 @@ func TestBodiesFormat(t *testing.T) {
 	}{
 		{name: "operator request", in: OperatorRequest{Languages: []string{"en", "und"}, Capacity: 4},
 			want: `{"languages":["en","und"],"capacity":4}`},
+		{name: "operator request with priority", in: OperatorRequest{Languages: []string{"en", "und"}, Capacity: 2, Priority: 1},
+			want: `{"languages":["en","und"],"capacity":2,"priority":1}`},
 		{name: "operator response", in: OperatorResponse{Result: ResultDone, Operator: Operator{
 			ID: testOperator, Languages: []string{"en", "und"}, Capacity: 4, Presence: PresenceOffline,
-		}}, want: `{"result":"done","operator":{"id":"sim-op-0001","languages":["en","und"],"capacity":4,"presence":"offline"}}`},
+		}}, want: `{"result":"done","operator":{"id":"sim-op-0001","languages":["en","und"],"capacity":4,"priority":0,"presence":"offline"}}`},
+		{name: "operator response with priority", in: OperatorResponse{Result: ResultDone, Operator: Operator{
+			ID: testOperator, Languages: []string{"en"}, Capacity: 2, Priority: 1, Presence: PresenceOnline,
+		}}, want: `{"result":"done","operator":{"id":"sim-op-0001","languages":["en"],"capacity":2,"priority":1,"presence":"online"}}`},
 		{name: "action", in: ActionResponse{Result: ResultAlreadyDone}, want: `{"result":"already_done"}`},
 		{name: "reply", in: ReplyRequest{ReplyID: "r-1"}, want: `{"reply_id":"r-1"}`},
 	}

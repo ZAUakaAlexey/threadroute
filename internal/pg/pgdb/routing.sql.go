@@ -244,6 +244,37 @@ type GetConversationParams struct {
 // Queries of the router (decisions 0009 and 0010). See the lock order in
 // migrations/00002_routing.sql. Every time is a parameter: the router
 // never uses the database clock for a routing decision.
+//
+// # Who can serve a conversation
+//
+// One rule decides which operators can serve a conversation (decision
+// 0009, "Assignment", step 2, and "A language that no online operator
+// has"). PickOperator, WaitingConversations and UnskippedOperatorExists
+// each write it out, in the same form, so they cannot disagree. Keep the
+// three in step.
+//
+// The operator is online and in the group of the queue: the team of the
+// company for a team queue (dedicated_company_id = company), the shared
+// pool otherwise (dedicated_company_id IS NULL). And the operator has the
+// serving language of the conversation:
+//
+//	CASE WHEN <shared queue> AND <language> <> ALL (ARRAY(
+//	         SELECT DISTINCT x.lang FROM operator_languages AS x
+//	         JOIN operators AS xo ON xo.id = x.operator_id
+//	         WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+//	     THEN 'und' ELSE <language> END
+//
+// So it is the language of the conversation, or 'und' (the general queue)
+// when the queue is shared and no online operator of the shared pool has
+// the language. That test looks only at presence, group and language, not
+// at load, skips or locks: a language whose operators are all busy or all
+// skipped still waits for them. The ARRAY sub-select does not depend on
+// the conversation, so PostgreSQL runs it once per statement and not once
+// per waiting conversation (README, stage 4, has the numbers). The conversation keeps its language and
+// its place in the queue; nothing is stored, and the rule is checked again
+// at every pick. A team queue never uses the general queue: a conversation
+// whose language no team member has is already in the shared queue
+// (decision 0009, "Languages in a team").
 func (q *Queries) GetConversation(ctx context.Context, arg GetConversationParams) (Conversation, error) {
 	row := q.db.QueryRow(ctx, getConversation, arg.CompanyID, arg.CustomerID)
 	var i Conversation
@@ -1003,13 +1034,23 @@ func (q *Queries) PendingConversations(ctx context.Context, maxRows int32) ([]Co
 }
 
 const pickOperator = `-- name: PickOperator :one
-SELECT o.id
+SELECT
+    o.id,
+    (NOT EXISTS (
+        SELECT 1 FROM operator_languages AS ol
+        WHERE ol.operator_id = o.id AND ol.lang = $1
+    ))::boolean AS general_queue
 FROM operators AS o
 WHERE o.presence = 'online'
-  AND o.dedicated_company_id IS NOT DISTINCT FROM $1::text
+  AND o.dedicated_company_id IS NOT DISTINCT FROM $2::text
   AND EXISTS (
       SELECT 1 FROM operator_languages AS ol
-      WHERE ol.operator_id = o.id AND ol.lang = $2
+      WHERE ol.operator_id = o.id
+        AND ol.lang = (CASE WHEN $2::text IS NULL AND $1 <> ALL (ARRAY(
+                           SELECT DISTINCT x.lang FROM operator_languages AS x
+                           JOIN operators AS xo ON xo.id = x.operator_id
+                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+                       THEN 'und' ELSE $1 END)
   )
   AND (NOT $3::boolean OR NOT EXISTS (
       SELECT 1 FROM offer_skips AS s
@@ -1023,14 +1064,15 @@ ORDER BY
     (o.id = $8::text) DESC,
     (SELECT count(*) FROM offers AS f
      WHERE f.operator_id = o.id AND f.state IN ('offered', 'accepted')),
+    o.priority DESC,
     o.id
 LIMIT 1
 FOR UPDATE OF o SKIP LOCKED
 `
 
 type PickOperatorParams struct {
-	TeamCompanyID       *string
 	Lang                string
+	TeamCompanyID       *string
 	UseSkips            bool
 	CompanyID           string
 	CustomerID          string
@@ -1039,16 +1081,24 @@ type PickOperatorParams struct {
 	PreferredOperatorID string
 }
 
+type PickOperatorRow struct {
+	ID           string
+	GeneralQueue bool
+}
+
 // PickOperator picks and locks the operator for a conversation (decision
-// 0009, "Assignment", step 2): online, with the language, in the right
-// group, not skipped, with a free slot; the preferred operator first, then
-// the lowest load. The load in this statement is read from the snapshot of
-// the statement, so the caller counts it again with OperatorSlots after
-// the lock is held.
-func (q *Queries) PickOperator(ctx context.Context, arg PickOperatorParams) (string, error) {
+// 0009, "Assignment", step 2): an operator who can serve it (see "Who can
+// serve a conversation" above), not skipped, with a free slot. The order
+// is: the preferred operator first, then the lowest load, then the highest
+// priority, then the operator ID. The load in this statement is read from
+// the snapshot of the statement, so the caller counts it again with
+// OperatorSlots after the lock is held. general_queue reports an operator
+// who serves the conversation only through the general queue rule: it
+// does not have the language.
+func (q *Queries) PickOperator(ctx context.Context, arg PickOperatorParams) (PickOperatorRow, error) {
 	row := q.db.QueryRow(ctx, pickOperator,
-		arg.TeamCompanyID,
 		arg.Lang,
+		arg.TeamCompanyID,
 		arg.UseSkips,
 		arg.CompanyID,
 		arg.CustomerID,
@@ -1056,9 +1106,9 @@ func (q *Queries) PickOperator(ctx context.Context, arg PickOperatorParams) (str
 		arg.Exclude,
 		arg.PreferredOperatorID,
 	)
-	var id string
-	err := row.Scan(&id)
-	return id, err
+	var i PickOperatorRow
+	err := row.Scan(&i.ID, &i.GeneralQueue)
+	return i, err
 }
 
 const poolCandidates = `-- name: PoolCandidates :many
@@ -1662,9 +1712,14 @@ const unskippedOperatorExists = `-- name: UnskippedOperatorExists :one
 SELECT EXISTS (
     SELECT 1
     FROM operators AS o
-    JOIN operator_languages AS ol ON ol.operator_id = o.id AND ol.lang = $1
+    JOIN operator_languages AS ol ON ol.operator_id = o.id
+        AND ol.lang = (CASE WHEN $1::text IS NULL AND $2 <> ALL (ARRAY(
+                           SELECT DISTINCT x.lang FROM operator_languages AS x
+                           JOIN operators AS xo ON xo.id = x.operator_id
+                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+                       THEN 'und' ELSE $2 END)
     WHERE o.presence = 'online'
-      AND o.dedicated_company_id IS NOT DISTINCT FROM $2::text
+      AND o.dedicated_company_id IS NOT DISTINCT FROM $1::text
       AND NOT EXISTS (
           SELECT 1 FROM offer_skips AS s
           WHERE s.company_id = $3 AND s.customer_id = $4
@@ -1674,20 +1729,21 @@ SELECT EXISTS (
 `
 
 type UnskippedOperatorExistsParams struct {
-	Lang          string
 	TeamCompanyID *string
+	Lang          string
 	CompanyID     string
 	CustomerID    string
 	Session       int64
 }
 
-// UnskippedOperatorExists reports whether an online operator of the group
-// with the language is not skipped for the session, whatever its load.
-// Without a lock: it only decides whether the skips are cleared.
+// UnskippedOperatorExists reports whether an operator who can serve the
+// conversation (see "Who can serve a conversation" above) is not skipped
+// for the session, whatever its load. Without a lock: it only decides
+// whether the skips are cleared.
 func (q *Queries) UnskippedOperatorExists(ctx context.Context, arg UnskippedOperatorExistsParams) (bool, error) {
 	row := q.db.QueryRow(ctx, unskippedOperatorExists,
-		arg.Lang,
 		arg.TeamCompanyID,
+		arg.Lang,
 		arg.CompanyID,
 		arg.CustomerID,
 		arg.Session,
@@ -1712,7 +1768,11 @@ WHERE cv.state = 'waiting'
       SELECT 1
       FROM operator_languages AS ol
       JOIN operators AS o ON o.id = ol.operator_id
-      WHERE ol.lang = cv.lang
+      WHERE ol.lang = (CASE WHEN NOT cv.team_queue AND cv.lang <> ALL (ARRAY(
+                           SELECT DISTINCT x.lang FROM operator_languages AS x
+                           JOIN operators AS xo ON xo.id = x.operator_id
+                           WHERE xo.presence = 'online' AND xo.dedicated_company_id IS NULL))
+                       THEN 'und' ELSE cv.lang END)
         AND o.presence = 'online'
         AND o.dedicated_company_id IS NOT DISTINCT FROM (CASE WHEN cv.team_queue THEN cv.company_id END)
         AND (SELECT count(*) FROM offers AS f
@@ -1740,11 +1800,11 @@ type WaitingConversationsRow struct {
 
 // WaitingConversations lists waiting conversations in queue order, after a
 // keyset cursor, without locking them. Only conversations for which some
-// online operator of the right group (the team of the company for a team
-// queue, the shared pool otherwise) has the language and a free slot are
-// listed, so a queue that nobody can serve now does not hide the ones
-// behind it. Skipped operators are not filtered here, because assignment
-// clears the skips of a conversation that every operator has skipped.
+// operator who can serve it (see "Who can serve a conversation" above) has
+// a free slot are listed, so a queue that nobody can serve now does not
+// hide the ones behind it. Skipped operators are not filtered here,
+// because assignment clears the skips of a conversation that every
+// operator has skipped.
 func (q *Queries) WaitingConversations(ctx context.Context, arg WaitingConversationsParams) ([]WaitingConversationsRow, error) {
 	rows, err := q.db.Query(ctx, waitingConversations,
 		arg.First,

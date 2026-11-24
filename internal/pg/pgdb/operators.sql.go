@@ -14,6 +14,7 @@ const getOperator = `-- name: GetOperator :one
 SELECT
     o.id,
     o.capacity,
+    o.priority,
     o.presence,
     o.dedicated_company_id,
     o.created_at,
@@ -32,6 +33,7 @@ GROUP BY o.id
 type GetOperatorRow struct {
 	ID                 string
 	Capacity           int32
+	Priority           int32
 	Presence           string
 	DedicatedCompanyID *string
 	CreatedAt          time.Time
@@ -47,6 +49,7 @@ func (q *Queries) GetOperator(ctx context.Context, id string) (GetOperatorRow, e
 	err := row.Scan(
 		&i.ID,
 		&i.Capacity,
+		&i.Priority,
 		&i.Presence,
 		&i.DedicatedCompanyID,
 		&i.CreatedAt,
@@ -82,22 +85,25 @@ func (q *Queries) SetOperatorPresence(ctx context.Context, arg SetOperatorPresen
 const upsertOperator = `-- name: UpsertOperator :one
 WITH prev AS (
     -- Always one row: n is 0 for a new operator.
-    SELECT count(*) AS n, COALESCE(max(o.capacity), 0)::integer AS capacity
+    SELECT
+        count(*) AS n,
+        COALESCE(max(o.capacity), 0)::integer AS capacity,
+        COALESCE(max(o.priority), 0)::integer AS priority
     FROM operators AS o
-    WHERE o.id = $2
+    WHERE o.id = $3
 ), op AS (
-    INSERT INTO operators (id, capacity)
-    VALUES ($2, $1)
+    INSERT INTO operators (id, capacity, priority)
+    VALUES ($3, $1, $2)
     ON CONFLICT (id) DO UPDATE
-        SET capacity = EXCLUDED.capacity, updated_at = now()
+        SET capacity = EXCLUDED.capacity, priority = EXCLUDED.priority, updated_at = now()
     RETURNING operators.id
 ), removed AS (
     DELETE FROM operator_languages AS ol
-    WHERE ol.operator_id = $2 AND ol.lang <> ALL ($3::text[])
+    WHERE ol.operator_id = $3 AND ol.lang <> ALL ($4::text[])
     RETURNING ol.lang
 ), added AS (
     INSERT INTO operator_languages (operator_id, lang)
-    SELECT $2, l.lang FROM unnest($3::text[]) AS l (lang)
+    SELECT $3, l.lang FROM unnest($4::text[]) AS l (lang)
     ON CONFLICT DO NOTHING
     RETURNING operator_languages.lang
 ), removed_count AS (
@@ -108,6 +114,7 @@ WITH prev AS (
 SELECT
     prev.n = 0 AS created,
     (prev.n > 0 AND prev.capacity <> $1::integer)::boolean AS capacity_changed,
+    (prev.n > 0 AND prev.priority <> $2::integer)::boolean AS priority_changed,
     removed_count.n AS languages_removed,
     added_count.n AS languages_added
 FROM prev, removed_count, added_count
@@ -115,6 +122,7 @@ FROM prev, removed_count, added_count
 
 type UpsertOperatorParams struct {
 	Capacity  int32
+	Priority  int32
 	ID        string
 	Languages []string
 }
@@ -122,21 +130,28 @@ type UpsertOperatorParams struct {
 type UpsertOperatorRow struct {
 	Created          bool
 	CapacityChanged  bool
+	PriorityChanged  bool
 	LanguagesRemoved int64
 	LanguagesAdded   int64
 }
 
-// UpsertOperator creates the operator, or sets its capacity and its
-// languages, in one statement. A new operator is offline. The result says
+// UpsertOperator creates the operator, or sets its capacity, its priority
+// and its languages, in one statement. A new operator is offline. The result says
 // what changed, so the operator API can answer "done" or "already done".
 // @languages must not be empty and must hold no duplicates. PostgreSQL
 // runs every data-modifying CTE, even one the final SELECT does not read.
 func (q *Queries) UpsertOperator(ctx context.Context, arg UpsertOperatorParams) (UpsertOperatorRow, error) {
-	row := q.db.QueryRow(ctx, upsertOperator, arg.Capacity, arg.ID, arg.Languages)
+	row := q.db.QueryRow(ctx, upsertOperator,
+		arg.Capacity,
+		arg.Priority,
+		arg.ID,
+		arg.Languages,
+	)
 	var i UpsertOperatorRow
 	err := row.Scan(
 		&i.Created,
 		&i.CapacityChanged,
+		&i.PriorityChanged,
 		&i.LanguagesRemoved,
 		&i.LanguagesAdded,
 	)
