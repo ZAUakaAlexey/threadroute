@@ -450,6 +450,17 @@ services:
       THREADROUTE_GATEWAY_SITE_API_TIMEOUT: ${THREADROUTE_GATEWAY_SITE_API_TIMEOUT:-3s}
       THREADROUTE_GATEWAY_SITE_API_CACHE: ${THREADROUTE_GATEWAY_SITE_API_CACHE:-1m}
       THREADROUTE_GATEWAY_FULL_ROLES: ${THREADROUTE_GATEWAY_FULL_ROLES:-}
+      # Site roles that may change the stand settings (decision 0014).
+      # Empty: nobody. Independent of the full roles above.
+      THREADROUTE_GATEWAY_SETTINGS_ROLES: ${THREADROUTE_GATEWAY_SETTINGS_ROLES:-}
+      # Name of the site's sign-in cookie, read from the WebSocket opening
+      # request. Empty: the cookie is not read.
+      THREADROUTE_GATEWAY_SITE_COOKIE: ${THREADROUTE_GATEWAY_SITE_COOKIE:-}
+      # One site role for every connection, for a stand on a developer
+      # machine. Empty: off. When set, the allowed origins below must also
+      # be set, each written with its scheme, such as http://127.0.0.1:9473;
+      # the gateway refuses to start otherwise.
+      THREADROUTE_GATEWAY_LOCAL_ROLE: ${THREADROUTE_GATEWAY_LOCAL_ROLE:-}
       # The console address on the host. A page from the same host as the
       # request is always allowed, and the console passes the Host header.
       THREADROUTE_GATEWAY_ALLOWED_ORIGINS: ${THREADROUTE_GATEWAY_ALLOWED_ORIGINS:-127.0.0.1:${THREADROUTE_CONSOLE_HOST_PORT:-9473},localhost:${THREADROUTE_CONSOLE_HOST_PORT:-9473}}
