@@ -26,7 +26,38 @@ const (
 	TypeAnswered ConversationType = "answered"
 	// TypeClosed: the session ended. CloseReason is set.
 	TypeClosed ConversationType = "closed"
+	// TypeMessageRemoved: conv removed the stored text of one message
+	// because its author deleted it or the author was removed (decisions
+	// 0004 and 0011). MessageID, Direction and RemoveReason are set. The
+	// event carries no text. The counters do not change (decision 0007).
+	//
+	// conv publishes it only when it dropped a text that was stored. A
+	// deletion that arrives before its message, or a removal of a message
+	// whose text was never stored, gives no event. Text stays in Redis for
+	// a while after its session closed (decision 0007), so this event can
+	// follow TypeClosed of the same session. Session and the other
+	// conversation fields describe the conversation as conv holds it at
+	// that moment: Session is the current session, which can be later than
+	// the session of the removed message.
+	TypeMessageRemoved ConversationType = "message_removed"
 )
+
+// RemoveReason says why the text of a message was removed.
+type RemoveReason string
+
+// Remove reasons.
+const (
+	// RemoveDeleted: the author deleted the message (a Deletion control
+	// event).
+	RemoveDeleted RemoveReason = "deleted"
+	// RemoveAuthorRemoved: the author was removed (an AuthorRemoval control
+	// event), so every stored message of the author went.
+	RemoveAuthorRemoved RemoveReason = "author_removed"
+)
+
+func (r RemoveReason) valid() bool {
+	return r == RemoveDeleted || r == RemoveAuthorRemoved
+}
 
 // CloseReason says why a session was closed.
 type CloseReason string
@@ -85,8 +116,9 @@ type Conversation struct {
 	// decided yet.
 	CustomerMessages uint64
 	CompanyMessages  uint64
-	// MessageID and Direction name the message that caused the event. They
-	// are set for every type except TypeClosed, and empty for TypeClosed.
+	// MessageID and Direction name the message that caused the event, or
+	// for TypeMessageRemoved the message whose text was removed. They are
+	// set for every type except TypeClosed, and empty for TypeClosed.
 	MessageID string
 	Direction Direction
 	// ResponseTime is the real response time: the time since the
@@ -95,6 +127,8 @@ type Conversation struct {
 	ResponseTime time.Duration
 	// CloseReason is set only for TypeClosed.
 	CloseReason CloseReason
+	// RemoveReason is set only for TypeMessageRemoved.
+	RemoveReason RemoveReason
 }
 
 // Reopened reports whether the event belongs to a later session of the
@@ -125,6 +159,7 @@ type conversationJSON struct {
 	Direction        string           `json:"direction,omitempty"`
 	ResponseTimeUS   *int64           `json:"response_time_us,omitempty"`
 	CloseReason      string           `json:"close_reason,omitempty"`
+	RemoveReason     string           `json:"remove_reason,omitempty"`
 }
 
 // Validate reports every missing or invalid field.
@@ -176,8 +211,19 @@ func (c Conversation) Validate() error {
 		case !c.CloseReason.valid():
 			errs.invalid("close_reason", "%q is not a known reason", c.CloseReason)
 		}
+	case TypeMessageRemoved:
+		c.validateMessage(&errs, "")
+		switch {
+		case c.RemoveReason == "":
+			errs.missing("remove_reason")
+		case !c.RemoveReason.valid():
+			errs.invalid("remove_reason", "%q is not a known reason", c.RemoveReason)
+		}
 	default:
 		errs = append(errs, fmt.Errorf("type %q: %w", c.Type, ErrUnknownKind))
+	}
+	if c.Type != TypeMessageRemoved && c.RemoveReason != "" {
+		errs.invalid("remove_reason", "must be empty for type %q", c.Type)
 	}
 	if c.Type != TypeAnswered && c.ResponseTime != 0 {
 		errs.invalid("response_time_us", "must be empty for type %q", c.Type)
@@ -230,6 +276,7 @@ func MarshalConversation(c Conversation) ([]byte, error) {
 		Direction:        string(c.Direction),
 		ResponseTimeUS:   responseUS,
 		CloseReason:      string(c.CloseReason),
+		RemoveReason:     string(c.RemoveReason),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("marshal conversation event: %w", err)
@@ -246,7 +293,7 @@ func UnmarshalConversation(b []byte) (Conversation, error) {
 		return Conversation{}, fmt.Errorf("unmarshal conversation event: %w", err)
 	}
 	switch j.Type {
-	case TypeOpened, TypeMessageAdded, TypeAnswered, TypeClosed, "":
+	case TypeOpened, TypeMessageAdded, TypeAnswered, TypeClosed, TypeMessageRemoved, "":
 		// An empty type is reported by Validate with the other fields.
 	default:
 		return Conversation{}, fmt.Errorf("unmarshal conversation event: type %q: %w", j.Type, ErrUnknownKind)
@@ -271,6 +318,7 @@ func UnmarshalConversation(b []byte) (Conversation, error) {
 		Direction:        Direction(j.Direction),
 		ResponseTime:     response,
 		CloseReason:      CloseReason(j.CloseReason),
+		RemoveReason:     RemoveReason(j.RemoveReason),
 	}
 	err := c.Validate()
 	if c.Type == TypeAnswered && j.ResponseTimeUS == nil {

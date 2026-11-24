@@ -11,7 +11,7 @@ import (
 // (decisions 0009 and 0010). The router writes routing events, and the
 // simulator and the gateway read them.
 //
-// There are two families:
+// There are three families:
 //
 //   - Conversation events (TypeQueued to TypeEnded) are about one session of
 //     one conversation. Their record key is ConversationKey(CompanyID,
@@ -19,6 +19,9 @@ import (
 //   - Team events (TypeTeamFormed, TypeTeamResized, TypeTeamReleased) are
 //     about the dedicated team of one company. Their record key is
 //     CompanyKey(CompanyID).
+//   - Operator events (TypeOperatorUpdated, TypeOperatorOnline,
+//     TypeOperatorOffline) are about one operator (decision 0011, option
+//     1A). Their record key is OperatorKey(OperatorID).
 type RoutingType string
 
 // Routing event types of the conversation family.
@@ -67,18 +70,69 @@ const (
 	TypeTeamReleased RoutingType = "team_released"
 )
 
+// Routing event types of the operator family. Every operator event is a
+// full snapshot of the operator: OperatorID, Languages, Capacity, Presence
+// and DedicatedCompanyID are set (the last one only while the operator is in
+// a dedicated team). A consumer keeps an operator list from these events
+// alone, by taking the snapshot with the highest Seq of each operator.
+//
+// The router publishes an operator event in the transaction of every change
+// of one of these fields, including a team join or leave, which changes
+// DedicatedCompanyID. It may also publish TypeOperatorUpdated with no
+// change, to refresh the snapshot in the topic, which keeps 24 hours. A
+// consumer treats every operator event the same way: it replaces what it
+// holds for the operator.
+const (
+	// TypeOperatorUpdated: the operator was created, or its languages,
+	// capacity or dedicated company changed, or the snapshot was
+	// refreshed. The first event of an operator (Seq 1) has this type, and
+	// a new operator is offline (decision 0010).
+	TypeOperatorUpdated RoutingType = "operator_updated"
+	// TypeOperatorOnline: the operator went online. Presence is
+	// PresenceOnline.
+	TypeOperatorOnline RoutingType = "operator_online"
+	// TypeOperatorOffline: the operator went offline. Presence is
+	// PresenceOffline. Its offers ended and the conversations it held went
+	// back to the queue; the conversation events of those keys say so.
+	TypeOperatorOffline RoutingType = "operator_offline"
+)
+
 // IsTeam reports whether t is a type of the team family.
 func (t RoutingType) IsTeam() bool {
 	return t == TypeTeamFormed || t == TypeTeamResized || t == TypeTeamReleased
 }
 
-func (t RoutingType) known() bool {
+// IsOperator reports whether t is a type of the operator family.
+func (t RoutingType) IsOperator() bool {
+	return t == TypeOperatorUpdated || t == TypeOperatorOnline || t == TypeOperatorOffline
+}
+
+// IsConversation reports whether t is a type of the conversation family.
+func (t RoutingType) IsConversation() bool {
 	switch t {
 	case TypeQueued, TypeOffered, TypeAccepted, TypeOfferExpired, TypeReplied,
 		TypeResolved, TypeSLAMissed, TypeEnded:
 		return true
 	}
-	return t.IsTeam()
+	return false
+}
+
+func (t RoutingType) known() bool {
+	return t.IsConversation() || t.IsTeam() || t.IsOperator()
+}
+
+// Presence is the presence state of an operator in an operator event
+// (decision 0009). It has the same values as opapi.Presence.
+type Presence string
+
+// Presence states.
+const (
+	PresenceOnline  Presence = "online"
+	PresenceOffline Presence = "offline"
+)
+
+func (p Presence) valid() bool {
+	return p == PresenceOnline || p == PresenceOffline
 }
 
 // QueueReason says why a conversation entered a queue.
@@ -112,6 +166,28 @@ const (
 	// conversation was still open (decision 0009, "Catching up").
 	QueueCatchUp QueueReason = "catch_up"
 )
+
+// HasPreviousOperator reports whether a TypeQueued event with this reason
+// follows an offer or an assignment of one operator, so that
+// PreviousOperatorID and PreviousOfferID name them (decision 0011,
+// "Contract changes"):
+//
+//   - QueueOfferExpired, QueueOfferRefused: the offer that ended.
+//   - QueueOperatorOffline: the offer or the assignment of the operator
+//     who went offline.
+//   - QueueCustomerMessage: the assignment that the operator resolved.
+//
+// For every other reason no offer ended in the same step, and the two
+// fields are empty: QueueNew, QueueReopened and QueueCatchUp start a queue
+// entry of a session, and QueueTeamFormed and QueueTeamReleased move only
+// conversations that wait without an offer.
+func (r QueueReason) HasPreviousOperator() bool {
+	switch r {
+	case QueueOfferExpired, QueueOfferRefused, QueueOperatorOffline, QueueCustomerMessage:
+		return true
+	}
+	return false
+}
 
 func (r QueueReason) valid() bool {
 	switch r {
@@ -204,9 +280,9 @@ func ValidLang(s string) bool {
 	return validLang(s)
 }
 
-// Routing is one event in the routing topic (decisions 0009 and 0010). It
-// carries IDs, times, counters and reasons, never post text and never a
-// message ID or URI (decision 0004).
+// Routing is one event in the routing topic (decisions 0009, 0010 and
+// 0011). It carries IDs, times, counters and reasons, never post text and
+// never a message ID or URI (decision 0004).
 //
 // # Clocks
 //
@@ -225,18 +301,24 @@ func ValidLang(s string) bool {
 // Seq is given in the same database transaction as the state change
 // (decision 0009, "Order of routing events"). For conversation events it
 // counts per conversation key, over all sessions, starting at 1. For team
-// events it counts per company, starting at 1. A reader skips an event
-// whose Seq it has already seen for that key.
+// events it counts per company, starting at 1. For operator events it
+// counts per operator, starting at 1. A reader skips an event whose Seq it
+// has already seen for that key.
 //
-// Order holds only per record key. Team events and conversation events have
-// different keys and can sit in different partitions, so a reader can get
-// a TypeQueued event with QueueTeamFormed before the TypeTeamFormed event
-// of the same company, or the other way round.
+// Order holds only per record key. Team events, operator events and
+// conversation events have different keys and can sit in different
+// partitions, so a reader can get a TypeQueued event with QueueTeamFormed
+// before the TypeTeamFormed event of the same company, or an offer to an
+// operator before the TypeOperatorOnline event of that operator.
+//
+// The three families share one topic, so a reader that remembers the last
+// Seq per record key keeps it per family and key.
 type Routing struct {
 	// Type is the kind of change.
 	Type RoutingType
-	// CompanyID is set for every event. CustomerID is set for conversation
-	// events and empty for team events.
+	// CompanyID is set for conversation and team events, and empty for
+	// operator events. CustomerID is set for conversation events and empty
+	// for the other families.
 	CompanyID  string
 	CustomerID string
 	// Session is the session number from conv (decision 0007). It is set
@@ -265,7 +347,9 @@ type Routing struct {
 	// and may be set for TypeSLAMissed.
 	QueuedAt time.Time
 
-	// OperatorID is the operator of the offer or the assignment.
+	// OperatorID is the operator of the offer or the assignment. For an
+	// operator event it is the operator the event is about, and the record
+	// key.
 	OperatorID string
 	// OfferID identifies one offer. The operator API names it in accept
 	// and refuse, so a late accept of an old offer cannot accept a newer
@@ -281,6 +365,16 @@ type Routing struct {
 	Wait time.Duration
 	// QueueReason is set only for TypeQueued.
 	QueueReason QueueReason
+	// PreviousOperatorID and PreviousOfferID name the operator and the
+	// offer (or assignment) that ended just before a TypeQueued event, so
+	// a consumer does not have to remember them by conversation key
+	// (decision 0011). They are only allowed on TypeQueued with a reason
+	// for which QueueReason.HasPreviousOperator is true, and they come as a
+	// pair. Writers from stage 4 on always set them for those reasons.
+	// Validate still accepts their absence, because records written
+	// before stage 4 do not have them and the topic keeps 24 hours.
+	PreviousOperatorID string
+	PreviousOfferID    string
 	// OfferEndReason is set only for TypeOfferExpired.
 	OfferEndReason OfferEndReason
 	// FirstReply reports that this is the first reply of the operator in
@@ -311,13 +405,29 @@ type Routing struct {
 	ActiveLoad uint64
 	// ReleaseReason is set only for TypeTeamReleased.
 	ReleaseReason TeamReleaseReason
+
+	// Languages, Capacity and Presence are set only for operator events,
+	// and always there. Languages are sorted and have no duplicates, each
+	// a value that NormalizeLang can return. Capacity is positive. For
+	// TypeOperatorOnline Presence is PresenceOnline, for
+	// TypeOperatorOffline it is PresenceOffline.
+	Languages []string
+	Capacity  int
+	Presence  Presence
+	// DedicatedCompanyID is the company of the dedicated team the operator
+	// is in, or empty in the shared pool. Only for operator events.
+	DedicatedCompanyID string
 }
 
 // Key returns the record key: ConversationKey(CompanyID, CustomerID) for a
-// conversation event and CompanyKey(CompanyID) for a team event.
+// conversation event, CompanyKey(CompanyID) for a team event and
+// OperatorKey(OperatorID) for an operator event.
 func (r Routing) Key() []byte {
-	if r.Type.IsTeam() {
+	switch {
+	case r.Type.IsTeam():
 		return CompanyKey(r.CompanyID)
+	case r.Type.IsOperator():
+		return OperatorKey(r.OperatorID)
 	}
 	return ConversationKey(r.CompanyID, r.CustomerID)
 }
@@ -325,7 +435,7 @@ func (r Routing) Key() []byte {
 // routingJSON is the wire form of Routing.
 type routingJSON struct {
 	Type           RoutingType `json:"type"`
-	CompanyID      string      `json:"company_id"`
+	CompanyID      string      `json:"company_id,omitempty"`
 	CustomerID     string      `json:"customer_id,omitempty"`
 	Session        uint64      `json:"session,omitempty"`
 	Seq            uint64      `json:"seq"`
@@ -349,6 +459,12 @@ type routingJSON struct {
 	Members        []string    `json:"members,omitempty"`
 	ActiveLoad     uint64      `json:"active_load,omitempty"`
 	ReleaseReason  string      `json:"release_reason,omitempty"`
+	PrevOperatorID string      `json:"previous_operator_id,omitempty"`
+	PrevOfferID    string      `json:"previous_offer_id,omitempty"`
+	Languages      []string    `json:"languages,omitempty"`
+	Capacity       int         `json:"capacity,omitempty"`
+	Presence       string      `json:"presence,omitempty"`
+	DedicatedCo    string      `json:"dedicated_company_id,omitempty"`
 }
 
 // routingField is one optional group of fields. Each type allows a fixed
@@ -368,6 +484,8 @@ const (
 	rfEndReason
 	rfTeam // members, active_load
 	rfReleaseReason
+	rfPrevious // previous_operator_id and previous_offer_id
+	rfOperator // languages, capacity, presence and dedicated_company_id
 )
 
 // routingFieldNames are the JSON names of each group, for error messages.
@@ -386,11 +504,13 @@ var routingFieldNames = []struct {
 	{rfEndReason, "end_reason"},
 	{rfTeam, "members and active_load"},
 	{rfReleaseReason, "release_reason"},
+	{rfPrevious, "previous_operator_id and previous_offer_id"},
+	{rfOperator, "languages, capacity, presence and dedicated_company_id"},
 }
 
 // routingAllowed lists the optional groups each type may carry.
 var routingAllowed = map[RoutingType]routingField{
-	TypeQueued:       rfQueuedAt | rfQueueReason,
+	TypeQueued:       rfQueuedAt | rfQueueReason | rfPrevious,
 	TypeOffered:      rfQueuedAt | rfOffer | rfAcceptBy,
 	TypeAccepted:     rfQueuedAt | rfOffer | rfWait,
 	TypeOfferExpired: rfQueuedAt | rfOffer | rfOfferEndReason,
@@ -401,6 +521,11 @@ var routingAllowed = map[RoutingType]routingField{
 	TypeTeamFormed:   rfTeam,
 	TypeTeamResized:  rfTeam,
 	TypeTeamReleased: rfTeam | rfReleaseReason,
+	// operator_id is the subject of an operator event. Validate checks
+	// that offer_id stays empty.
+	TypeOperatorUpdated: rfOffer | rfOperator,
+	TypeOperatorOnline:  rfOffer | rfOperator,
+	TypeOperatorOffline: rfOffer | rfOperator,
 }
 
 // present returns the optional groups that have a value. Wait and
@@ -424,13 +549,17 @@ func (r Routing) present() routingField {
 	set(r.EndReason != "", rfEndReason)
 	set(len(r.Members) > 0 || r.ActiveLoad != 0, rfTeam)
 	set(r.ReleaseReason != "", rfReleaseReason)
+	set(r.PreviousOperatorID != "" || r.PreviousOfferID != "", rfPrevious)
+	set(len(r.Languages) > 0 || r.Capacity != 0 || r.Presence != "" || r.DedicatedCompanyID != "", rfOperator)
 	return f
 }
 
 // Validate reports every missing or invalid field.
 func (r Routing) Validate() error {
 	var errs fieldErrors
-	errs.requireString("company_id", r.CompanyID)
+	if !r.Type.IsOperator() {
+		errs.requireString("company_id", r.CompanyID)
+	}
 	if r.Seq == 0 {
 		errs.missing("seq")
 	}
@@ -445,6 +574,8 @@ func (r Routing) Validate() error {
 		return errs.join()
 	case r.Type.IsTeam():
 		r.validateTeam(&errs)
+	case r.Type.IsOperator():
+		r.validateOperator(&errs)
 	default:
 		r.validateConversation(&errs)
 	}
@@ -498,6 +629,55 @@ func (r Routing) validateTeam(errs *fieldErrors) {
 	}
 }
 
+// validateOperator checks the fields of an operator event.
+func (r Routing) validateOperator(errs *fieldErrors) {
+	for _, f := range []struct {
+		name string
+		set  bool
+	}{
+		{"company_id", r.CompanyID != ""},
+		{"customer_id", r.CustomerID != ""},
+		{"session", r.Session != 0},
+		{"lang", r.Lang != ""},
+		{"team_queue", r.TeamQueue},
+		{"priority", r.Priority != PriorityNormal},
+		{"offer_id", r.OfferID != ""},
+	} {
+		if f.set {
+			errs.invalid(f.name, "must be empty for type %q", r.Type)
+		}
+	}
+	switch {
+	case r.OperatorID == "":
+		errs.missing("operator_id")
+	case !ValidRoutingID(r.OperatorID):
+		errs.invalid("operator_id", "%q is not a valid ID", r.OperatorID)
+	}
+	if len(r.Languages) == 0 {
+		errs.missing("languages")
+	}
+	for i, l := range r.Languages {
+		switch {
+		case !validLang(l):
+			errs.invalid("languages", "%q is not 2 or 3 lower case letters", l)
+		case i > 0 && l <= r.Languages[i-1]:
+			errs.invalid("languages", "are not sorted without duplicates at %q", l)
+		}
+	}
+	if r.Capacity <= 0 {
+		errs.invalid("capacity", "is not positive")
+	}
+	switch {
+	case r.Presence == "":
+		errs.missing("presence")
+	case !r.Presence.valid():
+		errs.invalid("presence", "%q is not %q or %q", r.Presence, PresenceOnline, PresenceOffline)
+	case r.Type == TypeOperatorOnline && r.Presence != PresenceOnline,
+		r.Type == TypeOperatorOffline && r.Presence != PresenceOffline:
+		errs.invalid("presence", "%q does not match type %q", r.Presence, r.Type)
+	}
+}
+
 // validateConversation checks the fields of a conversation event.
 func (r Routing) validateConversation(errs *fieldErrors) {
 	errs.requireString("customer_id", r.CustomerID)
@@ -548,6 +728,7 @@ func (r Routing) validateConversation(errs *fieldErrors) {
 		case !r.QueueReason.valid():
 			errs.invalid("queue_reason", "%q is not a known reason", r.QueueReason)
 		}
+		r.validatePrevious(errs)
 	case TypeOffered:
 		errs.requireTime("accept_by_us", r.AcceptBy)
 		if !r.AcceptBy.IsZero() && r.AcceptBy.Before(r.At) {
@@ -594,6 +775,31 @@ func (r Routing) validateConversation(errs *fieldErrors) {
 	}
 }
 
+// validatePrevious checks PreviousOperatorID and PreviousOfferID of a
+// TypeQueued event: a pair of valid IDs, and only for a reason that
+// follows an offer or an assignment.
+func (r Routing) validatePrevious(errs *fieldErrors) {
+	if r.PreviousOperatorID == "" && r.PreviousOfferID == "" {
+		return
+	}
+	if r.QueueReason.valid() && !r.QueueReason.HasPreviousOperator() {
+		errs.invalid("previous_operator_id and previous_offer_id", "must be empty for queue reason %q", r.QueueReason)
+		return
+	}
+	switch {
+	case r.PreviousOperatorID == "":
+		errs.missing("previous_operator_id")
+	case !ValidRoutingID(r.PreviousOperatorID):
+		errs.invalid("previous_operator_id", "%q is not a valid ID", r.PreviousOperatorID)
+	}
+	switch {
+	case r.PreviousOfferID == "":
+		errs.missing("previous_offer_id")
+	case !ValidRoutingID(r.PreviousOfferID):
+		errs.invalid("previous_offer_id", "%q is not a valid ID", r.PreviousOfferID)
+	}
+}
+
 // MarshalRouting validates and encodes a routing event. Times and durations
 // are written in whole microseconds. TeamQueue and Priority are always
 // written for conversation events, Wait for TypeAccepted, and ResponseTime
@@ -624,8 +830,14 @@ func MarshalRouting(r Routing) ([]byte, error) {
 		Members:        r.Members,
 		ActiveLoad:     r.ActiveLoad,
 		ReleaseReason:  string(r.ReleaseReason),
+		PrevOperatorID: r.PreviousOperatorID,
+		PrevOfferID:    r.PreviousOfferID,
+		Languages:      r.Languages,
+		Capacity:       r.Capacity,
+		Presence:       string(r.Presence),
+		DedicatedCo:    r.DedicatedCompanyID,
 	}
-	if !r.Type.IsTeam() {
+	if r.Type.IsConversation() {
 		team, priority := r.TeamQueue, r.Priority
 		j.TeamQueue, j.Priority = &team, &priority
 	}
@@ -676,6 +888,13 @@ func UnmarshalRouting(b []byte) (Routing, error) {
 		Members:        j.Members,
 		ActiveLoad:     j.ActiveLoad,
 		ReleaseReason:  TeamReleaseReason(j.ReleaseReason),
+
+		PreviousOperatorID: j.PrevOperatorID,
+		PreviousOfferID:    j.PrevOfferID,
+		Languages:          j.Languages,
+		Capacity:           j.Capacity,
+		Presence:           Presence(j.Presence),
+		DedicatedCompanyID: j.DedicatedCo,
 	}
 	if j.TeamQueue != nil {
 		r.TeamQueue = *j.TeamQueue

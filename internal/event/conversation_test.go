@@ -38,6 +38,9 @@ func validConversation(typ ConversationType) Conversation {
 		c.MessageID = ""
 		c.Direction = ""
 		c.CloseReason = CloseInactivity
+	case TypeMessageRemoved:
+		c.Seq = 5
+		c.RemoveReason = RemoveDeleted
 	}
 	return c
 }
@@ -49,6 +52,8 @@ func TestConversationRoundTrip(t *testing.T) {
 	zeroResponse.ResponseTime = 0
 	companyAdded := validConversation(TypeMessageAdded)
 	companyAdded.Direction = FromCompany
+	removedCompany := validConversation(TypeMessageRemoved)
+	removedCompany.Direction, removedCompany.RemoveReason = FromCompany, RemoveAuthorRemoved
 
 	tests := []struct {
 		name string
@@ -61,6 +66,8 @@ func TestConversationRoundTrip(t *testing.T) {
 		{name: "answered at once", in: zeroResponse},
 		{name: "closed", in: validConversation(TypeClosed)},
 		{name: "reopened", in: reopened},
+		{name: "message removed", in: validConversation(TypeMessageRemoved)},
+		{name: "company message removed with its author", in: removedCompany},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,6 +125,14 @@ func TestMarshalConversationFormat(t *testing.T) {
 				`"session":1,"seq":4,"source_time_us":1767323045123456,"opened_at_us":1767323045123456,"lang":"en",` +
 				`"customer_messages":1,"company_messages":0,"close_reason":"inactivity"}`,
 		},
+		{
+			name: "message removed",
+			in:   validConversation(TypeMessageRemoved),
+			want: `{"type":"message_removed","channel":"bluesky","company_id":"` + testCompany + `","customer_id":"` + testCustomer + `",` +
+				`"session":1,"seq":5,"source_time_us":1767323045123456,"opened_at_us":1767323045123456,"lang":"en",` +
+				`"customer_messages":1,"company_messages":0,` +
+				`"message_id":"` + testMsgID + `","direction":"customer","remove_reason":"deleted"}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -154,6 +169,12 @@ func TestConversationValidate(t *testing.T) {
 		{name: "closed with unknown reason", typ: TypeClosed, change: func(c *Conversation) { c.CloseReason = "tired" }, fields: []string{"close_reason"}},
 		{name: "closed with message", typ: TypeClosed, change: func(c *Conversation) { c.MessageID, c.Direction = testMsgID, FromCustomer }, fields: []string{"message_id", "direction"}},
 		{name: "reason on added", typ: TypeMessageAdded, change: func(c *Conversation) { c.CloseReason = CloseInactivity }, fields: []string{"close_reason"}},
+		{name: "removed without reason", typ: TypeMessageRemoved, change: func(c *Conversation) { c.RemoveReason = "" }, fields: []string{"remove_reason"}},
+		{name: "removed with unknown reason", typ: TypeMessageRemoved, change: func(c *Conversation) { c.RemoveReason = "lost" }, fields: []string{"remove_reason"}},
+		{name: "removed without message", typ: TypeMessageRemoved, change: func(c *Conversation) { c.MessageID, c.Direction = "", "" }, fields: []string{"message_id", "direction"}},
+		{name: "removed with close reason", typ: TypeMessageRemoved, change: func(c *Conversation) { c.CloseReason = CloseInactivity }, fields: []string{"close_reason"}},
+		{name: "removed with response time", typ: TypeMessageRemoved, change: func(c *Conversation) { c.ResponseTime = time.Second }, fields: []string{"response_time_us"}},
+		{name: "remove reason on closed", typ: TypeClosed, change: func(c *Conversation) { c.RemoveReason = RemoveDeleted }, fields: []string{"remove_reason"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -171,6 +192,13 @@ func TestConversationValidate(t *testing.T) {
 			c.CloseReason = r
 			if err := c.Validate(); err != nil {
 				t.Errorf("close reason %q: Validate() error = %v", r, err)
+			}
+		}
+		for _, r := range []RemoveReason{RemoveDeleted, RemoveAuthorRemoved} {
+			c := validConversation(TypeMessageRemoved)
+			c.RemoveReason = r
+			if err := c.Validate(); err != nil {
+				t.Errorf("remove reason %q: Validate() error = %v", r, err)
 			}
 		}
 	})
@@ -218,6 +246,59 @@ func TestUnmarshalConversation(t *testing.T) {
 			assertFieldErrors(t, err, tt.fields...)
 			if errors.Is(err, ErrUnknownKind) {
 				t.Errorf("error %v wraps ErrUnknownKind, want a plain error", err)
+			}
+		})
+	}
+}
+
+// TestConversationRecordsBeforeStage4 decodes records written before the
+// message_removed type existed. The conversations topic keeps 24 hours, so
+// a new reader meets them after an upgrade.
+func TestConversationRecordsBeforeStage4(t *testing.T) {
+	records := []struct {
+		name string
+		raw  string
+		want ConversationType
+	}{
+		{
+			name: "opened",
+			raw: `{"type":"opened","channel":"bluesky","company_id":"a","customer_id":"b","session":1,"seq":1,` +
+				`"source_time_us":1767323045123456,"opened_at_us":1767323045123456,"lang":"en",` +
+				`"customer_messages":1,"company_messages":0,"message_id":"m1","direction":"customer"}`,
+			want: TypeOpened,
+		},
+		{
+			name: "answered",
+			raw: `{"type":"answered","channel":"bluesky","company_id":"a","customer_id":"b","session":1,"seq":3,` +
+				`"source_time_us":1767323045123456,"opened_at_us":1767323045000000,"lang":"en",` +
+				`"customer_messages":1,"company_messages":1,"message_id":"m2","direction":"company","response_time_us":123456}`,
+			want: TypeAnswered,
+		},
+		{
+			name: "closed",
+			raw: `{"type":"closed","channel":"bluesky","company_id":"a","customer_id":"b","session":2,"seq":7,` +
+				`"source_time_us":1767323045123456,"opened_at_us":1767323045000000,"lang":"und",` +
+				`"customer_messages":3,"company_messages":0,"close_reason":"customer_removed"}`,
+			want: TypeClosed,
+		},
+	}
+	for _, tt := range records {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := UnmarshalConversation([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("UnmarshalConversation() error = %v", err)
+			}
+			if c.Type != tt.want || c.RemoveReason != "" {
+				t.Errorf("UnmarshalConversation() = %+v", c)
+			}
+			// Encoding it again gives the same bytes: the new field does
+			// not change the wire form of the old types.
+			b, err := MarshalConversation(c)
+			if err != nil {
+				t.Fatalf("MarshalConversation() error = %v", err)
+			}
+			if string(b) != tt.raw {
+				t.Errorf("MarshalConversation() =\n%s\nwant\n%s", b, tt.raw)
 			}
 		})
 	}

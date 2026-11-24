@@ -91,3 +91,12 @@ func CompanyKey(companyID string) []byte {
 func AuthorKey(authorID string) []byte {
 	return []byte(authorID)
 }
+
+// OperatorKey returns the record key of an operator event in the routing
+// topic: the operator ID as it is (decision 0011). Operator IDs follow
+// ValidRoutingID, so this key never contains the separator of a
+// conversation key, and it differs from every company key as long as no
+// company ID is also a valid routing ID.
+func OperatorKey(operatorID string) []byte {
+	return []byte(operatorID)
+}

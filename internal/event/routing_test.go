@@ -66,6 +66,19 @@ func validRouting(typ RoutingType) Routing {
 		r.Seq = 6
 		r.QueuedAt = time.Time{}
 		r.EndReason = CloseInactivity
+	case TypeOperatorUpdated, TypeOperatorOnline, TypeOperatorOffline:
+		r.CompanyID, r.CustomerID, r.Session, r.Lang, r.QueuedAt = "", "", 0, "", time.Time{}
+		r.OperatorID = testOperator
+		r.Languages = []string{"en", "und"}
+		r.Capacity = 4
+		r.Presence = PresenceOffline
+		if typ == TypeOperatorOnline {
+			r.Seq = 2
+			r.Presence = PresenceOnline
+		}
+		if typ == TypeOperatorOffline {
+			r.Seq = 3
+		}
 	case TypeTeamFormed, TypeTeamResized, TypeTeamReleased:
 		r.CustomerID, r.Session, r.Lang, r.QueuedAt = "", 0, "", time.Time{}
 		r.Members = []string{testOperator, testOperator2}
@@ -81,6 +94,7 @@ func validRouting(typ RoutingType) Routing {
 var allRoutingTypes = []RoutingType{
 	TypeQueued, TypeOffered, TypeAccepted, TypeOfferExpired, TypeReplied, TypeResolved,
 	TypeSLAMissed, TypeEnded, TypeTeamFormed, TypeTeamResized, TypeTeamReleased,
+	TypeOperatorUpdated, TypeOperatorOnline, TypeOperatorOffline,
 }
 
 func TestRoutingRoundTrip(t *testing.T) {
@@ -119,6 +133,13 @@ func TestRoutingRoundTrip(t *testing.T) {
 	endedHeld.OperatorID, endedHeld.OfferID = testOperator, testOffer
 	endedHeld.EndReason = CloseCompanyRemoved
 	add("ended while held", endedHeld)
+	requeued := validRouting(TypeQueued)
+	requeued.Seq, requeued.QueueReason = 4, QueueOfferExpired
+	requeued.PreviousOperatorID, requeued.PreviousOfferID = testOperator, testOffer
+	add("queued after an expired offer", requeued)
+	inTeam := validRouting(TypeOperatorOnline)
+	inTeam.DedicatedCompanyID = testCompany
+	add("operator in a team", inTeam)
 	releasedEmpty := validRouting(TypeTeamReleased)
 	releasedEmpty.ActiveLoad = 0
 	releasedEmpty.ReleaseReason = TeamAdmissionEnded
@@ -150,8 +171,11 @@ func TestRoutingKey(t *testing.T) {
 	for _, typ := range allRoutingTypes {
 		r := validRouting(typ)
 		want := ConversationKey(testCompany, testCustomer)
-		if typ.IsTeam() {
+		switch {
+		case typ.IsTeam():
 			want = []byte(testCompany)
+		case typ.IsOperator():
+			want = []byte(testOperator)
 		}
 		if !bytes.Equal(r.Key(), want) {
 			t.Errorf("%s: Key() = %q, want %q", typ, r.Key(), want)
@@ -197,6 +221,35 @@ func TestMarshalRoutingFormat(t *testing.T) {
 			in:   validRouting(TypeTeamFormed),
 			want: `{"type":"team_formed","company_id":"` + testCompany + `","seq":1,"at_us":1767323100000001,` +
 				`"members":["sim-op-0001","sim-op-0002"],"active_load":20}`,
+		},
+		{
+			name: "queued after a refusal",
+			in: func() Routing {
+				r := validRouting(TypeQueued)
+				r.QueueReason = QueueOfferRefused
+				r.PreviousOperatorID, r.PreviousOfferID = testOperator, testOffer
+				return r
+			}(),
+			want: `{"type":"queued","company_id":"` + testCompany + `","customer_id":"` + testCustomer + `",` +
+				`"session":1,"seq":1,"at_us":1767323100000001,"lang":"en","team_queue":false,"priority":0,` +
+				`"queued_at_us":1767323100000001,"queue_reason":"offer_refused",` +
+				`"previous_operator_id":"sim-op-0001","previous_offer_id":"offer-000001"}`,
+		},
+		{
+			name: "operator updated",
+			in:   validRouting(TypeOperatorUpdated),
+			want: `{"type":"operator_updated","seq":1,"at_us":1767323100000001,"operator_id":"sim-op-0001",` +
+				`"languages":["en","und"],"capacity":4,"presence":"offline"}`,
+		},
+		{
+			name: "operator online in a team",
+			in: func() Routing {
+				r := validRouting(TypeOperatorOnline)
+				r.DedicatedCompanyID = testCompany
+				return r
+			}(),
+			want: `{"type":"operator_online","seq":2,"at_us":1767323100000001,"operator_id":"sim-op-0001",` +
+				`"languages":["en","und"],"capacity":4,"presence":"online","dedicated_company_id":"` + testCompany + `"}`,
 		},
 	}
 	for _, tt := range tests {
@@ -260,6 +313,47 @@ func TestRoutingValidate(t *testing.T) {
 			r.Members = []string{testOperator, "", testOperator}
 		}, fields: []string{"members", `"" is not`, "listed twice"}},
 		{name: "released without reason", typ: TypeTeamReleased, change: func(r *Routing) { r.ReleaseReason = "" }, fields: []string{"release_reason"}},
+		{name: "previous operator on a new conversation", typ: TypeQueued, change: func(r *Routing) {
+			r.PreviousOperatorID, r.PreviousOfferID = testOperator, testOffer
+		}, fields: []string{"previous_operator_id and previous_offer_id", "new"}},
+		{name: "previous operator after a team release", typ: TypeQueued, change: func(r *Routing) {
+			r.QueueReason = QueueTeamReleased
+			r.PreviousOperatorID, r.PreviousOfferID = testOperator, testOffer
+		}, fields: []string{"previous_operator_id and previous_offer_id"}},
+		{name: "half a previous pair", typ: TypeQueued, change: func(r *Routing) {
+			r.QueueReason, r.PreviousOperatorID = QueueOperatorOffline, testOperator
+		}, fields: []string{"previous_offer_id"}},
+		{name: "bad previous IDs", typ: TypeQueued, change: func(r *Routing) {
+			r.QueueReason = QueueCustomerMessage
+			r.PreviousOperatorID, r.PreviousOfferID = "op 1", "of/1"
+		}, fields: []string{"previous_operator_id", "previous_offer_id"}},
+		{name: "previous operator on offered", typ: TypeOffered, change: func(r *Routing) {
+			r.PreviousOperatorID, r.PreviousOfferID = testOperator2, testOffer
+		}, fields: []string{"previous_operator_id and previous_offer_id"}},
+		{name: "operator without snapshot", typ: TypeOperatorUpdated, change: func(r *Routing) {
+			r.OperatorID, r.Languages, r.Capacity, r.Presence = "", nil, 0, ""
+		}, fields: []string{"operator_id", "languages", "capacity", "presence"}},
+		{name: "operator with other key fields", typ: TypeOperatorUpdated, change: func(r *Routing) {
+			r.CompanyID, r.CustomerID, r.Session, r.Lang, r.TeamQueue, r.Priority, r.OfferID =
+				testCompany, testCustomer, 1, "en", true, 1, testOffer
+		}, fields: []string{"company_id", "customer_id", "session", "lang", "team_queue", "priority", "offer_id"}},
+		{name: "operator with bad languages", typ: TypeOperatorUpdated, change: func(r *Routing) {
+			r.Languages = []string{"und", "en", "en", "EN"}
+		}, fields: []string{"languages", "sorted", `"EN"`}},
+		{name: "operator with bad ID", typ: TypeOperatorOnline, change: func(r *Routing) { r.OperatorID = "did:plc:x" }, fields: []string{"operator_id"}},
+		{name: "negative capacity", typ: TypeOperatorUpdated, change: func(r *Routing) { r.Capacity = -1 }, fields: []string{"capacity"}},
+		{name: "unknown presence", typ: TypeOperatorUpdated, change: func(r *Routing) { r.Presence = "away" }, fields: []string{"presence"}},
+		{name: "online event with offline presence", typ: TypeOperatorOnline, change: func(r *Routing) { r.Presence = PresenceOffline }, fields: []string{"presence"}},
+		{name: "offline event with online presence", typ: TypeOperatorOffline, change: func(r *Routing) { r.Presence = PresenceOnline }, fields: []string{"presence"}},
+		{name: "operator with conversation groups", typ: TypeOperatorOffline, change: func(r *Routing) {
+			r.QueuedAt, r.Members, r.QueueReason = r.At, []string{testOperator}, QueueNew
+		}, fields: []string{"queued_at_us", "members", "queue_reason"}},
+		{name: "operator fields on team event", typ: TypeTeamFormed, change: func(r *Routing) {
+			r.Languages, r.Presence = []string{"en"}, PresenceOnline
+		}, fields: []string{"languages, capacity, presence and dedicated_company_id"}},
+		{name: "operator fields on conversation event", typ: TypeAccepted, change: func(r *Routing) {
+			r.DedicatedCompanyID = testCompany
+		}, fields: []string{"languages, capacity, presence and dedicated_company_id"}},
 		{name: "released with unknown reason", typ: TypeTeamReleased, change: func(r *Routing) { r.ReleaseReason = "bored" }, fields: []string{"release_reason"}},
 		{name: "release reason on formed", typ: TypeTeamFormed, change: func(r *Routing) { r.ReleaseReason = TeamLowLoad }, fields: []string{"release_reason"}},
 	}
@@ -280,6 +374,14 @@ func TestRoutingValidate(t *testing.T) {
 			r.QueueReason = reason
 			if err := r.Validate(); err != nil {
 				t.Errorf("queue reason %q: Validate() error = %v", reason, err)
+			}
+		}
+		for _, reason := range []QueueReason{QueueOfferExpired, QueueOfferRefused, QueueOperatorOffline, QueueCustomerMessage} {
+			r := validRouting(TypeQueued)
+			r.QueueReason = reason
+			r.PreviousOperatorID, r.PreviousOfferID = testOperator, testOffer
+			if err := r.Validate(); err != nil {
+				t.Errorf("queue reason %q with previous operator: Validate() error = %v", reason, err)
 			}
 		}
 		for _, reason := range []OfferEndReason{OfferTimeout, OfferRefused, OfferOperatorOffline} {
@@ -366,5 +468,101 @@ func TestValidRoutingID(t *testing.T) {
 		if got := ValidRoutingID(tt.in); got != tt.want {
 			t.Errorf("ValidRoutingID(%q) = %v, want %v", tt.in, got, tt.want)
 		}
+	}
+}
+
+func TestHasPreviousOperator(t *testing.T) {
+	want := map[QueueReason]bool{
+		QueueNew:             false,
+		QueueReopened:        false,
+		QueueCustomerMessage: true,
+		QueueOfferExpired:    true,
+		QueueOfferRefused:    true,
+		QueueOperatorOffline: true,
+		QueueTeamFormed:      false,
+		QueueTeamReleased:    false,
+		QueueCatchUp:         false,
+	}
+	for reason, w := range want {
+		if !reason.valid() {
+			t.Errorf("%q is not a valid reason", reason)
+		}
+		if got := reason.HasPreviousOperator(); got != w {
+			t.Errorf("%q.HasPreviousOperator() = %v, want %v", reason, got, w)
+		}
+	}
+}
+
+func TestRoutingFamilies(t *testing.T) {
+	for _, typ := range allRoutingTypes {
+		n := 0
+		for _, in := range []bool{typ.IsConversation(), typ.IsTeam(), typ.IsOperator()} {
+			if in {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("%q is in %d families, want 1", typ, n)
+		}
+	}
+}
+
+// TestRoutingRecordsBeforeStage4 decodes records written before the
+// operator family and the previous operator fields existed. The routing
+// topic keeps 24 hours, so a new reader meets them after an upgrade. A
+// TypeQueued event that follows an offer had no previous operator then, and
+// it must still be valid.
+func TestRoutingRecordsBeforeStage4(t *testing.T) {
+	records := []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "queued after an expired offer",
+			raw: `{"type":"queued","company_id":"a","customer_id":"b","session":1,"seq":4,"at_us":1767323100000001,` +
+				`"lang":"en","team_queue":false,"priority":0,"queued_at_us":1767323095000001,"queue_reason":"offer_expired"}`,
+		},
+		{
+			name: "queued after the operator went offline",
+			raw: `{"type":"queued","company_id":"a","customer_id":"b","session":1,"seq":6,"at_us":1767323100000001,` +
+				`"lang":"en","team_queue":true,"priority":1,"queued_at_us":1767323095000001,"queue_reason":"operator_offline"}`,
+		},
+		{
+			name: "queued after a resolve",
+			raw: `{"type":"queued","company_id":"a","customer_id":"b","session":1,"seq":9,"at_us":1767323100000001,` +
+				`"lang":"und","team_queue":false,"priority":0,"queued_at_us":1767323100000001,` +
+				`"queue_reason":"customer_message_after_resolve"}`,
+		},
+		{
+			name: "offered",
+			raw: `{"type":"offered","company_id":"a","customer_id":"b","session":1,"seq":2,"at_us":1767323100000001,` +
+				`"lang":"en","team_queue":false,"priority":0,"queued_at_us":1767323095000001,` +
+				`"operator_id":"sim-op-0001","offer_id":"of-1","accept_by_us":1767323120000001}`,
+		},
+		{
+			name: "team formed",
+			raw: `{"type":"team_formed","company_id":"a","seq":1,"at_us":1767323100000001,` +
+				`"members":["sim-op-0001","sim-op-0002"],"active_load":20}`,
+		},
+	}
+	for _, tt := range records {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := UnmarshalRouting([]byte(tt.raw))
+			if err != nil {
+				t.Fatalf("UnmarshalRouting() error = %v", err)
+			}
+			if r.PreviousOperatorID != "" || r.PreviousOfferID != "" || r.Languages != nil {
+				t.Errorf("UnmarshalRouting() = %+v", r)
+			}
+			// Encoding it again gives the same bytes: the new fields do not
+			// change the wire form of the old types.
+			b, err := MarshalRouting(r)
+			if err != nil {
+				t.Fatalf("MarshalRouting() error = %v", err)
+			}
+			if string(b) != tt.raw {
+				t.Errorf("MarshalRouting() =\n%s\nwant\n%s", b, tt.raw)
+			}
+		})
 	}
 }
