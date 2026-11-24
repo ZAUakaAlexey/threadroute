@@ -59,8 +59,11 @@ func (g *Gateway) trendHistory() []gwapi.TrendPoint {
 // TrendPoint returns the trend point of the view at the machine time now.
 // It reads the same rows as the supervisor state: Waiting is
 // Totals.Conversations.Waiting, LongestWaitUS follows the oldest queue time
-// of the queue rows, Teams and OperatorsInTeams follow the team rows, and
-// OperatorsOnline is Totals.OperatorsOnline.
+// of the queue rows, Teams follows the team rows, and OperatorsOnline is
+// Totals.OperatorsOnline. OperatorsInTeams counts the online operators
+// whose operator row names a team: the same rule as the router metric
+// threadroute_router_team_operators_online (online and a dedicated
+// company), so it is the number the team cap of decision 0009 limits.
 func (rd Reader) TrendPoint(now time.Time, speed float64) gwapi.TrendPoint {
 	v := rd.v
 	nowUS := now.UnixMicro()
@@ -83,12 +86,14 @@ func (rd Reader) TrendPoint(now time.Time, speed float64) gwapi.TrendPoint {
 	for _, t := range v.teams {
 		if !t.released {
 			p.Teams++
-			p.OperatorsInTeams += uint64(len(t.members))
 		}
 	}
 	for _, o := range v.ops {
 		if o.presence == event.PresenceOnline {
 			p.OperatorsOnline++
+			if o.team != "" {
+				p.OperatorsInTeams++
+			}
 		}
 	}
 	return p

@@ -358,7 +358,7 @@ The gateway takes a point only while its data is fresh (`status.stale` is false)
 | `longest_wait_us` | how long the conversation that has waited longest (waiting or offered) has waited, model time; 0 when none waits |
 | `resolved_last_minute` | resolves in the last 60 seconds of machine time |
 | `teams` | dedicated teams |
-| `operators_in_teams` | members of all teams |
+| `operators_in_teams` | online operators who are members of a team, the number the team cap limits (decision 0009); never above `operators_online` |
 | `operators_online` | online operators, like `totals.operators_online` |
 
 A point holds counts only, so every level gets it.

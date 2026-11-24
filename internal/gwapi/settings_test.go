@@ -134,6 +134,9 @@ func TestSettingsValidate(t *testing.T) {
 		}, fields: []string{"trend.points is not set", "trend.interval_ms"}},
 		{name: "trend point without time", a: demoSup, msg: func() ServerMessage { return TrendUpdate{} },
 			fields: []string{"point.sampled_at_us"}},
+		{name: "more operators in teams than online", a: demoSup, msg: func() ServerMessage {
+			return TrendUpdate{Point: TrendPoint{SampledAtUS: 1, OperatorsInTeams: 48, OperatorsOnline: 47}}
+		}, fields: []string{"point.operators_in_teams"}},
 		{name: "fields with another code", a: demoSup, msg: func() ServerMessage {
 			return Result{RequestID: "r1", Outcome: OutcomeRejected, Code: CodeNotAllowed,
 				Fields: []opapi.FieldError{{Field: opapi.FieldSimCapacity, Reason: "x"}}}

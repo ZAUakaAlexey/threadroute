@@ -112,7 +112,9 @@ type TrendPoint struct {
 	ResolvedLastMinute uint64 `json:"resolved_last_minute"`
 	// Teams counts the dedicated teams.
 	Teams uint64 `json:"teams"`
-	// OperatorsInTeams counts the members of all teams.
+	// OperatorsInTeams counts the online operators who are members of a
+	// team: the number the team cap of decision 0009 limits. It is never
+	// above OperatorsOnline.
 	OperatorsInTeams uint64 `json:"operators_in_teams"`
 	// OperatorsOnline counts the online operators, as
 	// Totals.OperatorsOnline.
@@ -125,6 +127,9 @@ func (p TrendPoint) validate(errs *fieldErrors) {
 	}
 	if p.LongestWaitUS < 0 {
 		errs.invalid("longest_wait_us", "is negative")
+	}
+	if p.OperatorsInTeams > p.OperatorsOnline {
+		errs.invalid("operators_in_teams", "is above operators_online")
 	}
 }
 

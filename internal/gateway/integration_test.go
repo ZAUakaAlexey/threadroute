@@ -661,12 +661,17 @@ func TestIntegrationSettingsAndTrend(t *testing.T) {
 	if err := bus.EnsureTopics(ctx, prod, nil, bus.ConversationsTopicSpec(), bus.RoutingTopicSpec()); err != nil {
 		t.Fatal(err)
 	}
-	// History before the start: 40 operators online, one team of two.
+	// History before the start: 40 operators online, one team of two online
+	// members.
 	const online = 40
 	var recs []*kgo.Record
 	for i := range online {
 		id := fmt.Sprintf("sim-op-%04d", i)
-		b, err := event.MarshalRouting(opEv(event.TypeOperatorOnline, id, 1, time.Now(), event.PresenceOnline))
+		ev := opEv(event.TypeOperatorOnline, id, 1, time.Now(), event.PresenceOnline)
+		if i < 2 {
+			ev.DedicatedCompanyID = itCompany
+		}
+		b, err := event.MarshalRouting(ev)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -14,13 +14,17 @@ import (
 // trendWorld builds a view with known numbers at t0: two conversations
 // waiting (queued 90 and 30 seconds before t0), one offered (queued 120
 // seconds before t0, the longest wait), one assigned, three resolves in
-// the last minute and one older, one team of two and one released team,
-// and three operators online and one offline.
+// the last minute and one older, one team of two online members and one
+// released team, and three operators online and one offline.
 func trendWorld(e *env) {
 	at := func(s int) time.Time { return t0.Add(time.Duration(s) * time.Second) }
 	var items []Item
 	for i, op := range []string{"sim-op-0001", "sim-op-0002", "sim-op-0003"} {
-		items = append(items, ri(opEv(event.TypeOperatorOnline, op, uint64(i+1), at(-300), event.PresenceOnline), at(-300)))
+		ev := opEv(event.TypeOperatorOnline, op, uint64(i+1), at(-300), event.PresenceOnline)
+		if op != "sim-op-0003" {
+			ev.DedicatedCompanyID = testCompany
+		}
+		items = append(items, ri(ev, at(-300)))
 	}
 	items = append(items, ri(opEv(event.TypeOperatorOffline, "sim-op-0004", 1, at(-300), event.PresenceOffline), at(-300)))
 	waitAt := map[int]int{1: -90, 2: -30, 3: -120, 4: -200}
@@ -53,7 +57,7 @@ func TestTrendPointNumbers(t *testing.T) {
 	trendWorld(e)
 	var p gwapi.TrendPoint
 	var totals gwapi.Totals
-	var teams, members uint64
+	var teams, inTeams uint64
 	var oldest int64
 	e.g.view.Read(func(rd Reader) {
 		p = rd.TrendPoint(t0, 2)
@@ -61,7 +65,11 @@ func TestTrendPointNumbers(t *testing.T) {
 		rd.Teams(func(co string) {
 			row, _ := rd.Team(co)
 			teams++
-			members += uint64(len(row.Members))
+			for _, id := range row.Members {
+				if op, ok := rd.Operator(id); ok && op.Presence == gwapi.PresenceOnline && op.Team != "" {
+					inTeams++
+				}
+			}
 		})
 		for _, l := range rd.QueueLangs() {
 			if q, ok := rd.Queue(l); ok && q.OldestQueuedAtUS > 0 && (oldest == 0 || q.OldestQueuedAtUS < oldest) {
@@ -78,13 +86,82 @@ func TestTrendPointNumbers(t *testing.T) {
 	}
 	// The same numbers as the supervisor state.
 	if p.Waiting != totals.Conversations.Waiting || p.OperatorsOnline != totals.OperatorsOnline ||
-		p.Teams != teams || p.OperatorsInTeams != members || p.LongestWaitUS != 2*(t0.UnixMicro()-oldest) {
-		t.Fatalf("point %+v does not agree with totals %+v, teams %d/%d, oldest %d", p, totals, teams, members, oldest)
+		p.Teams != teams || p.OperatorsInTeams != inTeams || p.LongestWaitUS != 2*(t0.UnixMicro()-oldest) {
+		t.Fatalf("point %+v does not agree with totals %+v, teams %d/%d, oldest %d", p, totals, teams, inTeams, oldest)
 	}
 	// Later, the old resolves leave the window.
 	e.g.view.Read(func(rd Reader) { p = rd.TrendPoint(t0.Add(time.Minute), 1) })
 	if p.ResolvedLastMinute != 0 {
 		t.Fatalf("resolves a minute later %d", p.ResolvedLastMinute)
+	}
+}
+
+// TestTrendOperatorsInTeamsOnlineOnly: operators_in_teams counts the
+// online operators with a team, as the router metric of the team cap does
+// (decision 0009). Offline members do not count, and a team whose members
+// are all offline counts 0 operators but is still a team.
+func TestTrendOperatorsInTeamsOnlineOnly(t *testing.T) {
+	at := t0.Add(-time.Minute)
+	member := func(id string, seq uint64, presence event.Presence, co string) Item {
+		typ := event.TypeOperatorOnline
+		if presence == event.PresenceOffline {
+			typ = event.TypeOperatorOffline
+		}
+		ev := opEv(typ, id, seq, at, presence)
+		ev.DedicatedCompanyID = co
+		return ri(ev, at)
+	}
+	tests := []struct {
+		name                   string
+		items                  []Item
+		teams, inTeams, online uint64
+	}{
+		{
+			name: "offline members do not count",
+			items: []Item{
+				member("sim-op-0001", 1, event.PresenceOnline, testCompany),
+				member("sim-op-0002", 1, event.PresenceOnline, testCompany),
+				member("sim-op-0003", 1, event.PresenceOffline, testCompany),
+				member("sim-op-0004", 1, event.PresenceOffline, testCompany),
+				member("sim-op-0005", 1, event.PresenceOnline, ""),
+				ri(teamEv(event.TypeTeamFormed, testCompany, 1, at,
+					"sim-op-0001", "sim-op-0002", "sim-op-0003", "sim-op-0004"), at),
+			},
+			teams: 1, inTeams: 2, online: 3,
+		},
+		{
+			name: "a team with all members offline",
+			items: []Item{
+				member("sim-op-0001", 1, event.PresenceOnline, testCompany),
+				member("sim-op-0002", 1, event.PresenceOffline, testCompany2),
+				member("sim-op-0003", 1, event.PresenceOffline, testCompany2),
+				ri(teamEv(event.TypeTeamFormed, testCompany, 1, at, "sim-op-0001"), at),
+				ri(teamEv(event.TypeTeamFormed, testCompany2, 1, at, "sim-op-0002", "sim-op-0003"), at),
+			},
+			teams: 2, inTeams: 1, online: 1,
+		},
+		{
+			name: "a member that goes offline leaves the count",
+			items: []Item{
+				member("sim-op-0001", 1, event.PresenceOnline, testCompany),
+				member("sim-op-0002", 1, event.PresenceOnline, testCompany),
+				ri(teamEv(event.TypeTeamFormed, testCompany, 1, at, "sim-op-0001", "sim-op-0002"), at),
+				member("sim-op-0002", 2, event.PresenceOffline, testCompany),
+			},
+			teams: 1, inTeams: 1, online: 1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newEnv(t)
+			e.apply(tc.items...)
+			var p gwapi.TrendPoint
+			e.g.view.Read(func(rd Reader) { p = rd.TrendPoint(t0, 1) })
+			if p.Teams != tc.teams || p.OperatorsInTeams != tc.inTeams || p.OperatorsOnline != tc.online {
+				t.Fatalf("teams %d, in teams %d, online %d; want %d, %d, %d",
+					p.Teams, p.OperatorsInTeams, p.OperatorsOnline, tc.teams, tc.inTeams, tc.online)
+			}
+		})
 	}
 }
 
