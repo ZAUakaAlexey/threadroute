@@ -61,6 +61,7 @@ jobs:
         run: >
           go test -race -count=1 -p 1 -tags integration
           ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/... ./internal/router/...
+          ./internal/sim/...
 
   image:
     runs-on: ubuntu-24.04
@@ -70,7 +71,7 @@ jobs:
       - uses: docker/setup-buildx-action@v4.4.1
       - name: build the service images
         run: |
-          for cmd in ingest normalize conv router; do
+          for cmd in ingest normalize conv router sim; do
             docker buildx build --load -f deploy/Dockerfile \
               --build-arg CMD=$cmd -t threadroute-$cmd:${{ github.sha }} .
           done
