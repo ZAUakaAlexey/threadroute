@@ -64,9 +64,9 @@ Recommendation: **A**. The simulator already depends on this endpoint. The contr
 ### 3. How the simulator changes on the run
 
 - **A. Step by step, without a restart.**
-  - Each operator keeps the language it got when it was created. The language spread is scaled to the new count, which gives a target for each language.
-  - Fewer operators: in each language above its target, the operators with the highest numbers go offline through the normal call. Their conversations return to the queue by the existing rule of decision 0010. They stay registered and offline.
-  - More operators: in each language below its target, operators that were put aside come back first. Then new ones are created with the next free numbers. They take their place in the shift cycle by the same rule as at start.
+  - The language of an operator depends only on the language spread and the number of the operator. The active operators are always the numbers 1 to N. So every count gives the same operators the same languages, whatever changes and restarts came before, and the languages keep the proportions of the spread at every count.
+  - Fewer operators: the operators with the highest numbers go offline through the normal call and leave the shift cycle. Their conversations return to the queue by the existing rule of decision 0010. They stay registered and offline.
+  - More operators: operators that were put aside come back first, in the order of their numbers. Then new ones are created with the next numbers. They take their place in the shift cycle by the same rule as at start.
   - Another capacity: the simulator sends the operator again with the new value. An operator who holds more than the new capacity keeps the conversations and gets no new offers until the load is below it.
   - Other times and shares: they apply to steps planned after the change. A step that is already planned keeps its time.
 - **B. The simulator restarts its engine inside the process.** Simple, but every operator goes offline and online, so every held conversation returns to the queue. The change is then mixed with that wave.
