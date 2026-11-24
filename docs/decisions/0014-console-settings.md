@@ -12,7 +12,7 @@ The first day of live traffic showed that these numbers decide how the stand beh
 Facts that shape this decision:
 
 - **The number of teams is a result, not a setting.** It follows from five numbers: the load that forms a team, the load that releases it, the release time, the team size bounds and the share of operators that teams may hold.
-- **Capacity is the strongest lever.** In the evening of 2026-11-24 about 310 conversations opened per minute and about 98 were resolved. While this gap exists, team rules change who waits, not how many wait.
+- **Capacity is the strongest lever.** In the evening of 2026-11-24 about 8,000 conversations waited, the operators resolved about 98 per minute, and the queue did not get shorter. While demand is above capacity, team rules change who waits, not how many wait.
 - **Team rules act slowly.** Decision 0009 has no forced exit from a team. After the cap was turned on, the teams needed about 75 minutes to shrink to it.
 - **The supervisor screen shows only current values.** Without history a person cannot see the effect of a change.
 - **The simulator already reads router settings** from `GET /v1/settings` at start, and the gateway reads the same endpoint.
@@ -28,7 +28,7 @@ Choices the project owner made on 2026-11-24, before the options below were writ
 
 | Setting | Service | Default | Bounds | Effect |
 |---|---|---|---|---|
-| Simulated operators | sim | 200 | 1 to 500 | within a minute |
+| Simulated operators | sim | 200 | 10 to 500 | within a minute |
 | Capacity of an operator | sim | 4 | 1 to 20 | within a minute |
 | Handling time, median | sim | 45 s | 5 s to 10 min | for conversations accepted after the change |
 | Resolve time, median | sim | 3 min | 10 s to 30 min | for conversations replied to after the change |
@@ -55,7 +55,7 @@ Recommendation: **B**. The values survive a restart, and the log gives exact tim
 
 ### 2. How the simulator learns its settings
 
-- **A. The router keeps the simulator part too.** It checks the bounds and does not use the values. The simulator asks `GET /v1/settings` every few seconds and applies a set with a new version number. One store, one version, one write.
+- **A. The router keeps the simulator part too.** It checks the bounds and does not use the values. The simulator asks `GET /v1/settings` every few seconds and applies a set with a new version number. One store, one version, one write. At its start the simulator reports the values of its own environment. They become the defaults of its part, and the current values when the store has none yet.
 - **B. The simulator gets its own HTTP API,** and the gateway writes to two services. A change can then succeed in one and fail in the other.
 - **C. A Kafka topic,** as in 1C.
 
@@ -64,8 +64,9 @@ Recommendation: **A**. The simulator already depends on this endpoint. The contr
 ### 3. How the simulator changes on the run
 
 - **A. Step by step, without a restart.**
-  - Fewer operators: the operators with the highest numbers go offline through the normal call. Their conversations return to the queue by the existing rule of decision 0010. They stay registered and offline.
-  - More operators: new ones are created with the next numbers and take their place in the shift cycle by the same rule as at start.
+  - Each operator keeps the language it got when it was created. The language spread is scaled to the new count, which gives a target for each language.
+  - Fewer operators: in each language above its target, the operators with the highest numbers go offline through the normal call. Their conversations return to the queue by the existing rule of decision 0010. They stay registered and offline.
+  - More operators: in each language below its target, operators that were put aside come back first. Then new ones are created with the next free numbers. They take their place in the shift cycle by the same rule as at start.
   - Another capacity: the simulator sends the operator again with the new value. An operator who holds more than the new capacity keeps the conversations and gets no new offers until the load is below it.
   - Other times and shares: they apply to steps planned after the change. A step that is already planned keeps its time.
 - **B. The simulator restarts its engine inside the process.** Simple, but every operator goes offline and online, so every held conversation returns to the queue. The change is then mixed with that wave.
@@ -120,7 +121,7 @@ Open point for A: the cookie holds a token that lives a short time, and the site
 
 On a laptop there is no site cookie at all, because the console runs on `127.0.0.1`. So option A alone gives the owner no way to change settings on the local stand. For the local stand one of these is needed:
 
-- **L1. A gateway setting that names one role for every connection,** accepted only when the gateway listens on a loopback address. The gateway refuses to start with it on any other address.
+- **L1. A gateway setting that names one role for every connection,** accepted only when every allowed origin (decision 0011) is a loopback address. The gateway refuses to start with it otherwise. A public stand must list its public origin, so it cannot run with this setting. The listen address is not a usable test: inside a container the gateway listens on every address, and the port is bound to the loopback address by the container settings.
 - **L2. The paste field of option C,** shown only on a local address.
 
 Recommendation: **L1**.
@@ -135,7 +136,7 @@ On 2026-11-24 the project owner chose the recommended option in every point:
 - **Team numbers that go down:** no forced exit, the console says "acts gradually" (4A).
 - **Trend history:** in the gateway's memory, one hour (5A).
 - **Rights:** two lists of roles (6B). For now the owner gives the site's guest role both rights.
-- **Site sign-in:** the cookie of the opening request (7A), and the loopback-only role setting for a local stand (L1).
+- **Site sign-in:** the cookie of the opening request (7A), and the role setting for a local stand, tied to loopback origins (L1).
 
 Point 7A replaces "the first message after the connection opens" (point 5C of decision 0012) for the site sign-in. The `hello` message stays the first message of the protocol. It no longer has to carry a site token.
 
