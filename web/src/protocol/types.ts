@@ -197,6 +197,7 @@ export interface TrendPoint {
   readonly longest_wait_us: number;
   readonly resolved_last_minute: number;
   readonly teams: number;
+  /** Online operators who are members of a team: the number the team share limits. */
   readonly operators_in_teams: number;
   readonly operators_online: number;
 }

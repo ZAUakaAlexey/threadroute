@@ -4,7 +4,7 @@
 
 import { readSettingsFixture } from '../../../test/fixtures.ts';
 import type { Result, SettingsBlock } from '../../../protocol/types.ts';
-import { INITIAL_FORM, answerText, deriveForm, formReducer, type FormAction, type FormState } from './form.ts';
+import { INITIAL_FORM, answerText, deriveForm, formReducer, retrySecondsLeft, type FormAction, type FormState } from './form.ts';
 import { formatSetting, parseInput, toInput } from './fields.ts';
 
 const welcome = readSettingsFixture('server_welcome_supervisor_settings_full_may_change.json') as { settings: SettingsBlock };
@@ -170,11 +170,29 @@ describe('settings form, answers', () => {
   it('too soon: waits for retry_after_ms, then allows Apply again', () => {
     const s = formReducer(sent, { type: 'answered', result: result({ code: 'settings_too_soon', retry_after_ms: 6800 }), version: 3, nowMs: 1000 });
     expect(s.retryAtMs).toBe(7800);
+    expect(s.retryWaitMs).toBe(6800);
     expect(deriveForm(s, block)).toMatchObject({ isWaiting: true, canApply: false });
     expect(answerText({ kind: 'too_soon' }, 7)).toContain('in 7 seconds');
     const ready = formReducer(s, { type: 'retry_ready' });
     expect(deriveForm(ready, block)).toMatchObject({ isWaiting: false, canApply: true });
     expect(ready.answer).toBeNull();
+    expect(ready.retryWaitMs).toBeNull();
+  });
+
+  it.each([
+    // [wait asked for, time since the answer, seconds shown]
+    [10_000, 0, 10],
+    // A clock that ticked a little before the answer sees more than the wait.
+    [10_000, -200, 10],
+    [9_800, 0, 10],
+    [9_800, 800, 9],
+    [9_800, 8_800, 1],
+    [9_800, 9_799, 1],
+    [9_800, 9_800, 0],
+    [9_800, 12_000, 0],
+    [300, -100, 1],
+  ])('too soon: a wait of %i ms, %i ms later, shows %i seconds', (waitMs, sinceMs, seconds) => {
+    expect(retrySecondsLeft(1_000 + waitMs, waitMs, 1_000 + sinceMs)).toBe(seconds);
   });
 
   it('invalid: shows the reasons of the gateway next to their fields until the next edit', () => {

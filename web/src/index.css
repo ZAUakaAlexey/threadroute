@@ -39,6 +39,8 @@
   --ink: oklch(22% 0.01 260);
   --ink-2: oklch(42% 0.012 260);
   --ink-3: oklch(52% 0.012 260);
+  /* The label of a disabled control: readable (about 3.4:1 on sunken) but clearly fainter than ink-3. */
+  --ink-off: oklch(60% 0.01 260);
   --line: oklch(89% 0.006 85);
   --line-strong: oklch(80% 0.008 85);
   --accent: oklch(47% 0.17 262);
@@ -62,6 +64,7 @@
     --ink: oklch(94% 0.005 85);
     --ink-2: oklch(78% 0.008 85);
     --ink-3: oklch(70% 0.01 85);
+    --ink-off: oklch(55% 0.01 85);
     --line: oklch(29% 0.008 260);
     --line-strong: oklch(38% 0.01 260);
     --accent: oklch(72% 0.13 262);
@@ -87,6 +90,7 @@
   --color-ink: var(--ink);
   --color-ink-2: var(--ink-2);
   --color-ink-3: var(--ink-3);
+  --color-ink-off: var(--ink-off);
   --color-line: var(--line);
   --color-line-strong: var(--line-strong);
   --color-accent: var(--accent);

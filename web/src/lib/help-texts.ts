@@ -97,10 +97,11 @@ const TEXTS = {
   'supervisor.trend.resolved':
     'Conversations that operators resolved in the 60 seconds before the point. While this stays below the number of new conversations, the queue grows.',
   'supervisor.trend.teams': 'Dedicated teams at the time of the point.',
-  'supervisor.trend.in-teams': 'Operators who were members of a dedicated team. The share of operators in teams sets the upper limit of this number.',
+  'supervisor.trend.in-teams':
+    'Online operators who are members of a dedicated team. This is the number that the share of operators in teams limits, as a share of Online operators next to it. After the share goes down, teams shrink only as members leave, so this number can stay above the limit for a while.',
   'supervisor.trend.online': 'Online operators, simulated and human together.',
   'supervisor.trend.marks':
-    'Each numbered line on the charts is a change of the stand settings, listed here with its time. Many settings act gradually, so the effect may show only some minutes later.',
+    'Each dashed line on the charts is a change of the stand settings, listed here by its number with its time. When changes are close together, one label shows the range of their numbers, for example 6-12. Many settings act gradually, so the effect may show only some minutes later.',
 
   // Supervisor screen: stand settings.
   'supervisor.panel.settings':

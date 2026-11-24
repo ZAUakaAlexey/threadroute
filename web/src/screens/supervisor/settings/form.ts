@@ -37,6 +37,8 @@ export interface FormState {
   readonly answer: Answer | null;
   /** Wall clock time from which a change may be sent again, after "too soon". */
   readonly retryAtMs: number | null;
+  /** The wait that the gateway asked for (retry_after_ms), after "too soon". */
+  readonly retryWaitMs: number | null;
 }
 
 export type FormAction =
@@ -49,7 +51,7 @@ export type FormAction =
   | { readonly type: 'answered'; readonly result: Result; readonly version: number; readonly nowMs: number }
   | { readonly type: 'retry_ready' };
 
-export const INITIAL_FORM: FormState = { drafts: {}, exact: {}, baseVersion: null, serverErrors: {}, isPending: false, answer: null, retryAtMs: null };
+export const INITIAL_FORM: FormState = { drafts: {}, exact: {}, baseVersion: null, serverErrors: {}, isPending: false, answer: null, retryAtMs: null, retryWaitMs: null };
 
 export function formReducer(state: FormState, action: FormAction): FormState {
   switch (action.type) {
@@ -86,7 +88,7 @@ export function formReducer(state: FormState, action: FormAction): FormState {
     case 'answered':
       return answered({ ...state, isPending: false }, action.result, action.version, action.nowMs);
     case 'retry_ready':
-      return { ...state, retryAtMs: null, answer: state.answer?.kind === 'too_soon' ? null : state.answer };
+      return { ...state, retryAtMs: null, retryWaitMs: null, answer: state.answer?.kind === 'too_soon' ? null : state.answer };
   }
 }
 
@@ -103,8 +105,10 @@ function answered(state: FormState, result: Result, version: number, nowMs: numb
       for (const f of result.fields ?? []) serverErrors[f.field] = serverErrors[f.field] === undefined ? f.reason : `${serverErrors[f.field] ?? ''} ${f.reason}`;
       return { ...state, serverErrors, answer: { kind: 'invalid' } };
     }
-    case 'settings_too_soon':
-      return { ...state, retryAtMs: nowMs + (result.retry_after_ms ?? 1000), answer: { kind: 'too_soon' } };
+    case 'settings_too_soon': {
+      const waitMs = result.retry_after_ms ?? 1000;
+      return { ...state, retryAtMs: nowMs + waitMs, retryWaitMs: waitMs, answer: { kind: 'too_soon' } };
+    }
     case 'not_allowed':
       return { ...state, answer: { kind: 'not_allowed' } };
     case 'settings_off':
@@ -218,6 +222,19 @@ function overlay(current: StandSettings, values: ReadonlyMap<string, number>): S
     Object.fromEntries(Object.entries(part).map(([k, v]) => [k, values.get(`${prefix}.${k}`) ?? (v as number)])) as T;
   const teams = pick(current.teams, 'teams');
   return current.sim === undefined ? { teams } : { teams, sim: pick(current.sim, 'sim') };
+}
+
+/**
+ * The whole seconds a person still has to wait after "too soon": 0 when
+ * the wait is over, else at least 1 and never more than the wait the
+ * gateway asked for (10000 ms gives 10). The clock of the screen ticks
+ * every 250 ms, so the time left it sees can be a little longer than the
+ * wait itself; the upper limit hides that.
+ */
+export function retrySecondsLeft(retryAtMs: number, waitMs: number, nowMs: number): number {
+  const leftMs = retryAtMs - nowMs;
+  if (leftMs <= 0) return 0;
+  return Math.max(1, Math.min(Math.ceil(waitMs / 1000), Math.ceil(leftMs / 1000)));
 }
 
 /** The sentence for an answer of the gateway. */

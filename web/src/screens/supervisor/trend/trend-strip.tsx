@@ -11,7 +11,8 @@ import type { SettingsBlock, SettingsChange, TrendPoint } from '../../../protoco
 import { HelpHint } from '../../../ui/help-hint.tsx';
 import { Panel } from '../../../ui/panel.tsx';
 import { describeChange, formatChangeTime } from '../settings/describe.ts';
-import { Sparkline, type ChangeMark } from './sparkline.tsx';
+import { groupMarks, type ChangeMark, type MarkGroup } from './marks.ts';
+import { Sparkline } from './sparkline.tsx';
 
 interface Series {
   readonly label: string;
@@ -37,7 +38,8 @@ export function TrendStrip() {
   const newest = trend.points.at(-1);
   const toUs = newest?.sampled_at_us ?? 0;
   const fromUs = toUs - TREND_WINDOW_MS * 1000;
-  const marks = newest === undefined || settings === null ? [] : marksIn(settings.changes, fromUs, toUs + trend.intervalMs * 1000, toUs, settings);
+  const marks = newest === undefined || settings === null ? [] : marksIn(settings.changes, fromUs, toUs + trend.intervalMs * 1000, settings);
+  const groups = groupMarks(marks, fromUs, toUs);
   const every = `${Math.round(trend.intervalMs / 1000)} s`;
 
   return (
@@ -61,7 +63,7 @@ export function TrendStrip() {
                   fromUs={fromUs}
                   toUs={toUs}
                   intervalMs={trend.intervalMs}
-                  marks={marks}
+                  marks={groups}
                 />
               </li>
             ))}
@@ -70,14 +72,14 @@ export function TrendStrip() {
             <span>60 min ago</span>
             <span>now</span>
           </div>
-          {marks.length > 0 && <MarksList marks={marks} />}
+          {groups.length > 0 && <MarksList groups={groups} />}
         </>
       )}
     </Panel>
   );
 }
 
-function MarksList({ marks }: { readonly marks: readonly ChangeMark[] }) {
+function MarksList({ groups }: { readonly groups: readonly MarkGroup[] }) {
   return (
     <div className="flex flex-col gap-1.5 border-t border-line px-4 py-3">
       <div className="flex items-center gap-1.5">
@@ -85,30 +87,40 @@ function MarksList({ marks }: { readonly marks: readonly ChangeMark[] }) {
         <HelpHint id="supervisor.trend.marks" label="Settings changes in this hour" />
       </div>
       <ol aria-label="Settings changes in this hour" className="flex flex-col gap-1 text-xs text-ink-2">
-        {marks.map((m) => (
-          <li key={m.n} className="flex gap-2">
-            <span aria-hidden="true" className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2">
-              {m.n}
-            </span>
-            <span>
-              <span className="sr-only">Mark {m.n}: </span>
-              <span className="font-mono tnum">{formatChangeTime(m.atUs)}</span> {m.text}
-            </span>
-          </li>
-        ))}
+        {groups.flatMap((g) =>
+          g.marks.map((m) => (
+            <li key={m.n} className="flex gap-2">
+              <span aria-hidden="true" className="flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full border border-line-strong font-mono text-[10px] text-ink-2">
+                {m.n}
+              </span>
+              <span>
+                <span className="sr-only">{markName(m, g)}: </span>
+                <span className="font-mono tnum">{formatChangeTime(m.atUs)}</span> {m.text}
+              </span>
+            </li>
+          )),
+        )}
       </ol>
     </div>
   );
 }
 
+/** What a screen reader says for the label of a change on the charts. */
+function markName(mark: ChangeMark, group: MarkGroup): string {
+  const first = group.marks[0]?.n ?? mark.n;
+  const last = group.marks.at(-1)?.n ?? mark.n;
+  return first === last ? `Mark ${mark.n}` : `Change ${mark.n}, in the mark for changes ${first} to ${last}`;
+}
+
 /**
  * The changes inside the window, oldest first and numbered from 1. A change
- * after the newest point (it comes before the next one) sits at the right
- * edge.
+ * after the newest point (it comes before the next one) keeps its own time
+ * for the list and sits at the right edge of the charts.
  */
-function marksIn(changes: readonly SettingsChange[], fromUs: number, untilUs: number, toUs: number, block: SettingsBlock): ChangeMark[] {
+function marksIn(changes: readonly SettingsChange[], fromUs: number, untilUs: number, block: SettingsBlock): ChangeMark[] {
   return changes
     .filter((c) => c.changed_at_us >= fromUs && c.changed_at_us <= untilUs)
-    .sort((a, b) => a.changed_at_us - b.changed_at_us)
-    .map((c, i) => ({ n: i + 1, atUs: Math.min(c.changed_at_us, toUs), text: describeChange(c, block) }));
+    // Changes in the same microsecond keep the order of their versions.
+    .sort((a, b) => a.changed_at_us - b.changed_at_us || a.version - b.version)
+    .map((c, i) => ({ n: i + 1, atUs: c.changed_at_us, text: describeChange(c, block) }));
 }

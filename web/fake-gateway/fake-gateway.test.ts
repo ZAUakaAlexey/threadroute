@@ -372,6 +372,27 @@ describe('fake gateway, stand settings (decision 0014)', () => {
     peer.close();
   });
 
+  it('counts online team members only, never above the online operators', async () => {
+    const { peer } = await supervisor();
+    const point = async () => {
+      await control('trend-point');
+      const m = await peer.next(isType('trend'));
+      if (m.type !== 'trend') throw new Error('no trend point');
+      return m.point;
+    };
+    const start = await point();
+    // sim-op-0001 is a member of the first team.
+    await control('operator-offline', { id: 'sim-op-0001' });
+    const after = await point();
+    expect(after.operators_in_teams).toBe(start.operators_in_teams - 1);
+    // Many teams, some of them with the same operators.
+    await control('teams', { count: 60 });
+    const many = await point();
+    expect(many.operators_in_teams).toBeGreaterThan(after.operators_in_teams);
+    expect(many.operators_in_teams).toBeLessThanOrEqual(many.operators_online);
+    peer.close();
+  });
+
   it('moves the teams toward a new team share, one member per trend point', async () => {
     const { peer, settings } = await supervisor();
     const inTeams = async () => {

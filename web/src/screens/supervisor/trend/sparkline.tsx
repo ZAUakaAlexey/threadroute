@@ -1,18 +1,14 @@
 // One small line chart of the trend strip, drawn by hand in SVG. The plot
 // has a fixed height and a time axis of the whole window, so new points
 // never change the layout. One series, so no legend: the tile names it.
-// Marks of settings changes are thin vertical lines with a number; the
-// list under the strip says what each number changed.
+// Marks of settings changes are thin vertical lines with a numbered label
+// (one label for changes close together, see marks.ts); the list under
+// the strip says what each number changed.
 
 import { useState, type PointerEvent } from 'react';
 
 import type { TrendPoint } from '../../../protocol/types.ts';
-
-export interface ChangeMark {
-  readonly n: number;
-  readonly atUs: number;
-  readonly text: string;
-}
+import type { MarkGroup } from './marks.ts';
 
 interface SparklineProps {
   readonly label: string;
@@ -22,7 +18,7 @@ interface SparklineProps {
   readonly fromUs: number;
   readonly toUs: number;
   readonly intervalMs: number;
-  readonly marks: readonly ChangeMark[];
+  readonly marks: readonly MarkGroup[];
 }
 
 const W = 300;
@@ -68,11 +64,11 @@ export function Sparkline({ label, points, value, format, fromUs, toUs, interval
       <div className="relative h-14 touch-pan-y" onPointerMove={handlePointerMove} onPointerLeave={handlePointerLeave}>
         <svg role="img" aria-label={summary} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" className="absolute inset-0 size-full overflow-visible">
           <line x1={0} y1={H} x2={W} y2={H} stroke="var(--line-strong)" strokeWidth={1} vectorEffect="non-scaling-stroke" />
-          {marks.map((m) => (
+          {marks.flatMap((g) => g.marks).map((m) => (
             <line
               key={m.n}
-              x1={xOf(m.atUs)}
-              x2={xOf(m.atUs)}
+              x1={xOf(Math.min(m.atUs, toUs))}
+              x2={xOf(Math.min(m.atUs, toUs))}
               y1={0}
               y2={H}
               stroke="var(--ink-3)"
@@ -96,15 +92,17 @@ export function Sparkline({ label, points, value, format, fromUs, toUs, interval
             style={{ left: `${(xOf(hovered.sampled_at_us) / W) * 100}%`, top: `${(yOf(shown) / H) * 100}%` }}
           />
         )}
-        {marks.map((m) => (
+        {/* The labels repeat the list under the strip, which is the path for keyboard and screen reader users. */}
+        {marks.map((g) => (
           <span
-            key={m.n}
+            key={g.label}
             aria-hidden="true"
-            title={m.text}
-            className="absolute -top-2 flex h-3.5 min-w-3.5 -translate-x-1/2 items-center justify-center rounded-full border border-line-strong bg-panel px-0.5 font-mono text-[9px] leading-none text-ink-2"
-            style={{ left: `${(xOf(m.atUs) / W) * 100}%` }}
+            title={g.marks.map((m) => `${m.n}: ${m.text}`).join('\n')}
+            data-mark-label=""
+            className="absolute -top-2 flex h-3.5 min-w-3.5 -translate-x-1/2 items-center justify-center rounded-full border border-line-strong bg-panel px-0.5 font-mono text-[9px] leading-none whitespace-nowrap text-ink-2"
+            style={{ left: `${g.at * 100}%` }}
           >
-            {m.n}
+            {g.label}
           </span>
         ))}
       </div>

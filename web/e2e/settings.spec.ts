@@ -1,4 +1,4 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Locator, type Page } from '@playwright/test';
 
 import { control, signInFull } from './helpers.ts';
 
@@ -93,9 +93,81 @@ test('a second change right after the first is too soon, and the console says ho
   await expect(panel.getByRole('status')).toContainText('Applied');
   await panel.getByRole('textbox', { name: 'Team size, max' }).fill('17');
   await panel.getByRole('button', { name: 'Apply' }).click();
-  await expect(panel.getByRole('status')).toContainText(/You can apply again in \d+ seconds?\./);
-  await expect(panel.getByRole('button', { name: 'Apply' })).toBeDisabled();
+  const status = panel.getByRole('status');
+  await expect(status).toContainText(/You can apply again in \d+ seconds?\./);
+  // The gateway waits at most 10 seconds, so the countdown never shows more.
+  expect(await secondsShown(status)).toBeLessThanOrEqual(10);
+  const apply = panel.getByRole('button', { name: 'Apply' });
+  await expect(apply).toBeDisabled();
+  await expect(apply).toBeEnabled({ timeout: 12_000 });
+  // The answer line is empty, and so hidden, when the wait is over.
+  await expect(panel.getByText(/You can apply again/)).toHaveCount(0);
 });
+
+test('the countdown of a forced "too soon" starts at its wait and ends with Apply enabled again', async ({ page }) => {
+  const panel = await openSettings(page);
+  // The forced answer asks for a wait of 3000 ms.
+  await control('settings-answer', { answer: 'too_soon' });
+  await panel.getByRole('textbox', { name: 'Team size, max' }).fill('18');
+  const apply = panel.getByRole('button', { name: 'Apply' });
+  await apply.click();
+  const status = panel.getByRole('status');
+  await expect(status).toContainText('You can apply again in');
+  const seen: number[] = [];
+  await expect
+    .poll(async () => {
+      const s = await secondsShown(status);
+      if (s !== null) seen.push(s);
+      return apply.isEnabled();
+    }, { timeout: 6_000, intervals: [100] })
+    .toBe(true);
+  expect(Math.max(...seen)).toBeLessThanOrEqual(3);
+  expect(seen).toContain(1);
+  await expect(panel.getByText(/You can apply again/)).toHaveCount(0);
+});
+
+/** The seconds of the countdown, or null when it is not shown. Does not wait for the line. */
+async function secondsShown(status: Locator): Promise<number | null> {
+  const match = /in (\d+) seconds?\./.exec((await status.allTextContents()).join(' '));
+  return match === null ? null : Number(match[1]);
+}
+
+for (const colorScheme of ['light', 'dark'] as const) {
+  test(`a disabled Apply looks disabled in the ${colorScheme} theme`, async ({ page }) => {
+    await page.emulateMedia({ colorScheme });
+    // Back to the default values, so "Reset to defaults" is disabled too.
+    await control('settings-change', { fields: { 'teams.form_load': 20 } });
+    const panel = await openSettings(page);
+    const apply = panel.getByRole('button', { name: 'Apply' });
+    await expect(apply).toBeDisabled();
+    const look = (l: Locator) => l.evaluate((el) => ({ bg: getComputedStyle(el).backgroundColor, color: getComputedStyle(el).color, opacity: getComputedStyle(el).opacity }));
+    // The colours of the theme, resolved by the browser in the same format.
+    const tokens = await page.evaluate(() => {
+      const probe = document.createElement('div');
+      document.body.append(probe);
+      const read = (name: string) => {
+        probe.style.backgroundColor = `var(--${name})`;
+        return getComputedStyle(probe).backgroundColor;
+      };
+      const out = { sunken: read('sunken'), inkOff: read('ink-off') };
+      probe.remove();
+      return out;
+    });
+    const disabled = await look(apply);
+    expect(disabled).toEqual({ bg: tokens.sunken, color: tokens.inkOff, opacity: '1' });
+    // The other buttons of the panel in the disabled state.
+    for (const name of ['Discard changes', 'Reset to defaults']) {
+      const button = panel.getByRole('button', { name });
+      await expect(button).toBeDisabled();
+      expect((await look(button)).color).toBe(tokens.inkOff);
+    }
+    await panel.getByRole('textbox', { name: 'Team size, max' }).fill('18');
+    await expect(apply).toBeEnabled();
+    // The colour has a short transition; the browser may give it in another colour space.
+    await expect.poll(async () => (await look(apply)).bg).not.toBe(tokens.sunken);
+    expect((await look(apply)).color).not.toBe(tokens.inkOff);
+  });
+}
 
 test('a change by someone else updates the panel live', async ({ page }) => {
   const panel = await openSettings(page);
@@ -167,4 +239,46 @@ test('on a phone the panel open does not make the page scroll sideways', async (
   await panel.getByRole('textbox', { name: 'Load that forms a team' }).fill('600');
   await expect(page.getByRole('region', { name: 'Last hour' })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+});
+
+test.describe('marks of changes close together', () => {
+  for (const width of [1400, 1024, 390]) {
+    test(`merge into one label that does not overlap the others, at ${width} px`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto('#/supervisor');
+      const strip = page.getByRole('region', { name: 'Last hour' });
+      await expect(strip.getByRole('img').first()).toBeVisible();
+      // Eight changes within a second; the fake starts with two far apart (50 and 20 minutes ago).
+      for (let capacity = 5; capacity <= 12; capacity += 1) {
+        await control('settings-change', { fields: { 'sim.capacity': capacity } });
+      }
+      await control('trend-point');
+      const list = strip.getByRole('list', { name: 'Settings changes in this hour' });
+      await expect(list.getByRole('listitem')).toHaveCount(10);
+      // Every change stays in the list, with its link to the label on the charts.
+      await expect(list.getByRole('listitem').nth(0)).toContainText('Mark 1:');
+      await expect(list.getByRole('listitem').nth(5)).toContainText('Change 6, in the mark for changes 3 to 10:');
+      // Changes in the same moment keep the order in which they were made.
+      await expect(list.getByRole('listitem').nth(8)).toContainText('Capacity of an operator: 10 to 11');
+      await expect(list.getByRole('listitem').last()).toContainText('Capacity of an operator: 11 to 12');
+
+      const tiles = strip.getByRole('list', { name: 'Trends of the last hour' }).getByRole('listitem');
+      await expect(tiles).toHaveCount(6);
+      for (let i = 0; i < 6; i += 1) {
+        const tile = tiles.nth(i);
+        const labels = tile.locator('[data-mark-label]');
+        await expect(labels).toHaveText(['1', '2', '3-10']);
+        const chart = await tile.getByRole('img').boundingBox();
+        const boxes = await labels.evaluateAll((els) => els.map((el) => el.getBoundingClientRect().toJSON() as { left: number; right: number }));
+        if (chart === null) throw new Error('no chart box');
+        for (const [k, box] of boxes.entries()) {
+          expect(box.left).toBeGreaterThanOrEqual(chart.x - 0.5);
+          expect(box.right).toBeLessThanOrEqual(chart.x + chart.width + 0.5);
+          const left = boxes[k - 1];
+          if (left !== undefined) expect(box.left).toBeGreaterThan(left.right);
+        }
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
+    });
+  }
 });

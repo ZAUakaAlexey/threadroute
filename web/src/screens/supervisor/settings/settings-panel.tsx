@@ -12,7 +12,7 @@ import { HelpHint } from '../../../ui/help-hint.tsx';
 import { ChevronDownIcon } from '../../../ui/icons.tsx';
 import { ChangesList } from './changes-list.tsx';
 import { SPEED_TEXT, boundOf, formatSetting, inputUnit, type FieldMeta } from './fields.ts';
-import { INITIAL_FORM, answerText, deriveForm, formReducer, isErrorAnswer, type FieldView, type FormState, type FormView } from './form.ts';
+import { INITIAL_FORM, answerText, deriveForm, formReducer, isErrorAnswer, retrySecondsLeft, type FieldView, type FormState, type FormView } from './form.ts';
 
 export function SettingsPanel() {
   const block = useLive((s) => s.settings);
@@ -246,12 +246,12 @@ function OutdatedNote({ version, onKeep, onDiscard }: OutdatedNoteProps) {
   );
 }
 
-function AnswerLine({ state }: { readonly state: Pick<FormState, 'answer' | 'retryAtMs'> }) {
+function AnswerLine({ state }: { readonly state: Pick<FormState, 'answer' | 'retryAtMs' | 'retryWaitMs'> }) {
   return (
     <p role="status" className="min-w-0 flex-1 text-sm empty:hidden">
       {state.answer !== null &&
-        (state.answer.kind === 'too_soon' && state.retryAtMs !== null ? (
-          <RetryText retryAtMs={state.retryAtMs} />
+        (state.answer.kind === 'too_soon' && state.retryAtMs !== null && state.retryWaitMs !== null ? (
+          <RetryText retryAtMs={state.retryAtMs} waitMs={state.retryWaitMs} />
         ) : (
           <span className={isErrorAnswer(state.answer) ? 'text-late' : 'text-done'}>{answerText(state.answer, 0)}</span>
         ))}
@@ -260,9 +260,9 @@ function AnswerLine({ state }: { readonly state: Pick<FormState, 'answer' | 'ret
 }
 
 /** The "too soon" answer with the seconds left; it reads the shared clock only while shown. */
-function RetryText({ retryAtMs }: { readonly retryAtMs: number }) {
+function RetryText({ retryAtMs, waitMs }: { readonly retryAtMs: number; readonly waitMs: number }) {
   const nowMs = useTickMs();
-  const seconds = Math.max(0, Math.ceil((retryAtMs - nowMs) / 1000));
+  const seconds = retrySecondsLeft(retryAtMs, waitMs, nowMs);
   return <span className="text-late">{answerText({ kind: 'too_soon' }, seconds)}</span>;
 }
 

@@ -2,7 +2,7 @@
 // an in-memory gateway connection: with an older gateway, read only, and
 // a change with each kind of answer.
 
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import { readFixture, readSettingsFixture } from '../../test/fixtures.ts';
@@ -163,6 +163,77 @@ describe('a change, with the right', () => {
     await waitFor(() => expect(apply).toBeEnabled());
   });
 
+  describe('the "too soon" countdown, with fake timers', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    // fireEvent, not userEvent: the async wrapper of userEvent waits on a
+    // real timer, which never fires while the timers are fake.
+    async function tooSoon(retryAfterMs: number) {
+      const h = start('server_welcome_supervisor_settings_full_may_change.json');
+      fireEvent.click(screen.getByRole('button', { name: 'Stand settings' }));
+      fireEvent.change(screen.getByRole('textbox', { name: 'Load that forms a team' }), { target: { value: '31' } });
+      const apply = screen.getByRole('button', { name: 'Apply' });
+      fireEvent.click(apply);
+      const sent = sentChanges(h).at(-1) as { request_id: string };
+      // The answer comes between two ticks of the shared clock.
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      h.push({ type: 'result', request_id: sent.request_id, outcome: 'rejected', code: 'settings_too_soon', message: 'one change per 10 seconds', retry_after_ms: retryAfterMs });
+      // The panel handles the answer after the promise of the request settles.
+      await act(() => Promise.resolve());
+      return apply;
+    }
+
+    function answer(): HTMLElement {
+      return within(screen.getByRole('region', { name: 'Stand settings' })).getByRole('status');
+    }
+
+    function shownSeconds(): number | null {
+      const match = /in (\d+) seconds?\./.exec(answer().textContent);
+      return match === null ? null : Number(match[1]);
+    }
+
+    function advance(ms: number) {
+      act(() => {
+        vi.advanceTimersByTime(ms);
+      });
+    }
+
+    it('starts at the limit, never above it, and ends at 1 before Apply comes back', async () => {
+      const apply = await tooSoon(10_000);
+      expect(shownSeconds()).toBe(10);
+      const seen: number[] = [];
+      for (let t = 0; t < 9_750; t += 250) {
+        advance(250);
+        const s = shownSeconds();
+        if (s !== null) seen.push(s);
+      }
+      expect(Math.max(...seen)).toBeLessThanOrEqual(10);
+      expect(seen.at(-1)).toBe(1);
+      expect(apply).toBeDisabled();
+      advance(300);
+      expect(apply).toBeEnabled();
+      expect(answer()).toBeEmptyDOMElement();
+    });
+
+    it('shows 10 for a wait of 9,800 ms', async () => {
+      const apply = await tooSoon(9_800);
+      expect(shownSeconds()).toBe(10);
+      // The shared clock ticks every 250 ms, so the text may be that much late.
+      advance(9_300);
+      expect(shownSeconds()).toBe(1);
+      expect(apply).toBeDisabled();
+      advance(600);
+      expect(apply).toBeEnabled();
+    });
+  });
+
   it('shows the reasons of the gateway next to their fields', async () => {
     const h = start('server_welcome_supervisor_settings_full_may_change.json');
     const { apply } = await editFormLoad(h, '31');
@@ -196,6 +267,19 @@ describe('trend strip', () => {
     const marks = within(strip).getByRole('list', { name: 'Settings changes in this hour' });
     expect(within(marks).getAllByRole('listitem')).toHaveLength(3);
     expect(marks).toHaveTextContent('Load that forms a team: 20 to 30');
+  });
+
+  it('numbers changes made in the same microsecond in the order of their versions', () => {
+    const h = start('server_welcome_supervisor_settings_full_may_change.json');
+    const block = settingsOf('server_welcome_supervisor_settings_full_may_change.json') as { changes: Json[] } & Json;
+    const strip = screen.getByRole('region', { name: 'Last hour' });
+    const newest = (block.changes[0] as { changed_at_us: number }).changed_at_us;
+    const same = (version: number, from: number, to: number): Json => ({ changed_at_us: newest + 1, version, fields: [{ field: 'teams.max_size', old: from, new: to }] });
+    // Newest first, as the gateway sends them.
+    h.push({ type: 'settings', settings: { ...block, version: 5, changes: [same(5, 19, 18), same(4, 20, 19), ...block.changes] } });
+    const items = within(within(strip).getByRole('list', { name: 'Settings changes in this hour' })).getAllByRole('listitem');
+    expect(items.at(-2)).toHaveTextContent('Team size, max: 20 to 19');
+    expect(items.at(-1)).toHaveTextContent('Team size, max: 19 to 18');
   });
 
   it('adds the points of trend messages', () => {

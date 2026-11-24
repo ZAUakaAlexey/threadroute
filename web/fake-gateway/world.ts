@@ -578,6 +578,11 @@ export class World {
     }
   }
 
+  /**
+   * The active simulated operators stay numbers 1 to N: the highest numbers
+   * are put aside first, and the lowest put-aside numbers come back first.
+   * A new operator gets its language from its number only.
+   */
   private setSimCount(target: number, capacity: number, nowUs: number): void {
     const sims = [...this.operators.values()].filter((o) => o.kind === 'simulated').sort((a, b) => a.id.localeCompare(b.id));
     const active = sims.filter((o) => !this.parked.has(o.id));
@@ -611,17 +616,19 @@ export class World {
 
   /**
    * One step toward the team share: a member leaves the largest team while
-   * teams hold more than the share allows, or a free simulated operator
-   * joins the smallest team while they hold less.
+   * the online team members are more than the share allows, or a free
+   * simulated operator joins the smallest team while they are fewer. The
+   * share is of the online operators, as in the router.
    */
   private moveTeamsToShare(): void {
     if (this.teamShare === null) return;
     const ops = [...this.operators.values()];
     const limit = Math.floor(this.teamShare.share * ops.filter((o) => o.presence === 'online').length);
     const teams = [...this.teams.values()].sort((a, b) => b.members.length - a.members.length || a.company.localeCompare(b.company));
-    const inTeams = teams.reduce((sum, t) => sum + t.members.length, 0);
+    const inTeams = this.onlineInTeams();
     if (inTeams > limit) {
-      const op = this.operators.get(teams[0]?.members.at(-1) ?? '');
+      const members = teams[0]?.members ?? [];
+      const op = this.operators.get([...members].reverse().find((id) => this.operators.get(id)?.presence === 'online') ?? members.at(-1) ?? '');
       if (op !== undefined) this.leaveTeam(op);
       else teams[0]?.members.pop();
       return;
@@ -634,6 +641,17 @@ export class World {
     }
     smallest.members.push(free.id);
     free.team = smallest.company;
+  }
+
+  /**
+   * Online operators who are members of a team, each counted once (the
+   * "teams" control can put one operator in more than one team). This is
+   * the number the team share limits, so it is never above the online
+   * operators.
+   */
+  private onlineInTeams(): number {
+    const members = new Set([...this.teams.values()].flatMap((t) => t.members));
+    return [...members].filter((id) => this.operators.get(id)?.presence === 'online').length;
   }
 
   /**
@@ -667,7 +685,7 @@ export class World {
   private teamCounts(): Pick<TrendPoint, 'teams' | 'operators_in_teams' | 'operators_online'> {
     return {
       teams: this.teams.size,
-      operators_in_teams: [...this.teams.values()].reduce((sum, t) => sum + t.members.length, 0),
+      operators_in_teams: this.onlineInTeams(),
       operators_online: [...this.operators.values()].filter((o) => o.presence === 'online').length,
     };
   }
