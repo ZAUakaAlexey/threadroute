@@ -513,6 +513,9 @@ func TestServiceAbortAndRestart(t *testing.T) {
 	if a := testutil.ToFloat64(m.transactions.WithLabelValues(resultAborted)); a != 1 {
 		t.Errorf("aborted transactions = %v, want 1", a)
 	}
+	if a := testutil.ToFloat64(m.aborts.WithLabelValues(abortError)); a != 1 {
+		t.Errorf("aborted transactions{reason=error} = %v, want 1", a)
+	}
 
 	// Restart without the failure.
 	r2 := startService(t, testConfig(brokers, ""), rdb, nil)
@@ -792,6 +795,9 @@ func TestServiceRebalanceAborts(t *testing.T) {
 	if got := testutil.ToFloat64(r1.svc.metrics.transactions.WithLabelValues(resultAborted)); got < 1 {
 		t.Errorf("first member aborted transactions = %v, want at least 1", got)
 	}
+	if got := testutil.ToFloat64(r1.svc.metrics.aborts.WithLabelValues(abortRebalance)); got < 1 {
+		t.Errorf("first member aborted transactions{reason=rebalance} = %v, want at least 1", got)
+	}
 	if err := r1.stop(t); err != nil {
 		t.Fatalf("first Run() error = %v", err)
 	}
@@ -809,6 +815,65 @@ func TestServiceRebalanceAborts(t *testing.T) {
 	assertOffsetsAtEnd(t, brokers)
 	t.Logf("first member committed %v records, second %v",
 		testutil.ToFloat64(r1.svc.metrics.rawRecords), testutil.ToFloat64(r2.svc.metrics.rawRecords))
+}
+
+// TestServiceOffsetCommitRefused makes the broker answer the first offset
+// commit with CONCURRENT_TRANSACTIONS, as Kafka 4.x does for a transaction
+// without output records that starts right after the previous one ended.
+// End aborts with no error and no rebalance: Run counts it with reason
+// "other", goes on, and the batch is committed once on the next try.
+func TestServiceOffsetCommitRefused(t *testing.T) {
+	c := newTestCluster(t)
+	brokers := c.ListenAddrs()
+	_, rdb := newTestRedis(t)
+	s := newScenario(t)
+	produceRaw(t, brokers, s.records...)
+
+	var refused atomic.Int64
+	c.ControlKey(int16(kmsg.TxnOffsetCommit), func(kreq kmsg.Request) (kmsg.Response, error, bool) {
+		req := kreq.(*kmsg.TxnOffsetCommitRequest)
+		resp := req.ResponseKind().(*kmsg.TxnOffsetCommitResponse)
+		resp.Version = req.Version
+		for _, rt := range req.Topics {
+			st := kmsg.NewTxnOffsetCommitResponseTopic()
+			st.Topic, st.TopicID = rt.Topic, rt.TopicID
+			for _, rp := range rt.Partitions {
+				sp := kmsg.NewTxnOffsetCommitResponseTopicPartition()
+				sp.Partition = rp.Partition
+				sp.ErrorCode = kerr.ConcurrentTransactions.Code
+				st.Partitions = append(st.Partitions, sp)
+			}
+			resp.Topics = append(resp.Topics, st)
+		}
+		refused.Add(1)
+		return resp, nil, true
+	})
+
+	r := startService(t, testConfig(brokers, ""), rdb, nil)
+	r.waitCommitted(t, len(s.records))
+	if err := r.stop(t); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if refused.Load() != 1 {
+		t.Fatalf("refused %d offset commits, want 1", refused.Load())
+	}
+
+	m := r.svc.metrics
+	for reason, want := range map[string]float64{abortOther: 1, abortRebalance: 0, abortError: 0} {
+		if got := testutil.ToFloat64(m.aborts.WithLabelValues(reason)); got != want {
+			t.Errorf("aborted transactions{reason=%s} = %v, want %v", reason, got, want)
+		}
+	}
+	if got := testutil.ToFloat64(m.transactions.WithLabelValues(resultAborted)); got != 1 {
+		t.Errorf("aborted transactions = %v, want 1", got)
+	}
+	// The batch was read again and committed once.
+	assertIdentity(t, m)
+	if got := testutil.ToFloat64(m.rawRecords); got != float64(len(s.records)) {
+		t.Errorf("raw_records_total = %v, want %d", got, len(s.records))
+	}
+	s.checkOutputs(t, brokers)
+	assertOffsetsAtEnd(t, brokers)
 }
 
 // TestServiceTimeFallback sends one record whose only time is time_us. It

@@ -17,6 +17,22 @@ const (
 	resultAborted   = "aborted"
 )
 
+// Values of the "reason" label of transactions_aborted_total.
+const (
+	// abortRebalance: partitions were revoked or lost during the
+	// transaction. The batch is read again.
+	abortRebalance = "rebalance"
+	// abortOther: End did not commit, with no error and no rebalance seen.
+	// On Kafka 4.x this is mostly a refused offset commit of a transaction
+	// without output records, see Service. The batch is read again.
+	abortOther = "other"
+	// abortError: the batch or the end of the transaction failed. The
+	// service stops.
+	abortError = "error"
+)
+
+var abortReasons = []string{abortRebalance, abortOther, abortError}
+
 // metrics are the metrics of a Service.
 //
 // The record counters change only after a transaction committed, by the
@@ -34,6 +50,7 @@ type metrics struct {
 	reprocessed  prometheus.Counter
 	timeFallback prometheus.Counter
 	transactions *prometheus.CounterVec
+	aborts       *prometheus.CounterVec
 	txnSeconds   prometheus.Histogram
 	batchRecords prometheus.Histogram
 	redisErrors  prometheus.Counter
@@ -59,6 +76,9 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			"time_us_fallback_total", "Raw records in committed transactions whose source time came from time_us, because no witnessed time was present."))),
 		transactions: prometheus.NewCounterVec(prometheus.CounterOpts(opts(
 			"transactions_total", "Ended transactions, by result.")), []string{"result"}),
+		aborts: prometheus.NewCounterVec(prometheus.CounterOpts(opts(
+			"transactions_aborted_total", "Aborted transactions, by reason: rebalance (partitions revoked or lost), other (not committed with no error and no rebalance, mostly a refused offset commit of a transaction without output) or error (the service stops). The sum equals transactions_total{result=\"aborted\"}.")),
+			[]string{"reason"}),
 		txnSeconds: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: metricsNamespace, Subsystem: metricsSubsystem,
 			Name: "transaction_seconds",
@@ -85,10 +105,13 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	}
 	m.transactions.WithLabelValues(resultCommitted)
 	m.transactions.WithLabelValues(resultAborted)
+	for _, r := range abortReasons {
+		m.aborts.WithLabelValues(r)
+	}
 
 	for _, c := range []prometheus.Collector{
 		m.rawRecords, m.emitted, m.dropped, m.duplicates, m.reprocessed, m.timeFallback,
-		m.transactions, m.txnSeconds, m.batchRecords, m.redisErrors, m.lag,
+		m.transactions, m.aborts, m.txnSeconds, m.batchRecords, m.redisErrors, m.lag,
 	} {
 		if err := reg.Register(c); err != nil {
 			return nil, fmt.Errorf("register metrics: %w", err)
@@ -113,6 +136,15 @@ type batchStats struct {
 
 func newBatchStats() batchStats {
 	return batchStats{emitted: map[Kind]int{}, dropped: map[string]int{}}
+}
+
+// outputs is the number of records the batch produced.
+func (s batchStats) outputs() int {
+	n := 0
+	for _, c := range s.emitted {
+		n += c
+	}
+	return n
 }
 
 func (m *metrics) addCommitted(s batchStats) {

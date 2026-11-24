@@ -145,6 +145,9 @@ func TestIntegrationNormalize(t *testing.T) {
 	t.Run("SameEventTwoOffsets", func(t *testing.T) {
 		testSameEventOnBroker(t, brokers, redisCtr)
 	})
+	t.Run("TransactionsWithoutOutput", func(t *testing.T) {
+		testNoOutputOnBroker(t, brokers, redisCtr)
+	})
 	// Last: it stops and starts Redis.
 	t.Run("RedisStopped", func(t *testing.T) {
 		testRedisStoppedOnBroker(t, brokers, redisCtr)
@@ -263,6 +266,44 @@ func groupOffsetsOf(t *testing.T, brokers []string, group string) map[int32]int6
 		}
 	})
 	return out
+}
+
+// testNoOutputOnBroker runs many small transactions that produce no record,
+// only offsets, as most batches of live traffic do. On Kafka 4.x the broker
+// often refuses such an offset commit with CONCURRENT_TRANSACTIONS when it
+// comes right after the previous transaction (see Service). The service
+// must count these aborts with reason "other", not "rebalance", go on, and
+// commit every record once. Whether an abort happens depends on timing, so
+// the count is logged, not required.
+func testNoOutputOnBroker(t *testing.T, brokers []string, redisCtr testcontainers.Container) {
+	cfg, rdb := setup(t, brokers, redisCtr, "nooutput")
+	cfg.MaxBatchRecords = 5
+	recs := make([]*kgo.Record, 200)
+	for i := range recs {
+		rkey := fmt.Sprintf("nooutput%04d", i)
+		recs[i] = rawRecord(testBob, commitValue(t, testBob, "create", "app.bsky.feed.post", rkey, replyRecord("", "")),
+			commitID(testBob, "create", rkey), "commit", testWitnessed)
+	}
+	produceRaw(t, brokers, recs...)
+	total := rawCount(t, brokers)
+
+	r := startService(t, cfg, rdb, nil)
+	r.waitCommitted(t, total)
+	if err := r.stop(t); err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	m := r.svc.metrics
+	assertIdentity(t, m)
+	if got := countValue(m.rawRecords); got != float64(total) {
+		t.Errorf("raw_records_total = %v, want %d", got, total)
+	}
+	for _, reason := range []string{abortRebalance, abortError} {
+		if got := countValue(m.aborts.WithLabelValues(reason)); got != 0 {
+			t.Errorf("aborted transactions{reason=%s} = %v, want 0", reason, got)
+		}
+	}
+	t.Logf("transactions: %v committed, %v aborted with reason other",
+		countValue(m.transactions.WithLabelValues(resultCommitted)), countValue(m.aborts.WithLabelValues(abortOther)))
 }
 
 func testAbortMidBatchOnBroker(t *testing.T, brokers []string, redisCtr testcontainers.Container) {

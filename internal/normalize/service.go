@@ -80,9 +80,29 @@ const (
 // even when commit was asked for, and rewinds the consumer to the last
 // committed offsets. The batch then appears again: in this member, or in
 // the member that got the partitions. Run sees "not committed, no error",
-// counts an aborted transaction and goes on polling. Before a commit the
-// session also forces a heartbeat, so a member that was already kicked out
-// of the group cannot commit offsets for partitions it no longer owns.
+// counts an aborted transaction with reason "rebalance" and goes on
+// polling. Before a commit the session also forces a heartbeat, so a member
+// that was already kicked out of the group cannot commit offsets for
+// partitions it no longer owns.
+//
+// # Aborts without a rebalance
+//
+// End also aborts, with no error and no rebalance, when the broker refuses
+// the offset commit with an error that kgo treats as abortable. On Kafka
+// 4.x with transaction protocol version 2 (KIP-890 part 2) this happens to
+// transactions that produced no record, which are common here because most
+// raw records are dropped. kgo then sends the offsets with TxnOffsetCommit
+// v5 or newer as the first request of the transaction, without
+// AddOffsetsToTxn. Right after the previous EndTxn the coordinator is often
+// still writing the markers of that transaction and answers
+// CONCURRENT_TRANSACTIONS. kgo retries this answer for AddOffsetsToTxn,
+// AddPartitionsToTxn and produce requests, but not inside End, so End
+// aborts. A transaction with output records is not affected: its produce
+// requests come first and are retried. The batch is read again, so nothing
+// is lost or repeated; the cost is one more round of work. Run counts such
+// an abort with reason "other" and goes on polling. Capping TxnOffsetCommit
+// at v4 would avoid it, but kgo then drops the whole version 2 protocol, so
+// the abort is counted instead.
 //
 // # Why the Redis value holds the raw position
 //
@@ -131,6 +151,10 @@ type Service struct {
 	// both.
 	prepared atomic.Bool
 	joined   atomic.Bool
+	// rebalanced is set when partitions are revoked or lost, and read and
+	// cleared after each End, to tell an abort by a rebalance from other
+	// aborts.
+	rebalanced atomic.Bool
 
 	// beforeEnd, when set, runs after the outputs are acknowledged and
 	// before the transaction ends. An error aborts the transaction like any
@@ -298,6 +322,15 @@ func (s *Service) kafkaOpts() []kgo.Opt {
 		}),
 		kgo.OnPartitionsRevoked(func(_ context.Context, _ *kgo.Client, revoked map[string][]int32) {
 			s.logger.Info("partitions revoked", "partitions", revoked[bus.TopicRaw])
+			// A cooperative rebalance calls this with nothing revoked, and
+			// the session then still commits.
+			if len(revoked) > 0 {
+				s.rebalanced.Store(true)
+			}
+		}),
+		kgo.OnPartitionsLost(func(_ context.Context, _ *kgo.Client, lost map[string][]int32) {
+			s.logger.Info("partitions lost", "partitions", lost[bus.TopicRaw])
+			s.rebalanced.Store(true)
 		}),
 	}
 	return append(opts, s.extra...)
@@ -420,8 +453,8 @@ func isFatalFetchError(err error) bool {
 }
 
 // runBatch handles one polled batch in one transaction. It returns an error
-// only when the service must stop. A transaction aborted by a rebalance is
-// not an error.
+// only when the service must stop. A transaction that End aborts without an
+// error, by a rebalance or for another reason, is not an error.
 func (s *Service) runBatch(ctx context.Context, sess *kgo.GroupTransactSession, records []*kgo.Record) error {
 	s.metrics.batchRecords.Observe(float64(len(records)))
 	start := time.Now()
@@ -453,9 +486,21 @@ func (s *Service) runBatch(ctx context.Context, sess *kgo.GroupTransactSession, 
 	defer cancelEnd()
 	committed, endErr := sess.End(endCtx, kgo.TransactionEndTry(workErr == nil))
 	s.metrics.txnSeconds.Observe(time.Since(start).Seconds())
+	// Read and cleared after End: the session resets its own rebalance
+	// state only when End returns, so a revoke between the poll and Begin
+	// also aborts this transaction.
+	rebalanced := s.rebalanced.Swap(false)
 
 	if !committed {
 		s.metrics.transactions.WithLabelValues(resultAborted).Inc()
+		reason := abortOther
+		switch {
+		case workErr != nil || endErr != nil:
+			reason = abortError
+		case rebalanced:
+			reason = abortRebalance
+		}
+		s.metrics.aborts.WithLabelValues(reason).Inc()
 	}
 	switch {
 	case workErr != nil && endErr != nil:
@@ -464,8 +509,14 @@ func (s *Service) runBatch(ctx context.Context, sess *kgo.GroupTransactSession, 
 		return fmt.Errorf("batch of %d records aborted: %w", len(records), workErr)
 	case endErr != nil:
 		return fmt.Errorf("end transaction of %d records: %w", len(records), endErr)
+	case !committed && rebalanced:
+		s.logger.Info("transaction aborted by a rebalance, the batch is read again",
+			"records", len(records), "outputs", stats.outputs())
+		return nil
 	case !committed:
-		s.logger.Info("transaction aborted by a rebalance, the batch is read again", "records", len(records))
+		// See "Aborts without a rebalance" in the Service documentation.
+		s.logger.Info("transaction not committed and no rebalance seen, the batch is read again",
+			"records", len(records), "outputs", stats.outputs())
 		return nil
 	}
 
