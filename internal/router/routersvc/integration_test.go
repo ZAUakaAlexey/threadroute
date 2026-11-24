@@ -104,9 +104,7 @@ func testCatchUp(t *testing.T, h *harness) {
 	// After the catch-up the open conversation gets an offer.
 	rd := sc.reader()
 	rd.waitEvent(open.key(), "offer after the catch-up", func(ev event.Routing) bool { return ev.Type == event.TypeOffered })
-	if got := types(rd.events(open.key())); got != "queued(catch_up),offered" {
-		t.Errorf("open conversation events %s", got)
-	}
+	checkCatchUpEvents(t, rd.events(open.key()))
 	if evs := rd.events(done.key()); len(evs) != 0 {
 		t.Errorf("closed conversation events %s, want none", types(evs))
 	}
@@ -116,6 +114,39 @@ func testCatchUp(t *testing.T, h *harness) {
 	ev := rd.waitEvent(live.key(), "queued", func(ev event.Routing) bool { return ev.Type == event.TypeQueued })
 	if ev.QueueReason != event.QueueNew {
 		t.Errorf("live conversation queued with %q", ev.QueueReason)
+	}
+}
+
+// checkCatchUpEvents checks the events of the open conversation in
+// testCatchUp. No operator accepts there, so the offer expires after one
+// second and is made again. A slow machine reads the topic later and sees
+// more of these cycles. So the list must start with queued(catch_up) and
+// offered, and after that only full or partial cycles of offer_expired,
+// queued(offer_expired) and offered may follow. Sequence numbers go from 1
+// without a gap.
+func checkCatchUpEvents(t *testing.T, evs []event.Routing) {
+	t.Helper()
+	got := types(evs)
+	if len(evs) < 2 || evs[0].Type != event.TypeQueued || evs[0].QueueReason != event.QueueCatchUp ||
+		evs[1].Type != event.TypeOffered {
+		t.Errorf("open conversation events %s, want queued(catch_up),offered first", got)
+		return
+	}
+	cycle := []string{
+		string(event.TypeOfferExpired),
+		string(event.TypeQueued) + "(" + string(event.QueueOfferExpired) + ")",
+		string(event.TypeOffered),
+	}
+	for i, ev := range evs {
+		if ev.Seq != uint64(i+1) {
+			t.Errorf("open conversation event %d has seq %d; events %s", i, ev.Seq, got)
+		}
+		if i < 2 {
+			continue
+		}
+		if want := cycle[(i-2)%len(cycle)]; types([]event.Routing{ev}) != want {
+			t.Errorf("open conversation event %d is %s, want %s; events %s", i, types([]event.Routing{ev}), want, got)
+		}
 	}
 }
 
