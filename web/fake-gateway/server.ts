@@ -19,6 +19,7 @@ import type {
   TeamRow,
   View,
 } from '../src/protocol/types.ts';
+import { CHANGE_INTERVAL_MS, FORCED_ANSWERS, Stand, sameSettings, withFields, type ForcedAnswer, type StandMode } from './stand.ts';
 import { PSEUDONYM_RE, pseudonym } from './synthetic.ts';
 import { World, type Conversation, type WorldEvent, type WorldOptions } from './world.ts';
 
@@ -32,6 +33,8 @@ export interface FakeGatewayOptions extends WorldOptions {
    * in several frames: the first is the snapshot, the rest are updates.
    */
   readonly snapshotFrameRows?: number;
+  /** Machine time between two trend points, default 10 s like the real gateway. */
+  readonly trendIntervalMs?: number;
   readonly log?: (line: string) => void;
 }
 
@@ -41,6 +44,7 @@ const OFFLINE_GRACE_MS = 15_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const MAX_WATCHED = 4;
 const DEFAULT_SNAPSHOT_FRAME_ROWS = 500;
+const DEFAULT_TREND_INTERVAL_MS = 10_000;
 /** The fixed texts of the real gateway (internal/gateway/client.go). */
 const STALE_OWNER_TEXT = 'the operator moved to another connection';
 const STALE_DATA_TEXT = 'the gateway data is stale';
@@ -62,10 +66,13 @@ interface Connection {
   tokens: number;
   lastRefillMs: number;
   helloTimer: ReturnType<typeof setTimeout> | undefined;
+  /** The right to change stand settings, decided at hello. */
+  mayChange: boolean;
 }
 
 export interface FakeGateway {
   readonly world: World;
+  readonly stand: Stand;
   readonly server: Server;
   readonly url: string;
   close(): Promise<void>;
@@ -74,7 +81,9 @@ export interface FakeGateway {
 export async function startFakeGateway(options: FakeGatewayOptions): Promise<FakeGateway> {
   const log = options.log ?? (() => undefined);
   const nowUs = () => Date.now() * 1000;
+  const trendIntervalMs = options.trendIntervalMs ?? DEFAULT_TREND_INTERVAL_MS;
   let world = new World(options, nowUs());
+  let stand = newStand(world, 'normal');
   const connections = new Set<Connection>();
   const resumeTokens = new Map<string, string>();
   const graceTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -100,6 +109,45 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
     world.step(nowUs());
     for (const conn of connections) sendState(conn, false);
   }, options.tickMs ?? 250);
+  const trendTicker = setInterval(sendTrendPoint, trendIntervalMs);
+
+  function newStand(w: World, mode: StandMode): Stand {
+    const now = nowUs();
+    const next = new Stand({ simOperators: w.simCount(), mode }, now);
+    const count = Math.ceil(3_600_000 / trendIntervalMs) - 1;
+    next.trend = w.trendHistory(next.current, count, trendIntervalMs, now);
+    return next;
+  }
+
+  /** One new trend point, to the supervisor connections. */
+  function sendTrendPoint(): void {
+    const point = world.trendPoint(stand.current, nowUs());
+    stand.addTrendPoint(point, trendIntervalMs);
+    if (stand.mode === 'old') return;
+    for (const conn of connections) {
+      if (conn.view === 'supervisor' && conn.ws.readyState === conn.ws.OPEN) send(conn, { type: 'trend', point });
+    }
+  }
+
+  /** The new settings block, to every connection, with its own right. */
+  function broadcastSettings(): void {
+    if (stand.mode === 'old') return;
+    for (const conn of connections) {
+      if (conn.view !== undefined && conn.ws.readyState === conn.ws.OPEN) send(conn, { type: 'settings', settings: stand.block(conn.mayChange) });
+    }
+  }
+
+  /** A change made by someone else, as another console would make it. */
+  function changeByOther(fields: Readonly<Record<string, number>>): boolean {
+    const next = withFields(stand.current, fields);
+    if (stand.check(next).length > 0 || sameSettings(next, stand.current)) return false;
+    const previous = stand.current;
+    stand.record(next, 'another-user', nowUs());
+    stand.lastChangeAtMs = Date.now();
+    world.applyStand(next, previous, nowUs());
+    broadcastSettings();
+    return true;
+  }
 
   // ------------------------------------------------------------ send
 
@@ -262,6 +310,7 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       tokens: 10,
       lastRefillMs: Date.now(),
       helloTimer: setTimeout(() => ws.close(4408, 'hello_timeout'), HELLO_TIMEOUT_MS),
+      mayChange: false,
     };
     connections.add(conn);
     ws.on('message', (data, isBinary) => handleFrame(conn, data, isBinary));
@@ -295,11 +344,17 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       conn.ws.close(4400, 'bad_message');
       return;
     }
+    // A gateway before decision 0014 does not know this message type.
+    if (message.type === 'change_settings' && stand.mode === 'old') {
+      conn.ws.close(4400, 'bad_message');
+      return;
+    }
     if (!takeToken(conn)) {
       send(conn, { type: 'result', request_id: message.request_id, outcome: 'rejected', code: 'rate_limited', message: 'more than 5 requests per second' });
       return;
     }
     if (message.type === 'action') handleAction(conn, message);
+    else if (message.type === 'change_settings') handleChangeSettings(conn, message);
     else handleWatch(conn, message.type, message.request_id, message.conversation_id);
   }
 
@@ -334,6 +389,8 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       }
     }
     conn.view = hello.view;
+    conn.mayChange = stand.mayChange;
+    const hasSettings = stand.mode !== 'old';
     send(conn, {
       type: 'welcome',
       version: 1,
@@ -347,6 +404,8 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       first_response_target_us: world.firstResponseTargetUs,
       tick_ms: options.tickMs ?? 250,
       limits: { max_message_bytes: 4096, actions_per_second: 5, action_burst: 10, max_watched: MAX_WATCHED },
+      ...(hasSettings ? { settings: stand.block(conn.mayChange) } : {}),
+      ...(hasSettings && hello.view === 'supervisor' ? { trend: { interval_ms: trendIntervalMs, points: stand.trend } } : {}),
     });
     send(conn, statusMessage());
     sendState(conn, true);
@@ -375,6 +434,51 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
     }
     result(world.action(conn.operatorId, action.action, action.offer_id, action.request_id, nowUs()));
     // Show the new state at once instead of waiting for the next tick.
+    for (const c of connections) sendState(c, false);
+  }
+
+  function handleChangeSettings(conn: Connection, change: Extract<ClientMessage, { type: 'change_settings' }>): void {
+    const id = change.request_id;
+    const forced = stand.forced;
+    stand.forced = null;
+    if (forced !== null && forced !== 'conflict') {
+      send(conn, forcedResult(id, forced));
+      return;
+    }
+    if (!conn.mayChange) {
+      send(conn, rejected(id, 'not_allowed', 'change_settings: this connection may not change settings'));
+      return;
+    }
+    if (forced === 'conflict') {
+      // Someone else was first: a change by another user, then the conflict.
+      const teams = stand.current.teams;
+      changeByOther({ 'teams.max_size': teams.max_size > teams.min_size ? teams.max_size - 1 : teams.max_size + 1 });
+    }
+    const fields = stand.check(change.settings);
+    if (fields.length > 0) {
+      send(conn, { type: 'result', request_id: id, outcome: 'rejected', code: 'invalid_request', message: 'the settings are not valid', fields });
+      return;
+    }
+    if (change.base_version !== stand.version) {
+      send(conn, rejected(id, 'settings_conflict', `base version ${change.base_version} is not the current version ${stand.version}`));
+      return;
+    }
+    if (sameSettings(change.settings, stand.current)) {
+      send(conn, { type: 'result', request_id: id, outcome: 'already_done' });
+      return;
+    }
+    const waitMs = stand.lastChangeAtMs + CHANGE_INTERVAL_MS - Date.now();
+    if (waitMs > 0) {
+      send(conn, { type: 'result', request_id: id, outcome: 'rejected', code: 'settings_too_soon', message: 'one change per 10 seconds', retry_after_ms: Math.min(CHANGE_INTERVAL_MS, Math.ceil(waitMs)) });
+      return;
+    }
+    const previous = stand.current;
+    stand.record(change.settings, conn.level === 'full' ? 'synth-user-1' : 'guest', nowUs());
+    stand.lastChangeAtMs = Date.now();
+    world.applyStand(change.settings, previous, nowUs());
+    // The new set reaches every connection before the result.
+    broadcastSettings();
+    send(conn, { type: 'result', request_id: id, outcome: 'done' });
     for (const c of connections) sendState(c, false);
   }
 
@@ -464,8 +568,40 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
         unsubscribe();
         world = new World({ ...options, seed: typeof body.seed === 'number' ? body.seed : options.seed }, now);
         unsubscribe = world.on(handleWorldEvent);
+        stand = newStand(world, 'normal');
         return { ok: true };
       }
+      case 'settings-mode': {
+        // For new connections: "old" is a gateway before decision 0014,
+        // "no_sim" a stand where no simulator reported yet.
+        const mode = body.mode === 'old' || body.mode === 'no_sim' ? body.mode : 'normal';
+        const mayChange = stand.mayChange;
+        stand = newStand(world, mode);
+        stand.mayChange = mayChange;
+        return { ok: true, mode };
+      }
+      case 'settings-right':
+        // The right of new connections to change settings.
+        stand.mayChange = body.may_change === true;
+        return { ok: true };
+      case 'settings-answer': {
+        // The next change_settings gets this answer.
+        const answer = FORCED_ANSWERS.find((a) => a === body.answer);
+        stand.forced = answer ?? null;
+        return { ok: answer !== undefined };
+      }
+      case 'settings-change': {
+        // A change by another user, pushed to every connection.
+        const fields = typeof body.fields === 'object' && body.fields !== null ? (body.fields as Record<string, number>) : {};
+        return { ok: changeByOther(fields), version: stand.version };
+      }
+      case 'settings-ready':
+        // Forget the time of the last change, so the next one is not too soon.
+        stand.lastChangeAtMs = -Infinity;
+        return { ok: true };
+      case 'trend-point':
+        sendTrendPoint();
+        return { ok: true, points: stand.trend.length };
       case 'offer': {
         const op = human();
         const conv = op === undefined ? undefined : world.offerToHuman(op, now);
@@ -530,10 +666,14 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
     get world() {
       return world;
     },
+    get stand() {
+      return stand;
+    },
     server,
     url: `http://${options.host ?? '127.0.0.1'}:${port}`,
     close: async () => {
       clearInterval(ticker);
+      clearInterval(trendTicker);
       for (const timer of graceTimers.values()) clearTimeout(timer);
       for (const conn of connections) conn.ws.terminate();
       wss.close();
@@ -572,6 +712,19 @@ function resultMessage(requestId: string, outcome: ReturnType<World['action']>):
   return outcome.outcome === 'rejected'
     ? { type: 'result', request_id: requestId, outcome: 'rejected', code: outcome.code, message: outcome.message }
     : { type: 'result', request_id: requestId, outcome: outcome.outcome };
+}
+
+function forcedResult(requestId: string, answer: Exclude<ForcedAnswer, 'conflict'>): ServerMessage {
+  switch (answer) {
+    case 'too_soon':
+      return { type: 'result', request_id: requestId, outcome: 'rejected', code: 'settings_too_soon', message: 'one change per 10 seconds', retry_after_ms: 3000 };
+    case 'off':
+      return rejected(requestId, 'settings_off', 'this stand has no stand settings');
+    case 'unavailable':
+      return rejected(requestId, 'unavailable', 'the router did not answer');
+    case 'not_allowed':
+      return rejected(requestId, 'not_allowed', 'change_settings: this connection may not change settings');
+  }
 }
 
 function rejected(requestId: string, code: string, message: string): ServerMessage {

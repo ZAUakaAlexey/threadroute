@@ -10,7 +10,9 @@ import { Meter, Stat, StatGrid, StateBar } from '../../ui/stats.tsx';
 import { ConversationsPanel } from './conversations-panel.tsx';
 import { OperatorsPanel } from './operators-panel.tsx';
 import { QueuesPanel } from './queues-panel.tsx';
+import { SettingsPanel } from './settings/settings-panel.tsx';
 import { TeamsPanel } from './teams-panel.tsx';
+import { TrendStrip } from './trend/trend-strip.tsx';
 
 export function SupervisorScreen() {
   return (
@@ -29,6 +31,9 @@ export function SupervisorBoard() {
       <ConnectionBanner />
       <NoticeLine />
       <FlowPanel />
+      {/* Both render nothing for a gateway without stand settings and trends. */}
+      <TrendStrip />
+      <SettingsPanel />
       <div className="grid items-start gap-4 xl:grid-cols-[3fr_2fr]">
         <QueuesPanel />
         <TeamsPanel />

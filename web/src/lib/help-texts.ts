@@ -13,6 +13,8 @@
 // words below while the settings are not known (the public page never has
 // them, so its texts use no placeholders).
 
+import type { TeamSettings } from '../protocol/types.ts';
+
 const TEXTS = {
   // Screen descriptions, shown under the screen title.
   'public.description':
@@ -82,9 +84,51 @@ const TEXTS = {
 
   // Supervisor screen: dedicated teams.
   'supervisor.panel.teams':
-    'A dedicated team is a group of operators taken from the shared pool to serve one busy company only. By default a team forms at 20 active conversations of the company, is released after 15 minutes below 8, and has 2 to 20 operators, sized by the load.',
+    'A dedicated team is a group of operators taken from the shared pool to serve one busy company only. {teamRulesWhen} a team forms at {teamFormLoad} active conversations of the company, is released after {teamReleaseAfter} below {teamReleaseLoad}, and has {teamMinSize} to {teamMaxSize} operators, sized by the load.',
   'supervisor.teams.pool':
-    'By default, operators join teams only while all teams together hold less than half of the online operators, so the shared pool keeps the rest. When no team member with the language has a free slot, an operator of the shared pool may take the conversation. Active conversations: those of the company that wait or that an operator holds, counted when the team last changed.',
+    '{teamRulesWhen}, operators join teams only while all teams together hold less than {teamMaxShare} of the online operators, so the shared pool keeps the rest. When no team member with the language has a free slot, an operator of the shared pool may take the conversation. Active conversations: those of the company that wait or that an operator holds, counted when the team last changed.',
+
+  // Supervisor screen: trends of the last hour.
+  'supervisor.panel.trend':
+    'How the stand changed in the last hour. The gateway takes a point every few seconds and keeps the hour in its memory, so a restart of the gateway starts the history again.',
+  'supervisor.trend.waiting': 'Conversations in a queue that have no offer yet, like Waiting in the totals above.',
+  'supervisor.trend.longest':
+    'How long the conversation that has waited longest, waiting or offered, has been in its queue, in model time. 0 means that none waits.',
+  'supervisor.trend.resolved':
+    'Conversations that operators resolved in the 60 seconds before the point. While this stays below the number of new conversations, the queue grows.',
+  'supervisor.trend.teams': 'Dedicated teams at the time of the point.',
+  'supervisor.trend.in-teams': 'Operators who were members of a dedicated team. The share of operators in teams sets the upper limit of this number.',
+  'supervisor.trend.online': 'Online operators, simulated and human together.',
+  'supervisor.trend.marks':
+    'Each numbered line on the charts is a change of the stand settings, listed here with its time. Many settings act gradually, so the effect may show only some minutes later.',
+
+  // Supervisor screen: stand settings.
+  'supervisor.panel.settings':
+    'Numbers of the stand that can change while it runs: the simulated operators and the rules for dedicated teams. Every change applies to the whole stand and is listed under Last changes. The gateway checks each change against the same limits as at start.',
+  'supervisor.settings.sim-operators':
+    'How many simulated operators the simulator runs. With fewer, the operators with the highest numbers go offline and their conversations go back to the queue. With more, operators that were put aside come back first, then new ones start.',
+  'supervisor.settings.sim-capacity':
+    'How many conversations one simulated operator may hold at once. This is the strongest lever: while more conversations arrive than the operators can resolve, the queue grows whatever the team rules are. An operator who holds more than a new, lower capacity keeps them and gets no offer until the load is below it.',
+  'supervisor.settings.sim-handling':
+    'The median time a simulated operator needs from accept to the reply marker, in model time. It applies to conversations accepted after the change; steps that are already planned keep their time.',
+  'supervisor.settings.sim-resolve':
+    'The median time from the reply marker to resolve, in model time. It applies to conversations replied to after the change.',
+  'supervisor.settings.sim-missed':
+    'The share of offers that simulated operators leave to time out, so the conversation goes back to its queue. It applies to the next offers at once.',
+  'supervisor.settings.teams-form-load':
+    'A company gets a dedicated team when this many of its conversations wait or are held by an operator. The router checks the teams every few seconds, so a change shows at the next check.',
+  'supervisor.settings.teams-release-load':
+    'A team is released when the load of its company stays below this number for the release time. It must be below the load that forms a team.',
+  'supervisor.settings.teams-release-after':
+    'How long the load of a company must stay below the release load before its team is released. A shorter time frees operators sooner, but a team may then form again soon.',
+  'supervisor.settings.teams-min-size':
+    'A team gets operators by the load of its company, from the min size up to the max size. The router adds or removes members at its next team check, a few seconds later. The min size may not be above the max size.',
+  'supervisor.settings.teams-max-size':
+    'The most operators one dedicated team may hold. The router adds or removes members at its next team check, a few seconds later, so the change acts within a minute.',
+  'supervisor.settings.teams-max-share':
+    'The share of the online operators that all teams together may hold; 100% turns the limit off. A higher share lets teams grow at the next team check. A lower one stops their growth, and they shrink only as members leave, so it acts gradually.',
+  'supervisor.settings.changes':
+    'The newest changes of the stand settings, newest first, with the old and the new value of each field. A first value without an old one comes from the simulator when it starts.',
 
   // Supervisor screen: operators.
   'supervisor.panel.operators':
@@ -175,15 +219,36 @@ export interface HelpValues {
   readonly firstResponseTarget?: string;
   readonly speedFactor?: string;
   readonly capacity?: string;
+  /** "By default" without stand settings, "On this stand now" with them. */
+  readonly teamRulesWhen?: string;
+  readonly teamFormLoad?: string;
+  readonly teamReleaseLoad?: string;
+  readonly teamReleaseAfter?: string;
+  readonly teamMinSize?: string;
+  readonly teamMaxSize?: string;
+  readonly teamMaxShare?: string;
 }
 
+// The team fallbacks are the starting values of the router, as the texts
+// said before stand settings existed. A gateway with stand settings
+// replaces them with the values in use (live/help-values.tsx).
 const FALLBACKS: Readonly<Record<keyof HelpValues, string>> = {
   acceptTimeout: 'a short time set by the router',
   assignmentTarget: 'the time set by the router',
   firstResponseTarget: 'the time set by the router',
   speedFactor: 'several',
   capacity: 'a fixed number of',
+  teamRulesWhen: 'By default',
+  teamFormLoad: '20',
+  teamReleaseLoad: '8',
+  teamReleaseAfter: '15 minutes',
+  teamMinSize: '2',
+  teamMaxSize: '20',
+  teamMaxShare: 'half',
 };
+
+/** The words of the team rules when the gateway sent the values in use. */
+export const TEAM_RULES_NOW = 'On this stand now';
 
 export const HELP_PLACEHOLDERS = Object.keys(FALLBACKS) as readonly (keyof HelpValues)[];
 
@@ -203,4 +268,17 @@ export function helpDuration(us: number): string {
   const seconds = Math.round(us / 1_000_000);
   if (seconds >= 600 && seconds % 60 === 0) return `${seconds / 60} minutes`;
   return seconds === 1 ? '1 second' : `${seconds} seconds`;
+}
+
+/** The team values that the team texts name, from the stand settings in use. */
+export function teamHelpValues(teams: TeamSettings): HelpValues {
+  return {
+    teamRulesWhen: TEAM_RULES_NOW,
+    teamFormLoad: String(teams.form_load),
+    teamReleaseLoad: String(teams.release_load),
+    teamReleaseAfter: helpDuration(teams.release_after_us),
+    teamMinSize: String(teams.min_size),
+    teamMaxSize: String(teams.max_size),
+    teamMaxShare: `${Number((teams.max_share * 100).toFixed(2))} percent`,
+  };
 }

@@ -36,7 +36,8 @@ export default defineConfig({
       url: `http://127.0.0.1:${webPort}/`,
       reuseExistingServer: false,
       timeout: 120_000,
-      env: { WEB_PORT: webPort, FAKE_GATEWAY_PORT: gatewayPort, VITE_SITE_TOKEN_KEY: SITE_TOKEN_KEY, CONSOLE_BASE: './' },
+      // Its own output folder: dist may be served by a preview that someone uses.
+      env: { WEB_PORT: webPort, FAKE_GATEWAY_PORT: gatewayPort, VITE_SITE_TOKEN_KEY: SITE_TOKEN_KEY, CONSOLE_BASE: './', CONSOLE_OUT_DIR: 'dist-e2e' },
     },
   ],
 });

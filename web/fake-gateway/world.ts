@@ -11,6 +11,8 @@ import type {
   Presence,
   PublicSnapshot,
   QueueRow,
+  StandSettings,
+  TrendPoint,
   RemoveReason,
   StaleReason,
   TeamRow,
@@ -70,7 +72,7 @@ export interface Operator {
   readonly id: string;
   readonly kind: 'human' | 'simulated';
   languages: string[];
-  readonly capacity: number;
+  capacity: number;
   presence: Presence;
   team: string | undefined;
 }
@@ -100,6 +102,8 @@ const HOUR_US = 3_600_000_000;
 const SIM_OPERATORS = 24;
 const COMPANIES = 9;
 const SCENARIO_CYCLE_US = 120_000_000;
+/** Model seconds of the trend model per trend point. */
+const FLOW_STEP_S = 20;
 
 export class World {
   readonly speedFactor: number;
@@ -124,6 +128,14 @@ export class World {
   private readonly waits: { readonly atUs: number; readonly waitUs: number }[] = [];
   private nextHumanOfferAtUs = 0;
   private readonly extraLanguages: string[] = [];
+  /** Simulated operators put aside because the stand settings ask for fewer. */
+  private readonly parked = new Set<string>();
+  /**
+   * Set when a change moved the share of operators in teams: teams then
+   * shrink to it, or grow to it, one member per trend point.
+   */
+  private teamShare: { readonly share: number; readonly maxSize: number } | null = null;
+  private readonly flow = { waiting: 0, served: 0, step: 0 };
 
   constructor(options: WorldOptions, nowUs: number) {
     this.speedFactor = options.speedFactor;
@@ -531,6 +543,158 @@ export class World {
         this.setStale({ stale: false });
         break;
     }
+  }
+
+  // ------------------------------------------------------------ stand settings
+
+  simCount(): number {
+    return [...this.operators.values()].filter((o) => o.kind === 'simulated' && !this.parked.has(o.id)).length;
+  }
+
+  /**
+   * Applies stand settings to the world, step by step like the simulator
+   * of decision 0014: fewer operators go offline from the highest number,
+   * more come back or are created; a new capacity applies to every
+   * simulated operator; a lower team share makes teams shrink one member per
+   * trend point. No random numbers, so a seeded world stays the same.
+   */
+  applyStand(settings: StandSettings, previous: StandSettings, nowUs: number): void {
+    const sim = settings.sim;
+    if (sim !== undefined) {
+      this.setSimCount(sim.operators, sim.capacity, nowUs);
+      if (sim.capacity !== previous.sim?.capacity) {
+        for (const op of this.operators.values()) if (op.kind === 'simulated') op.capacity = sim.capacity;
+      }
+    }
+    const { max_share: share, max_size: maxSize } = settings.teams;
+    if (share !== previous.teams.max_share) this.teamShare = { share, maxSize };
+    // Team sizes act at the next team check of the router: at once here.
+    for (const team of [...this.teams.values()]) {
+      while (team.members.length > maxSize) {
+        const op = this.operators.get(team.members.at(-1) ?? '');
+        if (op === undefined) team.members.pop();
+        else this.leaveTeam(op);
+      }
+    }
+  }
+
+  private setSimCount(target: number, capacity: number, nowUs: number): void {
+    const sims = [...this.operators.values()].filter((o) => o.kind === 'simulated').sort((a, b) => a.id.localeCompare(b.id));
+    const active = sims.filter((o) => !this.parked.has(o.id));
+    for (const op of active.slice(target).reverse()) {
+      this.setPresence(op.id, 'offline', nowUs);
+      this.leaveTeam(op);
+      this.parked.add(op.id);
+    }
+    let missing = target - active.length;
+    for (const op of sims.filter((o) => this.parked.has(o.id))) {
+      if (missing <= 0) break;
+      this.parked.delete(op.id);
+      this.setPresence(op.id, 'online', nowUs);
+      missing -= 1;
+    }
+    for (let n = sims.length + 1; missing > 0; n += 1, missing -= 1) {
+      const id = `sim-op-${n.toString().padStart(4, '0')}`;
+      const langs = new Set(['und', LANGUAGES[n % LANGUAGES.length] ?? 'en']);
+      this.operators.set(id, { id, kind: 'simulated', languages: [...langs].sort(), capacity, presence: 'online', team: undefined });
+    }
+  }
+
+  private leaveTeam(op: Operator): void {
+    if (op.team === undefined) return;
+    const team = this.teams.get(op.team);
+    op.team = undefined;
+    if (team === undefined) return;
+    team.members.splice(team.members.indexOf(op.id), 1);
+    if (team.members.length === 0) this.teams.delete(team.company);
+  }
+
+  /**
+   * One step toward the team share: a member leaves the largest team while
+   * teams hold more than the share allows, or a free simulated operator
+   * joins the smallest team while they hold less.
+   */
+  private moveTeamsToShare(): void {
+    if (this.teamShare === null) return;
+    const ops = [...this.operators.values()];
+    const limit = Math.floor(this.teamShare.share * ops.filter((o) => o.presence === 'online').length);
+    const teams = [...this.teams.values()].sort((a, b) => b.members.length - a.members.length || a.company.localeCompare(b.company));
+    const inTeams = teams.reduce((sum, t) => sum + t.members.length, 0);
+    if (inTeams > limit) {
+      const op = this.operators.get(teams[0]?.members.at(-1) ?? '');
+      if (op !== undefined) this.leaveTeam(op);
+      else teams[0]?.members.pop();
+      return;
+    }
+    const smallest = teams.filter((t) => t.members.length < (this.teamShare?.maxSize ?? 0)).at(-1);
+    const free = ops.find((o) => o.kind === 'simulated' && o.presence === 'online' && o.team === undefined && !this.parked.has(o.id));
+    if (inTeams >= limit || smallest === undefined || free === undefined) {
+      this.teamShare = null;
+      return;
+    }
+    smallest.members.push(free.id);
+    free.team = smallest.company;
+  }
+
+  /**
+   * One trend point. Teams and operators are the world's own counts; the
+   * flow numbers come from a small queue model driven by the stand
+   * settings, so a change of operators or capacity shows on the strip even
+   * in the manual mode of the tests, where no conversation moves. Each
+   * point moves the model by FLOW_STEP_S seconds of model time.
+   */
+  trendPoint(settings: StandSettings, nowUs: number): TrendPoint {
+    this.moveTeamsToShare();
+    const point = this.flowPoint(settings, this.flow.step, this.flow);
+    this.flow.step += 1;
+    return { ...point, sampled_at_us: Math.round(nowUs), ...this.teamCounts() };
+  }
+
+  /** History for a new gateway: count points of the same model, ending before nowUs. */
+  trendHistory(settings: StandSettings, count: number, intervalMs: number, nowUs: number): TrendPoint[] {
+    const state = { waiting: 0, served: 0 };
+    const counts = this.teamCounts();
+    const points: TrendPoint[] = [];
+    for (let i = -count; i < 0; i += 1) {
+      points.push({ ...this.flowPoint(settings, i, state), sampled_at_us: Math.round(nowUs + i * intervalMs * 1000), ...counts });
+    }
+    this.flow.waiting = state.waiting;
+    this.flow.served = state.served;
+    this.flow.step = 0;
+    return points;
+  }
+
+  private teamCounts(): Pick<TrendPoint, 'teams' | 'operators_in_teams' | 'operators_online'> {
+    return {
+      teams: this.teams.size,
+      operators_in_teams: [...this.teams.values()].reduce((sum, t) => sum + t.members.length, 0),
+      operators_online: [...this.operators.values()].filter((o) => o.presence === 'online').length,
+    };
+  }
+
+  private flowPoint(
+    settings: StandSettings,
+    step: number,
+    state: { waiting: number; served: number },
+  ): Omit<TrendPoint, 'sampled_at_us' | 'teams' | 'operators_in_teams' | 'operators_online'> {
+    const sim = settings.sim;
+    const online = [...this.operators.values()].filter((o) => o.kind === 'simulated' && o.presence === 'online').length;
+    const capacity = sim?.capacity ?? 4;
+    const holdS = sim === undefined ? 225 : (sim.handling_median_us + sim.resolve_median_us) / 1_000_000;
+    // Conversations the operators can finish per minute, and a demand that
+    // waves around the capacity of the starting world (21 online, capacity 4).
+    const servePerMin = (online * capacity * 60) / holdS;
+    const demandPerMin = 23 * (1 + 0.25 * Math.sin((2 * Math.PI * step) / 90));
+    const dtMin = FLOW_STEP_S / 60;
+    const served = Math.min(servePerMin * dtMin, state.waiting + demandPerMin * dtMin);
+    state.waiting = Math.max(0, state.waiting + demandPerMin * dtMin - served);
+    state.served = served / dtMin;
+    const resolved = Math.round(state.served);
+    return {
+      waiting: Math.round(state.waiting),
+      longest_wait_us: resolved === 0 ? 0 : Math.round(((state.waiting / Math.max(1, state.served)) * 60 + 5) * 1_000_000),
+      resolved_last_minute: resolved,
+    };
   }
 
   // ------------------------------------------------------------ views

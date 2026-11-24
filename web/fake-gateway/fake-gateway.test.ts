@@ -281,3 +281,115 @@ describe('fake gateway scenario', () => {
     expect(seen).toEqual([false, true, false]);
   });
 });
+
+describe('fake gateway, stand settings (decision 0014)', () => {
+  const control = (name: string, body: unknown = {}) => fetch(`${gateway.url}/__control/${name}`, { method: 'POST', body: JSON.stringify(body) });
+
+  async function supervisor() {
+    const peer = await connect({ view: 'supervisor' });
+    const welcome = await peer.next(isType('welcome'));
+    if (welcome.type !== 'welcome' || welcome.settings === undefined) throw new Error('no settings in the welcome');
+    return { peer, welcome, settings: welcome.settings };
+  }
+
+  it('sends settings with bounds from the Go example and a trend history', async () => {
+    const { peer, welcome, settings } = await supervisor();
+    expect(settings.bounds.teams.form_load).toMatchObject({ min: 2, max: 500, integer: true });
+    expect(settings.may_change).toBe(true);
+    expect(welcome.trend?.interval_ms).toBe(10_000);
+    expect(welcome.trend?.points.length).toBeGreaterThan(300);
+    peer.close();
+  });
+
+  it('applies a change: the settings message reaches every connection before the result', async () => {
+    const { peer, settings } = await supervisor();
+    const other = await connect({ view: 'operator', languages: ['en'] });
+    await other.next(isType('welcome'));
+    const teams = { ...settings.current.teams, max_share: 0.3 };
+    peer.send({ type: 'change_settings', request_id: 's1', base_version: settings.version, settings: { ...settings.current, teams } });
+    const pushed = await peer.next(isType('settings'));
+    expect(pushed.type === 'settings' && pushed.settings.version).toBe(settings.version + 1);
+    expect(await peer.next(isResult('s1'))).toMatchObject({ outcome: 'done' });
+    const seen = peer.frames.map((f) => JSON.parse(f) as { type: string; request_id?: string });
+    expect(seen.findIndex((m) => m.type === 'settings')).toBeLessThan(seen.findIndex((m) => m.request_id === 's1'));
+    expect(await other.next(isType('settings'))).toMatchObject({ settings: { current: { teams: { max_share: 0.3 } } } });
+
+    // The same set again is already done; a second change within 10 s is too soon.
+    peer.send({ type: 'change_settings', request_id: 's2', base_version: settings.version + 1, settings: { ...settings.current, teams } });
+    expect(await peer.next(isResult('s2'))).toMatchObject({ outcome: 'already_done' });
+    peer.send({ type: 'change_settings', request_id: 's3', base_version: settings.version + 1, settings: { ...settings.current, teams: { ...teams, max_share: 0.4 } } });
+    const tooSoon = await peer.next(isResult('s3'));
+    expect(tooSoon).toMatchObject({ code: 'settings_too_soon' });
+    expect(tooSoon.type === 'result' && (tooSoon.retry_after_ms ?? 0) > 0).toBe(true);
+    peer.close();
+    other.close();
+  });
+
+  it('answers invalid values with fields, an old base with a conflict, and no right with not_allowed', async () => {
+    const { peer, settings } = await supervisor();
+    peer.send({ type: 'change_settings', request_id: 'i1', base_version: settings.version, settings: { ...settings.current, teams: { ...settings.current.teams, release_load: 900 } } });
+    expect(await peer.next(isResult('i1'))).toMatchObject({ code: 'invalid_request', fields: [{ field: 'teams.release_load', reason: '900 is not between 1 and 499' }] });
+    peer.send({ type: 'change_settings', request_id: 'i2', base_version: settings.version - 1, settings: { ...settings.current, teams: { ...settings.current.teams, max_size: 19 } } });
+    expect(await peer.next(isResult('i2'))).toMatchObject({ code: 'settings_conflict' });
+    await control('settings-answer', { answer: 'off' });
+    peer.send({ type: 'change_settings', request_id: 'i3', base_version: settings.version, settings: settings.current });
+    expect(await peer.next(isResult('i3'))).toMatchObject({ code: 'settings_off' });
+    peer.close();
+
+    await control('settings-right', { may_change: false });
+    const reader = await supervisor();
+    expect(reader.settings.may_change).toBe(false);
+    expect(reader.settings.changes.every((c) => c.by === undefined)).toBe(true);
+    reader.peer.send({ type: 'change_settings', request_id: 'i4', base_version: reader.settings.version, settings: reader.settings.current });
+    expect(await reader.peer.next(isResult('i4'))).toMatchObject({ code: 'not_allowed' });
+    reader.peer.close();
+  });
+
+  it('acts like an older gateway in the old mode: no settings, no trend, and 4400 on change_settings', async () => {
+    await control('settings-mode', { mode: 'old' });
+    const peer = await connect({ view: 'supervisor' });
+    const welcome = await peer.next(isType('welcome'));
+    expect(welcome).not.toHaveProperty('settings');
+    expect(welcome).not.toHaveProperty('trend');
+    await control('trend-point');
+    peer.send({ type: 'change_settings', request_id: 'o1', base_version: 0, settings: { teams: { form_load: 20, release_load: 8, release_after_us: 900000000, min_size: 2, max_size: 20, max_share: 0.5 } } });
+    expect(await peer.closed).toBe(4400);
+    expect(peer.frames.some((f) => f.includes('"trend"') || f.includes('"settings"'))).toBe(false);
+  });
+
+  it('moves the numbers: fewer simulated operators go offline, and the trend shows it', async () => {
+    const { peer, settings } = await supervisor();
+    const sim = settings.current.sim;
+    if (sim === undefined) throw new Error('no sim part');
+    const before = gateway.world.simCount();
+    peer.send({ type: 'change_settings', request_id: 'm1', base_version: settings.version, settings: { ...settings.current, sim: { ...sim, operators: 10 } } });
+    expect(await peer.next(isResult('m1'))).toMatchObject({ outcome: 'done' });
+    expect(before).toBeGreaterThan(10);
+    expect(gateway.world.simCount()).toBe(10);
+    await control('trend-point');
+    const point = await peer.next(isType('trend'));
+    expect(point.type === 'trend' && point.point.operators_online).toBeLessThanOrEqual(10);
+    peer.close();
+  });
+
+  it('moves the teams toward a new team share, one member per trend point', async () => {
+    const { peer, settings } = await supervisor();
+    const inTeams = async () => {
+      await control('trend-point');
+      const m = await peer.next(isType('trend'));
+      return m.type === 'trend' ? m.point.operators_in_teams : -1;
+    };
+    const start = await inTeams();
+    peer.send({ type: 'change_settings', request_id: 't1', base_version: settings.version, settings: { ...settings.current, teams: { ...settings.current.teams, max_share: 0.05 } } });
+    expect(await peer.next(isResult('t1'))).toMatchObject({ outcome: 'done' });
+    const lower = [await inTeams(), await inTeams(), await inTeams()];
+    expect(lower[0]).toBe(start - 1);
+    expect(lower[2]).toBe(1);
+    await control('settings-ready');
+    peer.send({ type: 'change_settings', request_id: 't2', base_version: settings.version + 1, settings: { ...settings.current, teams: { ...settings.current.teams, max_share: 0.5 } } });
+    expect(await peer.next(isResult('t2'))).toMatchObject({ outcome: 'done' });
+    const higher = [await inTeams(), await inTeams()];
+    expect(higher).toEqual([2, 3]);
+    peer.close();
+  });
+});

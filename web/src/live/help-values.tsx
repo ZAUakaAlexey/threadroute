@@ -3,7 +3,7 @@
 
 import { useMemo, type ReactNode } from 'react';
 
-import { helpDuration, type HelpValues } from '../lib/help-texts.ts';
+import { helpDuration, teamHelpValues, type HelpValues } from '../lib/help-texts.ts';
 import { HelpValuesContext } from '../ui/help-values.ts';
 import { useLive } from './hooks.ts';
 
@@ -13,6 +13,8 @@ export function LiveHelpValues({ children }: { readonly children: ReactNode }) {
   const firstResponseTarget = useLive((s) => s.welcome?.first_response_target_us ?? null);
   const speedFactor = useLive((s) => s.welcome?.speed_factor ?? null);
   const capacity = useLive((s) => s.me?.capacity ?? null);
+  // The team numbers in use, when the gateway sends stand settings.
+  const teams = useLive((s) => s.settings?.current.teams ?? null);
 
   const values = useMemo(() => {
     const v: { -readonly [K in keyof HelpValues]: string } = {};
@@ -21,8 +23,9 @@ export function LiveHelpValues({ children }: { readonly children: ReactNode }) {
     if (firstResponseTarget !== null) v.firstResponseTarget = helpDuration(firstResponseTarget);
     if (speedFactor !== null) v.speedFactor = String(speedFactor);
     if (capacity !== null) v.capacity = String(capacity);
+    if (teams !== null) Object.assign(v, teamHelpValues(teams));
     return v;
-  }, [acceptTimeout, assignmentTarget, firstResponseTarget, speedFactor, capacity]);
+  }, [acceptTimeout, assignmentTarget, firstResponseTarget, speedFactor, capacity, teams]);
 
   return <HelpValuesContext value={values}>{children}</HelpValuesContext>;
 }

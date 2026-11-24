@@ -7,6 +7,9 @@ import { defineConfig, loadEnv } from 'vite';
 // "/demos/threadroute/". The default "./" makes every asset URL relative.
 // FAKE_GATEWAY_PORT: the port of the fake gateway that the dev server
 // forwards /v1 to (only for `pnpm dev`).
+// CONSOLE_OUT_DIR: the folder that `vite build` writes and `vite preview`
+// serves, default "dist". The e2e tests use their own folder, so a running
+// preview of dist keeps its files.
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '');
   const base = env.CONSOLE_BASE ?? './';
@@ -42,6 +45,7 @@ export default defineConfig(({ mode }) => {
       },
     },
     build: {
+      outDir: env.CONSOLE_OUT_DIR ?? 'dist',
       target: 'es2023',
       sourcemap: false,
       reportCompressedSize: true,

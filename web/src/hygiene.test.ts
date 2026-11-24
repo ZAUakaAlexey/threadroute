@@ -9,7 +9,7 @@ import { join, relative, resolve } from 'node:path';
 
 const WEB = resolve(import.meta.dirname, '..');
 const WORKFLOW = resolve(WEB, '../.github/workflows/web.yml');
-const SKIP_DIRS = new Set(['node_modules', 'dist', 'test-results', 'playwright-report', 'blob-report', '.vite']);
+const SKIP_DIRS = new Set(['node_modules', 'dist', 'dist-e2e', 'test-results', 'playwright-report', 'blob-report', '.vite']);
 const TEXT_FILE = /\.(ts|tsx|js|mjs|json|css|html|md|svg|yml|yaml|gitignore|npmrc)$|^\.(gitignore|npmrc)$/;
 const SKIP_FILES = new Set(['pnpm-lock.yaml']);
 

@@ -5,7 +5,7 @@
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
 
-import { HELP_PLACEHOLDERS, HELP_TEXTS, helpDuration, helpText, type HelpId } from './help-texts.ts';
+import { HELP_PLACEHOLDERS, HELP_TEXTS, helpDuration, helpText, teamHelpValues, type HelpId } from './help-texts.ts';
 
 const SRC = resolve(import.meta.dirname, '..');
 const ids = Object.keys(HELP_TEXTS) as HelpId[];
@@ -67,6 +67,21 @@ describe('help texts', () => {
       'within 60 seconds after the conversation entered the queue',
     );
     expect(helpText('supervisor.missed')).not.toMatch(/[{}]/);
+  });
+
+  it('keeps the team texts of a gateway without stand settings as they were', () => {
+    expect(helpText('supervisor.panel.teams')).toBe(
+      'A dedicated team is a group of operators taken from the shared pool to serve one busy company only. By default a team forms at 20 active conversations of the company, is released after 15 minutes below 8, and has 2 to 20 operators, sized by the load.',
+    );
+    expect(helpText('supervisor.teams.pool')).toMatch(/^By default, operators join teams only while all teams together hold less than half of the online operators,/);
+  });
+
+  it('names the team values in use when the gateway sends stand settings', () => {
+    const values = teamHelpValues({ form_load: 30, release_load: 8, release_after_us: 1_200_000_000, min_size: 3, max_size: 25, max_share: 0.3 });
+    const teams = helpText('supervisor.panel.teams', values);
+    expect(teams).toContain('On this stand now a team forms at 30 active conversations of the company, is released after 20 minutes below 8, and has 3 to 25 operators');
+    expect(teams).not.toMatch(/by default/i);
+    expect(helpText('supervisor.teams.pool', values)).toMatch(/^On this stand now, operators join teams only while all teams together hold less than 30 percent of the online operators/);
   });
 
   it('says durations in words', () => {

@@ -78,6 +78,32 @@ for (const colorScheme of ['light', 'dark'] as const) {
       await expectNoViolations(page);
     });
 
+    test('supervisor view with the stand settings open, an invalid value and the trend strip', async ({ page }) => {
+      await page.setViewportSize({ width: 1400, height: 900 });
+      await page.goto('#/supervisor');
+      await expect(page.getByRole('region', { name: 'Last hour' }).getByRole('img').first()).toBeVisible();
+      await page.getByRole('button', { name: 'Stand settings', exact: true }).click();
+      const panel = page.getByRole('region', { name: 'Stand settings' });
+      await panel.getByRole('textbox', { name: 'Load that forms a team' }).fill('600');
+      await panel.getByRole('textbox', { name: 'Team size, max' }).fill('18');
+      await expect(panel.getByText('Use a value from 2 to 500.')).toBeVisible();
+      await expectNoViolations(page);
+      await control('settings-change', { fields: { 'teams.min_size': 3 } });
+      await expect(panel.getByRole('alert')).toBeVisible();
+      await expectNoViolations(page);
+      await page.getByRole('button', { name: 'About: Share of operators in teams' }).click();
+      await expect(page.getByRole('dialog', { name: 'About: Share of operators in teams' })).toBeVisible();
+      await expectNoViolations(page);
+    });
+
+    test('supervisor view with read-only stand settings', async ({ page }) => {
+      await control('settings-right', { may_change: false });
+      await page.goto('#/supervisor');
+      await page.getByRole('button', { name: 'Stand settings', exact: true }).click();
+      await expect(page.getByRole('region', { name: 'Stand settings' })).toContainText('Changing them needs');
+      await expectNoViolations(page);
+    });
+
     test('supervisor view and its dialog', async ({ page }) => {
       await page.goto('#/supervisor');
       await expect(page.getByRole('table', { name: 'Conversations' }).getByRole('row').nth(3)).toBeVisible();

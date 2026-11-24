@@ -16,12 +16,14 @@ import type {
   QueueRow,
   RemoveReason,
   ServerMessage,
+  SettingsBlock,
   State,
   Status,
   TeamRow,
   Totals,
   Welcome,
 } from '../protocol/types.ts';
+import { appendTrendPoint, trendFromWelcome, type TrendHistory } from './trend.ts';
 
 export interface ChatMessage {
   readonly id: string;
@@ -66,6 +68,13 @@ export interface LiveData {
   /** Keys of requests in flight, for example "accept:of-101". */
   readonly busy: ReadonlySet<string>;
   readonly notice: Notice | null;
+  /**
+   * The stand settings block (decision 0014), or null when the gateway sent
+   * none: an older gateway, or a stand without stand settings.
+   */
+  readonly settings: SettingsBlock | null;
+  /** The trend history of the supervisor view, or null from an older gateway. */
+  readonly trend: TrendHistory | null;
 }
 
 export interface LiveActions {
@@ -105,6 +114,8 @@ export function initialLiveData(): LiveData {
     selectedId: null,
     busy: EMPTY_SET,
     notice: null,
+    settings: null,
+    trend: null,
   };
 }
 
@@ -144,7 +155,20 @@ export function serverNowUs(s: Pick<LiveData, 'clockOffsetUs'>, nowMs: number): 
 function reduceMessage(s: LiveState, message: ServerMessage, nowMs: number): LiveState {
   switch (message.type) {
     case 'welcome':
-      return { ...s, welcome: message, clockOffsetUs: message.server_time_us - nowMs * 1000 };
+      // A new connection may reach another gateway: what it does not send
+      // (settings, trend) is gone, not kept from the last connection.
+      return {
+        ...s,
+        welcome: message,
+        clockOffsetUs: message.server_time_us - nowMs * 1000,
+        settings: message.settings ?? null,
+        trend: trendFromWelcome(message.trend),
+      };
+    case 'settings':
+      // Only a gateway that sent welcome.settings sends this message.
+      return s.welcome?.settings === undefined ? s : { ...s, settings: message.settings };
+    case 'trend':
+      return s.trend === null ? s : { ...s, trend: appendTrendPoint(s.trend, message.point) };
     case 'status':
       return { ...s, status: message };
     case 'state':

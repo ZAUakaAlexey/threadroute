@@ -15,8 +15,24 @@ import {
   REMOVE_REASONS,
   STALE_REASONS,
   VIEWS,
+  SIM_FIELDS,
+  TEAM_FIELDS,
   type Action,
+  type Bound,
+  type ChangeSettings,
   type Changes,
+  type FieldChange,
+  type FieldReason,
+  type SettingsBlock,
+  type SettingsChange,
+  type SettingsMessage,
+  type SimSettings,
+  type StandBounds,
+  type StandSettings,
+  type TeamSettings,
+  type Trend,
+  type TrendMessage,
+  type TrendPoint,
   type ClientMessage,
   type ConversationRow,
   type Hello,
@@ -107,6 +123,8 @@ export function parseClientMessage(frame: string): ClientMessage {
       return readWatchLike(o, 'unwatch');
     case 'action':
       return readAction(o);
+    case 'change_settings':
+      return readChangeSettings(o);
     default:
       throw new ProtocolError('type', 'is not a known client type');
   }
@@ -188,6 +206,139 @@ function readAction(o: Rec): Action {
   });
 }
 
+function readChangeSettings(o: Rec): ChangeSettings {
+  return {
+    type: 'change_settings',
+    request_id: readRoutingId(o, 'request_id', ''),
+    base_version: readInt(o, 'base_version', ''),
+    settings: readObject(o, 'settings', '', readStandSettings),
+  };
+}
+
+// ---------------------------------------------------------------- stand settings
+
+// Only the form is checked here. Values outside the bounds are the
+// gateway's business: it answers them with a result (decision 0014).
+
+function readTeamSettings(o: Rec, path: string): TeamSettings {
+  return {
+    form_load: readInt(o, 'form_load', path),
+    release_load: readInt(o, 'release_load', path),
+    release_after_us: readInt(o, 'release_after_us', path),
+    min_size: readInt(o, 'min_size', path),
+    max_size: readInt(o, 'max_size', path),
+    max_share: readNumber(o, 'max_share', path),
+  };
+}
+
+function readSimSettings(o: Rec, path: string): SimSettings {
+  return {
+    operators: readInt(o, 'operators', path),
+    capacity: readInt(o, 'capacity', path),
+    handling_median_us: readInt(o, 'handling_median_us', path),
+    resolve_median_us: readInt(o, 'resolve_median_us', path),
+    missed_offer_share: readNumber(o, 'missed_offer_share', path),
+  };
+}
+
+export function readStandSettings(o: Rec, path: string): StandSettings {
+  return compact<StandSettings>({
+    teams: readObject(o, 'teams', path, readTeamSettings),
+    sim: readOptObject(o, 'sim', path, readSimSettings),
+  });
+}
+
+function readBound(o: Rec, path: string): Bound {
+  const min = readNumber(o, 'min', path);
+  const max = readNumber(o, 'max', path);
+  if (max < min) throw new ProtocolError(`${path}.max`, 'is below min');
+  return compact<Bound>({
+    min,
+    max,
+    integer: readBool(o, 'integer', path),
+    below: readOptString(o, 'below', path),
+    not_above: readOptString(o, 'not_above', path),
+  });
+}
+
+function readBoundsOf<F extends string>(fields: readonly F[]): (o: Rec, path: string) => Readonly<Record<F, Bound>> {
+  return (o, path) => Object.fromEntries(fields.map((f) => [f, readObject(o, f, path, readBound)])) as Record<F, Bound>;
+}
+
+function readStandBounds(o: Rec, path: string): StandBounds {
+  return {
+    teams: readObject(o, 'teams', path, readBoundsOf(TEAM_FIELDS)),
+    sim: readObject(o, 'sim', path, readBoundsOf(SIM_FIELDS)),
+  };
+}
+
+function readFieldChange(v: unknown, path: string): FieldChange {
+  const o = asRecord(v, path);
+  return compact<FieldChange>({
+    field: readString(o, 'field', path),
+    old: o.old === undefined ? undefined : readNumber(o, 'old', path),
+    new: readNumber(o, 'new', path),
+  });
+}
+
+function readSettingsChange(v: unknown, path: string): SettingsChange {
+  const o = asRecord(v, path);
+  return compact<SettingsChange>({
+    changed_at_us: readInt(o, 'changed_at_us', path, 1),
+    version: readInt(o, 'version', path, 1),
+    by: readOptString(o, 'by', path),
+    fields: readArray(o, 'fields', path, readFieldChange),
+  });
+}
+
+function readSettingsBlock(o: Rec, path: string): SettingsBlock {
+  const current = readObject(o, 'current', path, readStandSettings);
+  const defaults = readObject(o, 'defaults', path, readStandSettings);
+  if ((current.sim === undefined) !== (defaults.sim === undefined)) {
+    throw new ProtocolError(`${path}.defaults.sim`, 'must be present exactly when current.sim is');
+  }
+  return {
+    version: readInt(o, 'version', path),
+    current,
+    defaults,
+    bounds: readObject(o, 'bounds', path, readStandBounds),
+    changes: readArray(o, 'changes', path, readSettingsChange),
+    may_change: readBool(o, 'may_change', path),
+  };
+}
+
+function readTrendPoint(o: Rec, path: string): TrendPoint {
+  return {
+    sampled_at_us: readInt(o, 'sampled_at_us', path, 1),
+    waiting: readInt(o, 'waiting', path),
+    longest_wait_us: readInt(o, 'longest_wait_us', path),
+    resolved_last_minute: readInt(o, 'resolved_last_minute', path),
+    teams: readInt(o, 'teams', path),
+    operators_in_teams: readInt(o, 'operators_in_teams', path),
+    operators_online: readInt(o, 'operators_online', path),
+  };
+}
+
+function readTrend(o: Rec, path: string): Trend {
+  return {
+    interval_ms: readInt(o, 'interval_ms', path, 1),
+    points: readArray(o, 'points', path, (v, p) => readTrendPoint(asRecord(v, p), p)),
+  };
+}
+
+function readSettingsMessage(o: Rec): SettingsMessage {
+  return { type: 'settings', settings: readObject(o, 'settings', '', readSettingsBlock) };
+}
+
+function readTrendMessage(o: Rec): TrendMessage {
+  return { type: 'trend', point: readObject(o, 'point', '', readTrendPoint) };
+}
+
+function readFieldReason(v: unknown, path: string): FieldReason {
+  const o = asRecord(v, path);
+  return { field: readString(o, 'field', path), reason: readString(o, 'reason', path) };
+}
+
 // ---------------------------------------------------------------- server
 
 type ServerReader = (o: Rec, options: ParseOptions) => ServerMessage;
@@ -199,6 +350,8 @@ const SERVER_READERS: Readonly<Record<string, ServerReader>> = {
   messages: readMessages,
   message_removed: readMessageRemoved,
   result: readResult,
+  settings: readSettingsMessage,
+  trend: readTrendMessage,
 };
 
 function readLimits(o: Rec, path: string): Limits {
@@ -231,6 +384,8 @@ function readWelcome(o: Rec): Welcome {
     first_response_target_us: readInt(o, 'first_response_target_us', '', 1),
     tick_ms: readInt(o, 'tick_ms', '', 1),
     limits: readObject(o, 'limits', '', readLimits),
+    settings: readOptObject(o, 'settings', '', readSettingsBlock),
+    trend: readOptObject(o, 'trend', '', readTrend),
   });
 }
 
@@ -437,6 +592,8 @@ function readResult(o: Rec): Result {
     outcome,
     code,
     message: readOptText(o, 'message', ''),
+    fields: readOptArray(o, 'fields', '', readFieldReason),
+    retry_after_ms: readOptInt(o, 'retry_after_ms', '', 1),
   });
 }
 

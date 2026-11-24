@@ -3,8 +3,8 @@
 // and turns results into notices. No React here.
 
 import { GatewayClient, type ResumeTokenStore, type SocketLike } from '../protocol/client.ts';
-import { buildOfferAction, buildPresenceAction, buildSetLanguages, buildUnwatch, buildWatch } from '../protocol/build.ts';
-import type { ClientRequest, OfferActionName, Result, ServerMessage, View } from '../protocol/types.ts';
+import { buildChangeSettings, buildOfferAction, buildPresenceAction, buildSetLanguages, buildUnwatch, buildWatch } from '../protocol/build.ts';
+import type { ClientRequest, OfferActionName, Result, ServerMessage, StandSettings, View } from '../protocol/types.ts';
 import { resultMessage } from './result-messages.ts';
 import { selectHeld } from './selectors.ts';
 import { createLiveStore, type LiveStore } from './store.ts';
@@ -29,7 +29,15 @@ export interface LiveSession {
   offerAction(action: OfferActionName, offerId: string): Promise<void>;
   /** Shows one conversation's messages (or none): unwatch the old, watch the new. */
   select(id: string | null): void;
+  /**
+   * Asks for a change of the stand settings and resolves with the result.
+   * The answer is shown by the settings panel, not as a notice.
+   */
+  changeSettings(baseVersion: number, settings: StandSettings): Promise<Result>;
 }
+
+/** The local code of a change that was not sent, because this gateway has no stand settings or no right. */
+export const SETTINGS_NOT_SENT = 'not_allowed';
 
 export function createLiveSession(options: LiveSessionOptions): LiveSession {
   const store = options.store ?? createLiveStore();
@@ -116,6 +124,18 @@ export function createLiveSession(options: LiveSessionOptions): LiveSession {
     },
     async offerAction(action, offerId) {
       await send(buildOfferAction(client.nextRequestId(), action, offerId), `${action}:${offerId}`);
+    },
+    changeSettings(baseVersion, settings) {
+      // An older gateway closes the connection on a client message it does
+      // not know. The check reads the block of the current connection at
+      // the moment of sending: a reconnect to an older gateway clears it.
+      const s = store.getState();
+      const requestId = client.nextRequestId();
+      const mayChange = s.settings?.may_change === true;
+      if (!mayChange || s.connection.phase !== 'open') {
+        return Promise.resolve({ type: 'result', request_id: requestId, outcome: 'rejected', code: mayChange ? 'not_connected' : SETTINGS_NOT_SENT });
+      }
+      return client.request(buildChangeSettings(requestId, baseVersion, settings));
     },
     select(id) {
       const s = store.getState();

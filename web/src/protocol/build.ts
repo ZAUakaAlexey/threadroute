@@ -1,7 +1,22 @@
 // Builders for client messages. They check the same rules as the gateway,
 // so a bug in the console fails here and not with close code 4400.
 
-import { PROTOCOL_VERSION, type Action, type Hello, type OfferActionName, type Unwatch, type View, type Watch } from './types.ts';
+import {
+  PROTOCOL_VERSION,
+  SIM_FIELDS,
+  TEAM_FIELDS,
+  type Action,
+  type ChangeSettings,
+  type ClientMessage,
+  type Hello,
+  type OfferActionName,
+  type SimSettings,
+  type StandSettings,
+  type TeamSettings,
+  type Unwatch,
+  type View,
+  type Watch,
+} from './types.ts';
 import { ProtocolError, isValidLang, isValidRoutingId } from './read.ts';
 
 export const MAX_CLIENT_MESSAGE_BYTES = 4096;
@@ -53,8 +68,41 @@ export function buildOfferAction(requestId: string, action: OfferActionName, off
   return { type: 'action', request_id: requestId, action, offer_id: offerId };
 }
 
+/** Fields that the gateway reads as integers: a fraction there closes the connection. */
+const SHARE_FIELDS: ReadonlySet<string> = new Set(['max_share', 'missed_offer_share']);
+
+/**
+ * Asks for a change of the stand settings. Only the form is checked here;
+ * the bounds are checked by the console form and, with authority, by the
+ * gateway. The set is copied field by field, so nothing else goes out.
+ */
+export function buildChangeSettings(requestId: string, baseVersion: number, settings: StandSettings): ChangeSettings {
+  checkRequestId(requestId);
+  if (!Number.isSafeInteger(baseVersion) || baseVersion < 0) throw new ProtocolError('base_version', 'is not an integer of 0 or more');
+  const teams = pick<TeamSettings>(settings.teams, TEAM_FIELDS, 'settings.teams');
+  const sim = settings.sim === undefined ? undefined : pick<SimSettings>(settings.sim, SIM_FIELDS, 'settings.sim');
+  return {
+    type: 'change_settings',
+    request_id: requestId,
+    base_version: baseVersion,
+    settings: sim === undefined ? { teams } : { teams, sim },
+  };
+}
+
+function pick<T>(part: T, fields: readonly string[], path: string): T {
+  const source = part as Readonly<Record<string, number>>;
+  const out: Record<string, number> = {};
+  for (const f of fields) {
+    const v = source[f];
+    if (v === undefined || !Number.isFinite(v) || v < 0) throw new ProtocolError(`${path}.${f}`, 'is not a number of 0 or more');
+    if (!SHARE_FIELDS.has(f) && !Number.isSafeInteger(v)) throw new ProtocolError(`${path}.${f}`, 'is not an integer');
+    out[f] = v;
+  }
+  return out as T;
+}
+
 /** Encodes a client message and checks the size limit of the gateway. */
-export function encodeClientMessage(message: Hello | Watch | Unwatch | Action): string {
+export function encodeClientMessage(message: ClientMessage): string {
   const frame = JSON.stringify(message);
   if (new TextEncoder().encode(frame).length > MAX_CLIENT_MESSAGE_BYTES) {
     throw new ProtocolError(message.type, `is larger than ${MAX_CLIENT_MESSAGE_BYTES} bytes`);

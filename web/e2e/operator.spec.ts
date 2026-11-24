@@ -30,7 +30,8 @@ test('marks replied and resolves', async ({ page }) => {
   const card = await offer(page);
   await card.getByRole('button', { name: 'Accept' }).click();
   await page.getByRole('button', { name: 'Mark replied' }).click();
-  await expect(page.getByRole('button', { name: 'Replied' })).toBeDisabled();
+  // Exact: the held conversation row also says Replied once its badge shows.
+  await expect(page.getByRole('button', { name: 'Replied', exact: true })).toBeDisabled();
   await page.getByRole('button', { name: 'Resolve' }).click();
   await expect(page.getByText('No conversation open.')).toBeVisible();
   await expect(page.getByText('Accepted conversations appear here.')).toBeVisible();

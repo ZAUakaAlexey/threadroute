@@ -1,21 +1,13 @@
 // @vitest-environment node
-// Every example in internal/gwapi/testdata goes through the parser and back
-// to JSON, and the client examples are also made by the builders. The last
-// test fails when a fixture file exists that no test here loaded.
+// Every example in internal/gwapi/testdata (and in its settings folder, with
+// its own index) goes through the parser and back to JSON, and the client
+// examples are also made by the builders. The last test of each folder
+// fails when a fixture file exists that no test here loaded.
 
-import { listFixtureFiles, readFixtureIndex, readFixtureText, type FixtureEntry } from '../test/fixtures.ts';
-import { buildHello, buildOfferAction, buildPresenceAction, buildSetLanguages, buildUnwatch, buildWatch } from './build.ts';
+import { FIXTURE_DIR, SETTINGS_FIXTURE_DIR, listFixtureFiles, readFixtureIndex, readFixtureText, type FixtureEntry } from '../test/fixtures.ts';
+import { buildChangeSettings, buildHello, buildOfferAction, buildPresenceAction, buildSetLanguages, buildUnwatch, buildWatch } from './build.ts';
 import { parseClientMessage, parsePublicSnapshot, parseServerMessage } from './parse.ts';
-import type { Action, ClientMessage, ServerMessage } from './types.ts';
-
-const index = readFixtureIndex();
-const loaded = new Set<string>();
-
-function load(entry: FixtureEntry): { readonly text: string; readonly json: unknown } {
-  loaded.add(entry.file);
-  const text = readFixtureText(entry.file);
-  return { text, json: JSON.parse(text) as unknown };
-}
+import type { Action, ClientMessage, ServerMessage, SettingsBlock } from './types.ts';
 
 function roundTrip(value: unknown): unknown {
   return JSON.parse(JSON.stringify(value)) as unknown;
@@ -36,6 +28,8 @@ function build(message: ClientMessage): ClientMessage {
       return buildUnwatch(message.request_id, message.conversation_id);
     case 'action':
       return buildAction(message);
+    case 'change_settings':
+      return buildChangeSettings(message.request_id, message.base_version, message.settings);
   }
 }
 
@@ -55,9 +49,27 @@ function hasText(message: ServerMessage): boolean {
   return message.type === 'messages' && message.messages.some((m) => m.text !== undefined);
 }
 
-describe('protocol fixtures', () => {
+function settingsOf(message: ServerMessage): SettingsBlock | undefined {
+  if (message.type === 'welcome') return message.settings;
+  if (message.type === 'settings') return message.settings;
+  return undefined;
+}
+
+describe.each([
+  ['testdata', FIXTURE_DIR],
+  ['testdata/settings', SETTINGS_FIXTURE_DIR],
+])('protocol fixtures in %s', (_name, dir) => {
+  const index = readFixtureIndex(dir);
+  const loaded = new Set<string>();
+
+  function load(entry: FixtureEntry): { readonly text: string; readonly json: unknown } {
+    loaded.add(entry.file);
+    const text = readFixtureText(entry.file, dir);
+    return { text, json: JSON.parse(text) as unknown };
+  }
+
   it('index.json lists exactly the files on disk', () => {
-    expect(index.map((e) => e.file).sort()).toEqual(listFixtureFiles());
+    expect(index.map((e) => e.file).sort()).toEqual(listFixtureFiles(dir));
   });
 
   describe.each(index.filter((e) => e.direction === 'server'))('server $file', (entry) => {
@@ -70,6 +82,12 @@ describe('protocol fixtures', () => {
       expect(parsed.message.type).toBe(entry.type);
       expect(roundTrip(parsed.message)).toEqual(json);
       if (entry.level === 'demo') expect(hasText(parsed.message)).toBe(false);
+      // "by" follows the right to change settings, never the level.
+      const settings = settingsOf(parsed.message);
+      if (settings !== undefined && entry.may_change_settings !== undefined) {
+        expect(settings.may_change).toBe(entry.may_change_settings);
+        if (!settings.may_change) expect(settings.changes.filter((c) => c.by !== undefined)).toEqual([]);
+      }
     });
   });
 
@@ -91,6 +109,6 @@ describe('protocol fixtures', () => {
   });
 
   it('every fixture file was loaded by a test above', () => {
-    expect([...loaded].sort()).toEqual(listFixtureFiles());
+    expect([...loaded].sort()).toEqual(listFixtureFiles(dir));
   });
 });

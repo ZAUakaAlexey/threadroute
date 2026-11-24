@@ -61,6 +61,11 @@ export const KNOWN_RESULT_CODES = [
   'stale_connection',
   'unknown_conversation',
   'too_many_watched',
+  // Answers to change_settings only (docs/gateway-protocol.md, "Versioning",
+  // the exception for answers to a new request).
+  'settings_conflict',
+  'settings_too_soon',
+  'settings_off',
 ] as const;
 export type KnownResultCode = (typeof KNOWN_RESULT_CODES)[number];
 
@@ -95,9 +100,112 @@ export interface Action {
   readonly languages?: readonly string[];
 }
 
-export type ClientMessage = Hello | Watch | Unwatch | Action;
+export interface ChangeSettings {
+  readonly type: 'change_settings';
+  readonly request_id: string;
+  readonly base_version: number;
+  /** The whole new set. */
+  readonly settings: StandSettings;
+}
+
+export type ClientMessage = Hello | Watch | Unwatch | Action | ChangeSettings;
 /** Client messages that get exactly one result. */
-export type ClientRequest = Watch | Unwatch | Action;
+export type ClientRequest = Watch | Unwatch | Action | ChangeSettings;
+
+// ---------------------------------------------------------------- stand settings
+// Decision 0014. The Go types are opapi.StandSettings, opapi.StandBounds and
+// gwapi.Settings. Durations ("_us") are whole microseconds of model time.
+
+export interface TeamSettings {
+  readonly form_load: number;
+  readonly release_load: number;
+  readonly release_after_us: number;
+  readonly min_size: number;
+  readonly max_size: number;
+  readonly max_share: number;
+}
+
+export interface SimSettings {
+  readonly operators: number;
+  readonly capacity: number;
+  readonly handling_median_us: number;
+  readonly resolve_median_us: number;
+  readonly missed_offer_share: number;
+}
+
+export interface StandSettings {
+  readonly teams: TeamSettings;
+  /** Absent until a simulator reported its values. */
+  readonly sim?: SimSettings;
+}
+
+export const TEAM_FIELDS = ['form_load', 'release_load', 'release_after_us', 'min_size', 'max_size', 'max_share'] as const;
+export const SIM_FIELDS = ['operators', 'capacity', 'handling_median_us', 'resolve_median_us', 'missed_offer_share'] as const;
+export type TeamField = (typeof TEAM_FIELDS)[number];
+export type SimField = (typeof SIM_FIELDS)[number];
+/** A field name of the set, as the protocol writes it: "teams.form_load". */
+export type SettingsField = `teams.${TeamField}` | `sim.${SimField}`;
+export const SETTINGS_FIELDS: readonly SettingsField[] = [
+  ...TEAM_FIELDS.map((f) => `teams.${f}` as const),
+  ...SIM_FIELDS.map((f) => `sim.${f}` as const),
+];
+
+export interface Bound {
+  readonly min: number;
+  readonly max: number;
+  readonly integer: boolean;
+  /** A field of the same set that the value must be below. */
+  readonly below?: string;
+  /** A field of the same set that the value must not be above. */
+  readonly not_above?: string;
+}
+
+export interface StandBounds {
+  readonly teams: Readonly<Record<TeamField, Bound>>;
+  readonly sim: Readonly<Record<SimField, Bound>>;
+}
+
+export interface FieldChange {
+  readonly field: string;
+  /** Absent when the set had no value before (the first report of a simulator). */
+  readonly old?: number;
+  readonly new: number;
+}
+
+export interface SettingsChange {
+  readonly changed_at_us: number;
+  readonly version: number;
+  /** Present only when the connection may change settings. */
+  readonly by?: string;
+  readonly fields: readonly FieldChange[];
+}
+
+/** The settings block of welcome and of the settings message. */
+export interface SettingsBlock {
+  readonly version: number;
+  readonly current: StandSettings;
+  readonly defaults: StandSettings;
+  readonly bounds: StandBounds;
+  /** Newest first. */
+  readonly changes: readonly SettingsChange[];
+  readonly may_change: boolean;
+}
+
+export interface TrendPoint {
+  readonly sampled_at_us: number;
+  readonly waiting: number;
+  readonly longest_wait_us: number;
+  readonly resolved_last_minute: number;
+  readonly teams: number;
+  readonly operators_in_teams: number;
+  readonly operators_online: number;
+}
+
+export interface Trend {
+  readonly interval_ms: number;
+  /** Oldest first. */
+  readonly points: readonly TrendPoint[];
+}
 
 // ---------------------------------------------------------------- server
 
@@ -122,6 +230,20 @@ export interface Welcome {
   readonly first_response_target_us: number;
   readonly tick_ms: number;
   readonly limits: Limits;
+  /** Absent from a gateway without stand settings, or an older one. */
+  readonly settings?: SettingsBlock;
+  /** Supervisor view only, and absent from an older gateway. */
+  readonly trend?: Trend;
+}
+
+export interface SettingsMessage {
+  readonly type: 'settings';
+  readonly settings: SettingsBlock;
+}
+
+export interface TrendMessage {
+  readonly type: 'trend';
+  readonly point: TrendPoint;
 }
 
 export interface Status {
@@ -271,9 +393,19 @@ export interface Result {
    */
   readonly code?: string;
   readonly message?: string;
+  /** change_settings with invalid_request: the fields and why. */
+  readonly fields?: readonly FieldReason[];
+  /** change_settings with settings_too_soon: machine time to wait. */
+  readonly retry_after_ms?: number;
 }
 
-export type ServerMessage = Welcome | Status | State | Messages | MessageRemoved | Result;
+export interface FieldReason {
+  /** A field name of the set, or "sim" for the sim part as a whole. */
+  readonly field: string;
+  readonly reason: string;
+}
+
+export type ServerMessage = Welcome | Status | State | Messages | MessageRemoved | Result | SettingsMessage | TrendMessage;
 export type ServerType = ServerMessage['type'];
 
 // ---------------------------------------------------------------- public
