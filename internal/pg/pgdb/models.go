@@ -8,6 +8,64 @@ import (
 	"time"
 )
 
+type Company struct {
+	CompanyID    string
+	TeamSeq      int64
+	TeamActive   bool
+	TeamFormedAt *time.Time
+	LowSince     *time.Time
+	UpdatedAt    time.Time
+}
+
+type Conversation struct {
+	CompanyID           string
+	CustomerID          string
+	ConvSession         int64
+	ConvSeq             int64
+	Lang                string
+	State               string
+	TeamQueue           bool
+	Priority            int32
+	QueuedAt            *time.Time
+	PreferredOperatorID *string
+	LastOperatorID      *string
+	RouteSeq            int64
+	SlaStartedAt        *time.Time
+	FirstAcceptedAt     *time.Time
+	FirstRepliedAt      *time.Time
+	SlaAssignmentMissed bool
+	SlaResponseMissed   bool
+	SimResponseUs       *int64
+	RealResponseUs      *int64
+	CloseReason         *string
+	UpdatedAt           time.Time
+}
+
+type Offer struct {
+	Num        int64
+	ID         string
+	CompanyID  string
+	CustomerID string
+	Session    int64
+	OperatorID string
+	State      string
+	Capacity   int32
+	QueuedAt   time.Time
+	OfferedAt  time.Time
+	AcceptBy   time.Time
+	AcceptedAt *time.Time
+	EndedAt    *time.Time
+	EndReason  *string
+}
+
+type OfferSkip struct {
+	CompanyID  string
+	CustomerID string
+	Session    int64
+	OperatorID string
+	OfferNum   int64
+}
+
 type Operator struct {
 	ID                 string
 	Capacity           int32
@@ -21,4 +79,21 @@ type Operator struct {
 type OperatorLanguage struct {
 	OperatorID string
 	Lang       string
+}
+
+type Outbox struct {
+	ID        int64
+	Family    string
+	RecordKey []byte
+	Seq       int64
+	EventType string
+	Payload   []byte
+	CreatedAt time.Time
+	SentAt    *time.Time
+}
+
+type Reply struct {
+	OfferNum  int64
+	ReplyID   string
+	RepliedAt time.Time
 }
