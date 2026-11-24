@@ -172,15 +172,16 @@ func testEmptyBacklog(t *testing.T, h *harness) {
 // the next operator.
 func testLiveFlow(t *testing.T, h *harness) {
 	sc := h.newScenario(t)
-	// The offer lives 4 seconds of machine time, so a slow test machine
-	// still accepts in time.
-	sc.rcfg.AcceptTimeout = 80 * time.Second
+	// No offer expires by itself while the test works with it, also on a
+	// slow machine. The one expiry of the test comes from a move of the
+	// test clock.
+	sc.rcfg.AcceptTimeout = longAcceptTimeout
 	r := sc.start()
 	ctx := t.Context()
 	api := r.api
 
 	s, err := api.Settings(ctx)
-	if err != nil || s.SpeedFactor != 20 || s.AcceptTimeout() != 80*time.Second || s.CapacityDefault != 4 {
+	if err != nil || s.SpeedFactor != 20 || s.AcceptTimeout() != longAcceptTimeout || s.CapacityDefault != 4 {
 		t.Fatalf("settings %+v, %v", s, err)
 	}
 	for _, op := range []string{opID(1), opID(2)} {
@@ -207,11 +208,14 @@ func testLiveFlow(t *testing.T, h *harness) {
 		t.Errorf("c1 events %s", got)
 	}
 
-	// c2: the first offer is not answered and times out after 4 seconds
-	// of machine time; the conversation goes to the other operator.
+	// c2: the first offer is not answered and times out; the conversation
+	// goes to the other operator. The test clock moves past the accept
+	// timeout of the first offer only. The second offer is made after the
+	// move, so it has the full timeout again.
 	c2 := newStream(company(1), customer(2))
 	sc.produce(c2.opened())
 	first := rd.waitEvent(c2.key(), "first offer of c2", isType(event.TypeOffered))
+	sc.passAcceptTimeout()
 	second := rd.waitEvent(c2.key(), "second offer of c2", func(ev event.Routing) bool {
 		return ev.Type == event.TypeOffered && ev.OfferID != first.OfferID
 	})
@@ -243,7 +247,7 @@ func testLiveFlow(t *testing.T, h *harness) {
 			}
 		}
 	}
-	waitFor(t, 10*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
+	waitFor(t, 30*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
 	sc.matchOutbox(rd)
 	if got := testutil.ToFloat64(r.svc.m.expired); got != 1 {
 		t.Errorf("offers_expired_total = %v, want 1", got)
@@ -254,7 +258,9 @@ func testLiveFlow(t *testing.T, h *harness) {
 // right 409 code and change nothing.
 func testLateCalls(t *testing.T, h *harness) {
 	sc := h.newScenario(t)
-	sc.rcfg.AcceptTimeout = 60 * time.Second
+	// No offer expires by itself while the test works with it, also on a
+	// slow machine. The expiry of b comes from a move of the test clock.
+	sc.rcfg.AcceptTimeout = longAcceptTimeout
 	r := sc.start()
 	ctx := t.Context()
 	api := r.api
@@ -275,11 +281,13 @@ func testLateCalls(t *testing.T, h *harness) {
 	wantResult(t, "resolve a", opapi.ResultDone)(api.Resolve(ctx, oa.OperatorID, oa.OfferID))
 
 	// b: the offer times out and is not answered by anyone afterwards.
-	// Both operators are taken offline after the expiry, so no new offer
-	// is made.
+	// The test clock moves past its accept timeout; a was accepted before,
+	// so b holds the only live offer. Both operators are taken offline
+	// after the expiry, so the next offer of b ends and no new one is made.
 	b := newStream(company(1), customer(2))
 	sc.produce(b.opened())
 	ob := rd.waitEvent(b.key(), "offer b", isType(event.TypeOffered))
+	sc.passAcceptTimeout()
 	rd.waitEvent(b.key(), "expiry b", isType(event.TypeOfferExpired))
 
 	// c: accepted, then closed by conv.
@@ -293,7 +301,7 @@ func testLateCalls(t *testing.T, h *harness) {
 	for _, op := range []string{opID(1), opID(2)} {
 		wantResult(t, "offline", opapi.ResultDone)(api.Offline(ctx, op))
 	}
-	waitFor(t, 10*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
+	waitFor(t, 30*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
 	before := sc.snapshot()
 
 	other := opID(1)

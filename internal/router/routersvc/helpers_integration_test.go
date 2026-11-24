@@ -56,7 +56,42 @@ type scenario struct {
 	// refresh is the operator refresh interval of the services, one hour
 	// unless a test changes it before the start.
 	refresh time.Duration
-	cl      *kgo.Client
+	// clock is the clock of the routing core and of every service the
+	// scenario starts. It runs with the machine clock, and a test can move
+	// it forward to pass a timer on purpose.
+	clock *testClock
+	cl    *kgo.Client
+}
+
+// testClock is the machine clock plus an offset that only grows. A test
+// moves it forward to make a timer pass at a known point, so the test
+// does not depend on how fast the machine is.
+type testClock struct {
+	offset atomic.Int64
+}
+
+// Now returns the machine time plus the offset.
+func (c *testClock) Now() time.Time {
+	return time.Now().Add(time.Duration(c.offset.Load()))
+}
+
+// advance moves the clock forward by d.
+func (c *testClock) advance(d time.Duration) {
+	c.offset.Add(int64(d))
+}
+
+// longAcceptTimeout is the accept timeout of the scenarios that do not
+// test the expiry by the machine clock. At speed factor 20 it is 3 minutes
+// of machine time, longer than every wait of these tests, so an offer
+// never expires on its own while a test works with it. A scenario that
+// needs an expiry moves the clock past it with passAcceptTimeout.
+const longAcceptTimeout = time.Hour
+
+// passAcceptTimeout moves the clock of the scenario past the accept
+// timeout of every offer made before the call.
+func (sc *scenario) passAcceptTimeout() {
+	machine := time.Duration(float64(sc.rcfg.AcceptTimeout) / sc.rcfg.SpeedFactor)
+	sc.clock.advance(machine + time.Second)
 }
 
 // testLogger writes warnings and errors, so a failing run shows why.
@@ -65,15 +100,20 @@ func testLogger() *slog.Logger {
 }
 
 // testRouterConfig runs the timers 20 times faster than live: the accept
-// timeout of 20 seconds takes 1 second. The SLA targets are long, so no
-// sla_missed event appears in the expected event lists.
+// timeout of 20 seconds takes 1 second. The SLA targets are long (72
+// minutes of machine time, more than the test runs and more than any jump
+// of the test clock), so no sla_missed event appears in the expected event
+// lists.
 func testRouterConfig() router.Config {
 	c := router.DefaultConfig()
 	c.SpeedFactor = 20
-	c.AssignmentTarget = time.Hour
-	c.FirstResponseTarget = time.Hour
+	c.AssignmentTarget = testSLATarget
+	c.FirstResponseTarget = testSLATarget
 	return c
 }
+
+// testSLATarget is both SLA targets of the test configuration.
+const testSLATarget = 24 * time.Hour
 
 func (h *harness) newScenario(t *testing.T) *scenario {
 	t.Helper()
@@ -85,13 +125,14 @@ func (h *harness) newScenario(t *testing.T) *scenario {
 		group:        fmt.Sprintf("router-test-%d", n),
 		rcfg:         testRouterConfig(),
 		refresh:      time.Hour,
+		clock:        &testClock{},
 	}
 	_, err := h.pool.Exec(t.Context(), `TRUNCATE outbox, replies, offer_skips, offers, conversations,
 		companies, operator_languages, operators RESTART IDENTITY CASCADE`)
 	if err != nil {
 		t.Fatalf("reset: %v", err)
 	}
-	core, err := router.New(h.pool, testRouterConfig(), router.SystemClock{}, nil)
+	core, err := router.New(h.pool, testRouterConfig(), sc.clock, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +191,7 @@ func (sc *scenario) newService() (*Service, *prometheus.Registry) {
 	sc.t.Helper()
 	reg := prometheus.NewRegistry()
 	svc, err := New(sc.t.Context(), Options{
-		Config: sc.config(), Pool: sc.h.pool, Logger: testLogger(), Registerer: reg,
+		Config: sc.config(), Pool: sc.h.pool, Logger: testLogger(), Registerer: reg, Clock: sc.clock,
 		ConversationsTopic: sc.convTopic, RoutingTopic: sc.routingTopic,
 	})
 	if err != nil {

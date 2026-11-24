@@ -17,10 +17,18 @@ import (
 // and a "message removed" event writes nothing (decision 0011).
 func testOperatorEventsInTopic(t *testing.T, h *harness) {
 	sc := h.newScenario(t)
-	sc.rcfg.AcceptTimeout = 80 * time.Second
-	// A short refresh, so the loop publishes the snapshots again within the
-	// test. The loop checks every 50 milliseconds.
-	sc.refresh = 2 * time.Second
+	// No offer expires while the test works with it, also on a slow
+	// machine: every requeue below has its own reason, not offer_expired.
+	sc.rcfg.AcceptTimeout = longAcceptTimeout
+	// A long refresh, so no refresh comes between the steps of the test
+	// (it would change the operator sequence numbers it checks). At the end
+	// the test clock moves past it, and the loop, which checks every 50
+	// milliseconds, publishes the snapshots again.
+	sc.refresh = 10 * time.Minute
+	// The team is not released by time (the move of the clock at the end
+	// would do it), so the refresh is the only change of the operators
+	// there.
+	sc.rcfg.TeamReleaseAfter = 24 * time.Hour
 	// Small teams, so three conversations of one company form one.
 	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1
 	r := sc.start()
@@ -29,7 +37,7 @@ func testOperatorEventsInTopic(t *testing.T, h *harness) {
 	rd := sc.reader()
 
 	s, err := api.Settings(ctx)
-	if err != nil || s.AssignmentTargetUS != time.Hour.Microseconds() || s.FirstResponseTargetUS != time.Hour.Microseconds() {
+	if err != nil || s.AssignmentTargetUS != testSLATarget.Microseconds() || s.FirstResponseTargetUS != testSLATarget.Microseconds() {
 		t.Fatalf("settings %+v, %v", s, err)
 	}
 	a, b := opID(1), opID(2)
@@ -132,9 +140,15 @@ func testOperatorEventsInTopic(t *testing.T, h *harness) {
 
 	// The refresh publishes every operator again, with the next number.
 	// Nothing else changes the operators from here on, so a higher op_seq
-	// comes from the refresh.
+	// comes from the refresh. The numbers are read before the clock moves,
+	// so a refresh that comes at once is not missed.
+	seqs := map[string]int64{}
 	for _, op := range []string{a, b} {
-		seq := sc.count(`SELECT op_seq FROM operators WHERE id = $1`, op)
+		seqs[op] = sc.count(`SELECT op_seq FROM operators WHERE id = $1`, op)
+	}
+	sc.clock.advance(sc.refresh + time.Second)
+	for _, op := range []string{a, b} {
+		seq := seqs[op]
 		waitFor(t, 30*time.Second, "a refresh of "+op, func() bool {
 			return sc.count(`SELECT op_seq FROM operators WHERE id = $1`, op) > seq
 		})
@@ -149,7 +163,7 @@ func testOperatorEventsInTopic(t *testing.T, h *harness) {
 		t.Errorf("operators_refreshed_total = %v, want at least 2", got)
 	}
 
-	waitFor(t, 10*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
+	waitFor(t, 30*time.Second, "outbox sent", func() bool { return sc.unsent() == 0 })
 	sc.matchOutbox(rd)
 	for _, typ := range []event.RoutingType{event.TypeOperatorUpdated, event.TypeOperatorOnline, event.TypeOperatorOffline} {
 		if got := testutil.ToFloat64(r.svc.m.published.WithLabelValues(string(typ))); got < 1 {
