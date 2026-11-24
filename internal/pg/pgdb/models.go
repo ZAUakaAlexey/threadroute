@@ -101,3 +101,19 @@ type Reply struct {
 	ReplyID   string
 	RepliedAt time.Time
 }
+
+type StandSetting struct {
+	ID          bool
+	Version     int64
+	CurrentSet  []byte
+	DefaultsSim []byte
+	LastPutAt   *time.Time
+	UpdatedAt   time.Time
+}
+
+type StandSettingsChange struct {
+	Version   int64
+	ChangedAt time.Time
+	ChangedBy string
+	Fields    []byte
+}
