@@ -5,7 +5,7 @@ import { useState, type ReactNode } from 'react';
 import { loadConfig } from '../config.ts';
 import { useMountEffect } from '../lib/use-mount-effect.ts';
 import type { View } from '../protocol/types.ts';
-import { TooltipProvider } from '../ui/tooltip.tsx';
+import { LiveHelpValues } from './help-values.tsx';
 import { LiveSessionContext } from './hooks.ts';
 import { createLiveSession, type LiveSession } from './session.ts';
 import { settingsStore } from './settings-store.ts';
@@ -26,7 +26,7 @@ export function LiveSessionProvider({ view, children, session: given }: LiveSess
   });
   return (
     <LiveSessionContext value={session}>
-      <TooltipProvider>{children}</TooltipProvider>
+      <LiveHelpValues>{children}</LiveHelpValues>
     </LiveSessionContext>
   );
 }

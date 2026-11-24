@@ -26,7 +26,7 @@ export function HeldPanel() {
   const height = Math.min(held.length, MAX_VISIBLE_ROWS) * ROW_HEIGHT;
 
   return (
-    <Panel title="Your conversations" meta={`${held.length} held, capacity ${capacity}`}>
+    <Panel title="Your conversations" hint="operator.panel.held" meta={`${held.length} held, capacity ${capacity}`}>
       {held.length === 0 ? (
         <p className="px-4 py-6 text-sm text-ink-3">Accepted conversations appear here.</p>
       ) : (

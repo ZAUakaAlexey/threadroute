@@ -8,6 +8,8 @@ import { useRef, type ReactNode } from 'react';
 export interface Column<T> {
   readonly key: string;
   readonly header: ReactNode;
+  /** The name of the column header, when the header holds more than its label (a hint button). */
+  readonly label?: string;
   readonly render: (row: T) => ReactNode;
   readonly align?: 'start' | 'end';
 }
@@ -63,7 +65,7 @@ export function VirtualTable<T>({
             style={{ gridTemplateColumns: template, height: headerHeight }}
           >
             {columns.map((c) => (
-              <span key={c.key} role="columnheader" className={`eyebrow flex ${cellAlign(c)}`}>
+              <span key={c.key} role="columnheader" aria-label={c.label} className={`eyebrow flex ${cellAlign(c)}`}>
                 {c.header}
               </span>
             ))}

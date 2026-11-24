@@ -23,8 +23,9 @@ function start() {
 describe('supervisor board', () => {
   it('shows the flow totals', () => {
     start();
-    expect(screen.getByText('Messages per second').nextElementSibling).toHaveTextContent('3.50');
-    expect(screen.getByText('Operators online').nextElementSibling).toHaveTextContent('12');
+    // The label sits in the term with its help button; the value is the next element.
+    expect(screen.getByText('Messages per second').closest('dt')?.nextElementSibling).toHaveTextContent('3.50');
+    expect(screen.getByText('Operators online').closest('dt')?.nextElementSibling).toHaveTextContent('12');
   });
 
   it('lists operators in a table with kind and load', () => {

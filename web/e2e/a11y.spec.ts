@@ -57,6 +57,27 @@ for (const colorScheme of ['light', 'dark'] as const) {
       await expectNoViolations(page);
     });
 
+    test('every screen with a help hint open', async ({ page }) => {
+      await page.goto('#/');
+      await expect(page.getByText('Messages per second')).toBeVisible();
+      await page.getByRole('button', { name: 'About: Messages per second' }).click();
+      await expect(page.getByRole('dialog', { name: 'About: Messages per second' })).toBeVisible();
+      await expectNoViolations(page);
+
+      await page.goto('#/supervisor');
+      await expect(page.getByRole('rowheader', { name: /english/i })).toBeVisible();
+      await page.getByRole('button', { name: 'About: Oldest wait' }).focus();
+      await page.keyboard.press('Enter');
+      await expect(page.getByRole('dialog', { name: 'About: Oldest wait' })).toBeVisible();
+      await expectNoViolations(page);
+
+      await openDeskOnline(page);
+      await offer(page);
+      await page.getByRole('button', { name: 'About: Offers' }).click();
+      await expect(page.getByRole('dialog', { name: 'About: Offers' })).toBeVisible();
+      await expectNoViolations(page);
+    });
+
     test('supervisor view and its dialog', async ({ page }) => {
       await page.goto('#/supervisor');
       await expect(page.getByRole('table', { name: 'Conversations' }).getByRole('row').nth(3)).toBeVisible();

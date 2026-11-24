@@ -3,7 +3,9 @@ import { formatCount, formatRate, formatShortDuration, shortDurationParts, total
 import { useLive } from '../../live/hooks.ts';
 import { LiveSessionProvider } from '../../live/provider.tsx';
 import { ConnectionBanner, LiveStatus, NoticeLine } from '../../live/status-bar.tsx';
+import { HelpHint } from '../../ui/help-hint.tsx';
 import { Panel } from '../../ui/panel.tsx';
+import { ScreenTitle } from '../../ui/screen-title.tsx';
 import { Meter, Stat, StatGrid, StateBar } from '../../ui/stats.tsx';
 import { ConversationsPanel } from './conversations-panel.tsx';
 import { OperatorsPanel } from './operators-panel.tsx';
@@ -23,10 +25,7 @@ export function SupervisorScreen() {
 export function SupervisorBoard() {
   return (
     <>
-      <div>
-        <p className="eyebrow">Supervisor</p>
-        <h1 className="text-2xl font-semibold tracking-tight">Floor overview</h1>
-      </div>
+      <ScreenTitle eyebrow="Supervisor" title="Floor overview" description="supervisor.description" />
       <ConnectionBanner />
       <NoticeLine />
       <FlowPanel />
@@ -50,18 +49,20 @@ function FlowPanel() {
   return (
     <section aria-label="Flow" className="flex flex-col gap-3">
       <StatGrid label="Flow totals">
-        <Stat label="Messages per second" value={formatRate(totals.messages_per_second)} detail="last 10 seconds" />
-        <Stat label="Open conversations" value={formatCount(totalOpen(totals.conversations))} detail={`${formatCount(totals.conversations.waiting)} waiting`} tone={totals.conversations.waiting > 0 ? 'wait' : 'neutral'} />
-        <Stat label="Active companies" value={formatCount(totals.companies_active)} detail="with an open conversation" />
-        <Stat label="Operators online" value={formatCount(totals.operators_online)} detail={`${formatCount(totals.humans_online)} human, the rest simulated`} />
+        <Stat label="Messages per second" hint="supervisor.totals.messages" value={formatRate(totals.messages_per_second)} detail="last 10 seconds" />
+        <Stat label="Open conversations" hint="supervisor.totals.open" value={formatCount(totalOpen(totals.conversations))} detail={`${formatCount(totals.conversations.waiting)} waiting`} tone={totals.conversations.waiting > 0 ? 'wait' : 'neutral'} />
+        <Stat label="Active companies" hint="supervisor.totals.companies" value={formatCount(totals.companies_active)} detail="with an open conversation" />
+        <Stat label="Operators online" hint="supervisor.totals.operators" value={formatCount(totals.operators_online)} detail={`${formatCount(totals.humans_online)} human, the rest simulated`} />
         <Stat
           label="Slots in use"
+          hint="supervisor.totals.slots"
           value={formatCount(totals.slots_used)}
           unit={`/ ${formatCount(totals.slots_capacity)}`}
           detail={<Meter value={totals.slots_used} max={Math.max(1, totals.slots_capacity)} label="Slots in use against capacity" />}
         />
         <Stat
           label="Wait, median"
+          hint="supervisor.totals.wait"
           value={medianWait.value}
           unit={medianWait.unit}
           detail={`90th percentile ${formatShortDuration(totals.wait_p90_us)}`}
@@ -70,8 +71,11 @@ function FlowPanel() {
       <Panel
         title="Open conversations by state"
         meta={
-          <span className={missed > 0 ? 'text-late' : ''}>
-            missed targets last hour: {formatCount(totals.missed_assignment)} assignment, {formatCount(totals.missed_first_response)} first response
+          <span className="inline-flex items-center gap-1.5">
+            <span className={missed > 0 ? 'text-late' : ''}>
+              missed targets last hour: {formatCount(totals.missed_assignment)} assignment, {formatCount(totals.missed_first_response)} first response
+            </span>
+            <HelpHint id="supervisor.missed" label="Missed targets last hour" />
           </span>
         }
       >

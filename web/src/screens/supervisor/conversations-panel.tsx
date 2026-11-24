@@ -8,7 +8,8 @@ import { CONVERSATION_STATES, type ConversationRow, type ConversationState } fro
 import { CloseIcon, EyeIcon } from '../../ui/icons.tsx';
 import { languageName } from '../../ui/lang.ts';
 import { MessageList } from '../../ui/message-list.tsx';
-import { Panel } from '../../ui/panel.tsx';
+import { HelpHint } from '../../ui/help-hint.tsx';
+import { LabelWithHint, Panel } from '../../ui/panel.tsx';
 import { Select } from '../../ui/select.tsx';
 import { VirtualTable, type Column } from '../../ui/virtual-table.tsx';
 
@@ -45,9 +46,11 @@ export function ConversationsPanel() {
   return (
     <Panel
       title="Conversations"
+      hint="supervisor.panel.conversations"
       meta={`${rows.length} of ${all.length} shown`}
       actions={
         <>
+          <HelpHint id="supervisor.conversations.filters" label="Filters" />
           <label htmlFor={langId} className="sr-only">
             Filter by language
           </label>
@@ -77,11 +80,11 @@ export function ConversationsPanel() {
         label="Conversations"
         rows={rows}
         columns={COLUMNS}
-        template="minmax(150px,1.4fr) 56px 116px minmax(100px,1fr) 72px 64px minmax(90px,0.8fr) 72px"
+        template="minmax(150px,1.4fr) 64px 116px minmax(100px,1fr) 88px 72px minmax(90px,0.8fr) 72px"
         rowKey={(c) => c.id}
         maxHeight={480}
         empty="No conversation matches the filters."
-        minWidth={860}
+        minWidth={900}
       />
       <MessagesDialog />
     </Panel>
@@ -91,7 +94,8 @@ export function ConversationsPanel() {
 const COLUMNS: readonly Column<ConversationRow>[] = [
   {
     key: 'customer',
-    header: 'Customer',
+    header: <LabelWithHint label="Customer" hint="supervisor.conversations.customer" />,
+    label: 'Customer',
     render: (c) => (
       <span className="min-w-0">
         <span className="block truncate font-mono text-[13px]">{c.customer}</span>
@@ -99,10 +103,16 @@ const COLUMNS: readonly Column<ConversationRow>[] = [
       </span>
     ),
   },
-  { key: 'lang', header: 'Lang', render: (c) => <span className="font-mono text-xs">{c.lang}</span> },
+  {
+    key: 'lang',
+    header: <LabelWithHint label="Lang" hint="supervisor.conversations.lang" />,
+    label: 'Lang',
+    render: (c) => <span className="font-mono text-xs">{c.lang}</span>,
+  },
   {
     key: 'state',
-    header: 'State',
+    header: <LabelWithHint label="State" hint="supervisor.conversations.state" />,
+    label: 'State',
     render: (c) => (
       <span className={`rounded-full px-2 py-0.5 text-xs font-medium whitespace-nowrap ${STATE_STYLES[c.state]}`}>
         {c.state}
@@ -110,10 +120,16 @@ const COLUMNS: readonly Column<ConversationRow>[] = [
       </span>
     ),
   },
-  { key: 'operator', header: 'Operator', render: (c) => <span className="truncate font-mono text-xs text-ink-2">{c.operator_id ?? ''}</span> },
+  {
+    key: 'operator',
+    header: <LabelWithHint label="Operator" hint="supervisor.conversations.operator" />,
+    label: 'Operator',
+    render: (c) => <span className="truncate font-mono text-xs text-ink-2">{c.operator_id ?? ''}</span>,
+  },
   {
     key: 'wait',
-    header: 'Waiting',
+    header: <LabelWithHint label="Waiting" hint="supervisor.conversations.waiting" />,
+    label: 'Waiting',
     align: 'end',
     render: (c) =>
       c.queued_at_us === undefined || c.state === 'assigned' ? (
@@ -124,13 +140,15 @@ const COLUMNS: readonly Column<ConversationRow>[] = [
   },
   {
     key: 'messages',
-    header: 'Msgs',
+    header: <LabelWithHint label="Msgs" hint="supervisor.conversations.messages" />,
+    label: 'Messages',
     align: 'end',
     render: (c) => <span className="font-mono text-xs tnum">{c.customer_messages + c.company_messages}</span>,
   },
   {
     key: 'sla',
-    header: 'Targets',
+    header: <LabelWithHint label="Targets" hint="supervisor.conversations.targets" />,
+    label: 'Targets',
     render: (c) =>
       c.assignment_missed || c.first_response_missed ? (
         <span className="text-xs font-medium text-late">
@@ -198,6 +216,13 @@ function MessagesDialog() {
                     )}
                   </Dialog.Description>
                 </div>
+                {level !== null && (
+                  <HelpHint
+                    id={level === 'demo' ? 'live.messages.demo' : 'live.messages.full'}
+                    label="Messages"
+                    className="mt-1.5"
+                  />
+                )}
                 <Dialog.Close className="rounded-md p-1.5 text-ink-3 hover:bg-sunken hover:text-ink" aria-label="Close">
                   <CloseIcon className="size-4" />
                 </Dialog.Close>

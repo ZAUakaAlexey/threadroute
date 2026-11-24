@@ -8,7 +8,9 @@ import { formatCount, formatRate, formatShortDuration, shortDurationParts, total
 import type { PublicSnapshot } from '../../protocol/types.ts';
 import { AlertIcon, ArrowRightIcon } from '../../ui/icons.tsx';
 import { languageName } from '../../ui/lang.ts';
-import { Panel } from '../../ui/panel.tsx';
+import { HelpHint } from '../../ui/help-hint.tsx';
+import { useHelpText } from '../../ui/help-values.ts';
+import { LabelWithHint, Panel } from '../../ui/panel.tsx';
 import { ShortDuration } from '../../ui/short-duration.tsx';
 import { Meter, Stat, StatGrid, StateBar } from '../../ui/stats.tsx';
 import { publicSnapshotQuery } from './snapshot-query.ts';
@@ -51,11 +53,13 @@ function FreshnessBadge({ isStale, hasData }: { readonly isStale: boolean; reado
     <span className="flex items-center gap-1.5 text-xs text-ink-2">
       <span aria-hidden="true" className={`size-2 rounded-full ${isStale ? 'bg-wait' : 'bg-done'}`} />
       {isStale ? 'Stale' : 'Updated every 2 s'}
+      <HelpHint id="public.freshness" label="Update status" />
     </span>
   );
 }
 
 function Intro() {
+  const description = useHelpText('public.description');
   return (
     <section className="grid gap-6 py-4 lg:grid-cols-[1.4fr_1fr] lg:items-end lg:py-8">
       <div className="flex flex-col gap-4">
@@ -63,11 +67,7 @@ function Intro() {
         <h1 className="max-w-3xl text-3xl leading-tight font-semibold tracking-tight text-balance sm:text-4xl">
           Public conversations, routed to operators in real time.
         </h1>
-        <p className="max-w-2xl text-[15px] leading-relaxed text-ink-2">
-          threadroute reads the public Bluesky post stream, groups posts into customer and company conversations, and
-          routes them to simulated operators by language, with timers for every service target. This page shows totals
-          only: no post text, no account names and no keys.
-        </p>
+        <p className="max-w-2xl text-[15px] leading-relaxed text-ink-2">{description}</p>
       </div>
       <div className="flex flex-col gap-3 rounded-lg border border-line bg-panel p-4">
         <p className="text-sm text-ink-2">
@@ -100,23 +100,26 @@ function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
   return (
     <>
       <StatGrid label="Totals">
-        <Stat label="Messages per second" value={formatRate(t.messages_per_second)} detail="last 10 seconds" />
-        <Stat label="Open conversations" value={formatCount(totalOpen(t.conversations))} detail={`${formatCount(t.companies_active)} companies`} />
-        <Stat label="Operators online" value={formatCount(t.operators_online)} detail={`${formatCount(t.humans_online)} of them people`} />
+        <Stat label="Messages per second" hint="public.totals.messages" value={formatRate(t.messages_per_second)} detail="last 10 seconds" />
+        <Stat label="Open conversations" hint="public.totals.open" value={formatCount(totalOpen(t.conversations))} detail={`${formatCount(t.companies_active)} companies`} />
+        <Stat label="Operators online" hint="public.totals.operators" value={formatCount(t.operators_online)} detail={`${formatCount(t.humans_online)} of them people`} />
         <Stat
           label="Slots in use"
+          hint="public.totals.slots"
           value={formatCount(t.slots_used)}
           unit={`/ ${formatCount(t.slots_capacity)}`}
           detail={<Meter value={t.slots_used} max={Math.max(1, t.slots_capacity)} label="Slots in use against capacity" />}
         />
         <Stat
           label="Typical wait"
+          hint="public.totals.wait"
           value={typicalWait.value}
           unit={typicalWait.unit}
           detail={`90 percent within ${formatShortDuration(t.wait_p90_us)}`}
         />
         <Stat
           label="Missed targets"
+          hint="public.totals.missed"
           value={formatCount(t.missed_assignment + t.missed_first_response)}
           detail="last hour"
           tone={t.missed_assignment + t.missed_first_response > 0 ? 'late' : 'done'}
@@ -128,7 +131,7 @@ function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
             <StateBar counts={t.conversations} />
           </div>
         </Panel>
-        <Panel title="Queues by language" meta={snapshot.speed_factor === 1 ? undefined : `model time x${snapshot.speed_factor}`}>
+        <Panel title="Queues by language" hint="public.panel.queues" meta={snapshot.speed_factor === 1 ? undefined : `model time x${snapshot.speed_factor}`}>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[420px] text-sm">
               <thead>
@@ -136,17 +139,18 @@ function Numbers({ snapshot }: { readonly snapshot: PublicSnapshot }) {
                   <th scope="col" className="eyebrow px-4 py-2 font-normal">
                     Language
                   </th>
-                  <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
-                    Waiting
+                  {/* The label keeps the hint button out of the name of the column. */}
+                  <th scope="col" aria-label="Waiting" className="eyebrow px-4 py-2 text-right font-normal">
+                    <LabelWithHint label="Waiting" hint="public.queues.waiting" />
                   </th>
-                  <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
-                    Offered
+                  <th scope="col" aria-label="Offered" className="eyebrow px-4 py-2 text-right font-normal">
+                    <LabelWithHint label="Offered" hint="public.queues.offered" />
                   </th>
-                  <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
-                    Oldest wait
+                  <th scope="col" aria-label="Oldest wait" className="eyebrow px-4 py-2 text-right font-normal">
+                    <LabelWithHint label="Oldest wait" hint="public.queues.oldest" />
                   </th>
-                  <th scope="col" className="eyebrow px-4 py-2 text-right font-normal">
-                    Missed
+                  <th scope="col" aria-label="Missed" className="eyebrow px-4 py-2 text-right font-normal">
+                    <LabelWithHint label="Missed" hint="public.queues.missed" />
                   </th>
                 </tr>
               </thead>

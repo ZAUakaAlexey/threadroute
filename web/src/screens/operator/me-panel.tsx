@@ -6,6 +6,7 @@ import { useSettings } from '../../live/settings-store.ts';
 import { Meter } from '../../ui/stats.tsx';
 import { CheckIcon, ChevronDownIcon } from '../../ui/icons.tsx';
 import { PICKABLE_LANGUAGES, languageName } from '../../ui/lang.ts';
+import { HelpHint } from '../../ui/help-hint.tsx';
 import { Panel } from '../../ui/panel.tsx';
 
 export function MePanel() {
@@ -13,7 +14,7 @@ export function MePanel() {
   const operatorId = useLive((s) => s.welcome?.operator_id ?? null);
 
   return (
-    <Panel title="You" meta={operatorId === null ? 'connecting' : <span className="font-mono">{operatorId}</span>}>
+    <Panel title="You" hint="operator.panel.you" meta={operatorId === null ? 'connecting' : <span className="font-mono">{operatorId}</span>}>
       <div className="flex flex-col gap-4 p-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <PresenceSwitch />
@@ -24,6 +25,7 @@ export function MePanel() {
                 {me.load} of {me.capacity}
               </span>
               slots
+              <HelpHint id="operator.slots" label="Slots" />
             </span>
           )}
         </div>
@@ -64,6 +66,7 @@ function PresenceSwitch() {
         </span>
         <span className="block text-xs text-ink-3">{isOnline ? 'You get offers now' : 'Switch on to get offers'}</span>
       </span>
+      <HelpHint id="operator.online" label="Online" />
     </div>
   );
 }
@@ -86,7 +89,10 @@ function LanguagePicker() {
 
   return (
     <div className="flex flex-col gap-2">
-      <span className="eyebrow">Languages</span>
+      <span className="eyebrow flex items-center gap-1.5">
+        Languages
+        <HelpHint id="operator.languages" label="Languages" />
+      </span>
       <div className="flex flex-wrap items-center gap-1.5">
         {languages.map((code) => (
           <span key={code} className="rounded-md bg-sunken px-2 py-1 font-mono text-xs text-ink-2">

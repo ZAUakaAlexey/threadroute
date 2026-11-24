@@ -8,6 +8,7 @@ import { Countdown, Elapsed } from '../../live/timers.tsx';
 import type { OperatorConversation } from '../../protocol/types.ts';
 import { Button } from '../../ui/button.tsx';
 import { languageName } from '../../ui/lang.ts';
+import { HelpHint } from '../../ui/help-hint.tsx';
 import { Panel } from '../../ui/panel.tsx';
 
 export function OffersPanel() {
@@ -16,7 +17,7 @@ export function OffersPanel() {
   const isOnline = useLive((s) => s.me?.presence === 'online');
 
   return (
-    <Panel title="Offers" meta={acceptTimeout === null ? undefined : `accept within ${formatShortDuration(acceptTimeout)}`}>
+    <Panel title="Offers" hint="operator.panel.offers" meta={acceptTimeout === null ? undefined : `accept within ${formatShortDuration(acceptTimeout)}`}>
       {offers.length === 0 ? (
         <p className="px-4 py-6 text-sm text-ink-3">
           {isOnline
@@ -86,8 +87,11 @@ function OfferCard({ offer }: { readonly offer: OperatorConversation }) {
           <dd className="font-mono tnum">{offer.customer_messages + offer.company_messages}</dd>
         </div>
         {offer.priority > 0 && (
-          <div className="flex gap-1 text-late">
-            <dt>Priority</dt>
+          <div className="flex items-center gap-1 text-late">
+            <dt className="flex items-center gap-1.5">
+              Priority
+              <HelpHint id="operator.offer.priority" label="Priority" />
+            </dt>
             <dd className="font-mono tnum">{offer.priority}</dd>
           </div>
         )}

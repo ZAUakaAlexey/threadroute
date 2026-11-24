@@ -3,7 +3,7 @@ import { useLive } from '../../live/hooks.ts';
 import { selectQueues } from '../../live/selectors.ts';
 import { Elapsed } from '../../live/timers.tsx';
 import { languageName } from '../../ui/lang.ts';
-import { Panel } from '../../ui/panel.tsx';
+import { LabelWithHint, Panel } from '../../ui/panel.tsx';
 
 // The table stops at 420px (the column header and about ten and a half rows,
 // the same cap as the operators table) and scrolls under its sticky column
@@ -23,27 +23,28 @@ export function QueuesPanel() {
   const target = useLive((s) => s.welcome?.assignment_target_us ?? null);
 
   return (
-    <Panel title="Queues by language" meta={target === null ? undefined : `assignment target ${Math.round(target / 1_000_000)} s`}>
+    <Panel title="Queues by language" hint="supervisor.panel.queues" meta={target === null ? undefined : `assignment target ${Math.round(target / 1_000_000)} s`}>
       {/* The region is focusable so that a keyboard can scroll it. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex */}
       <div role="group" aria-label="Queues by language, scrollable" tabIndex={0} className={SCROLL}>
         <table aria-label="Queues by language" className="w-full min-w-[520px] text-sm">
           <thead>
             <tr className="text-left">
-              <th scope="col" className={HEAD}>
-                Language
+              {/* The label keeps the hint button out of the name of the column. */}
+              <th scope="col" aria-label="Language" className={HEAD}>
+                <LabelWithHint label="Language" hint="supervisor.queues.language" />
               </th>
-              <th scope="col" className={`${HEAD} text-right`}>
-                Waiting
+              <th scope="col" aria-label="Waiting" className={`${HEAD} text-right`}>
+                <LabelWithHint label="Waiting" hint="supervisor.queues.waiting" />
               </th>
-              <th scope="col" className={`${HEAD} text-right`}>
-                Offered
+              <th scope="col" aria-label="Offered" className={`${HEAD} text-right`}>
+                <LabelWithHint label="Offered" hint="supervisor.queues.offered" />
               </th>
-              <th scope="col" className={`${HEAD} text-right`}>
-                Oldest wait
+              <th scope="col" aria-label="Oldest wait" className={`${HEAD} text-right`}>
+                <LabelWithHint label="Oldest wait" hint="supervisor.queues.oldest" />
               </th>
-              <th scope="col" className={`${HEAD} text-right`}>
-                Missed
+              <th scope="col" aria-label="Missed" className={`${HEAD} text-right`}>
+                <LabelWithHint label="Missed" hint="supervisor.queues.missed" />
               </th>
             </tr>
           </thead>

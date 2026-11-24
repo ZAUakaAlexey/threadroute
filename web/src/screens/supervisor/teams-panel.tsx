@@ -2,6 +2,7 @@ import { formatCount, pluralWord } from '../../lib/format.ts';
 import { useLive } from '../../live/hooks.ts';
 import { selectTeams } from '../../live/selectors.ts';
 import { Elapsed } from '../../live/timers.tsx';
+import { HelpHint } from '../../ui/help-hint.tsx';
 import { Panel } from '../../ui/panel.tsx';
 import { TeamMembers } from './team-members.tsx';
 
@@ -16,7 +17,17 @@ export function TeamsPanel() {
   const teams = useLive(selectTeams);
 
   return (
-    <Panel title="Dedicated teams" meta={`${teams.length} ${pluralWord(teams.length, 'company', 'companies')}`} className={PANEL}>
+    <Panel
+      title="Dedicated teams"
+      hint="supervisor.panel.teams"
+      meta={
+        <span className="inline-flex items-center gap-1.5">
+          {`${teams.length} ${pluralWord(teams.length, 'company', 'companies')}`}
+          <HelpHint id="supervisor.teams.pool" label="Teams and the shared pool" />
+        </span>
+      }
+      className={PANEL}
+    >
       {teams.length === 0 ? (
         <p className="px-4 py-6 text-sm text-ink-3">No company has a dedicated team right now.</p>
       ) : (

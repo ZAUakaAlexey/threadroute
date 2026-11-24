@@ -3,8 +3,8 @@
 
 import { ROUTES } from '../app/route.ts';
 import { Button } from '../ui/button.tsx';
+import { HelpHint } from '../ui/help-hint.tsx';
 import { AlertIcon, CloseIcon, InfoIcon } from '../ui/icons.tsx';
-import { Tooltip } from '../ui/tooltip.tsx';
 import { useLive, useSession } from './hooks.ts';
 import { staleDetail } from './stale-text.ts';
 import { isLive } from './store.ts';
@@ -21,29 +21,24 @@ export function LiveStatus() {
   return (
     <>
       {speed !== 1 && (
-        <span className="rounded-full border border-line-strong px-2 py-0.5 font-mono text-[11px] text-ink-2">
+        <HelpHint id="live.speed" label={`Model time x${speed}`}>
           model time x{speed}
-        </span>
+        </HelpHint>
       )}
-      {level !== null && (
-        <Tooltip
-          content={
-            level === 'demo'
-              ? 'Demo level: no post text and no account IDs. Accounts and messages appear under daily pseudonyms.'
-              : 'Full level: post text and account IDs are visible to you. They stay in memory only.'
-          }
-        >
-          <button
-            type="button"
-            className="rounded-full border border-line-strong px-2 py-0.5 font-mono text-[11px] text-ink-2 hover:text-ink"
-          >
-            {level === 'demo' ? 'Demo level' : 'Full level'}
-          </button>
-        </Tooltip>
+      {level === 'demo' && (
+        <HelpHint id="live.level.demo" label="Demo level">
+          Demo level
+        </HelpHint>
+      )}
+      {level === 'full' && (
+        <HelpHint id="live.level.full" label="Full level">
+          Full level
+        </HelpHint>
       )}
       <span className="flex items-center gap-1.5 text-xs text-ink-2">
         <span aria-hidden="true" className={`size-2 rounded-full ${dot}`} />
         {connectionLabel}
+        <HelpHint id="live.connection" label="Connection status" />
       </span>
     </>
   );
@@ -71,6 +66,7 @@ export function ConnectionBanner() {
         tone: 'late' as const,
         title: connection.close?.message ?? 'Disconnected.',
         detail: 'Live updates are stopped. Timers are stopped.',
+        hint: null,
         action:
           code === 4426 ? (
             <Button size="sm" tone="primary" onClick={handleReload}>
@@ -88,6 +84,7 @@ export function ConnectionBanner() {
         tone: 'wait' as const,
         title: connection.close?.message ?? 'The connection to the gateway was lost.',
         detail: `Reconnecting (try ${connection.attempt}). The data below is from before the loss, and timers are stopped.`,
+        hint: 'live.banner.reconnecting' as const,
         action: (
           <Button size="sm" onClick={handleReconnect}>
             Try now
@@ -102,13 +99,19 @@ export function ConnectionBanner() {
       };
     }
     if (connection.phase === 'connecting' && hasData) {
-      return { tone: 'wait' as const, title: 'Reconnecting to the gateway.', detail: 'Timers are stopped until the new data arrives.' };
+      return {
+        tone: 'wait' as const,
+        title: 'Reconnecting to the gateway.',
+        detail: 'Timers are stopped until the new data arrives.',
+        hint: 'live.banner.reconnecting' as const,
+      };
     }
     if (connection.phase === 'open' && status?.stale === true) {
       return {
         tone: 'wait' as const,
         title: 'The data is stale.',
         detail: `${staleDetail(status)} Timers are stopped.`,
+        hint: 'live.banner.stale' as const,
       };
     }
     return null;
@@ -127,6 +130,7 @@ export function ConnectionBanner() {
             <strong className="font-semibold">{view.title}</strong> <span className="text-ink-2">{view.detail}</span>{' '}
             {'extra' in view ? view.extra : null}
           </p>
+          {view.hint !== null && <HelpHint id={view.hint} label={view.hint === 'live.banner.stale' ? 'Stale data' : 'Lost connection'} />}
           {'action' in view ? view.action : null}
         </div>
       )}

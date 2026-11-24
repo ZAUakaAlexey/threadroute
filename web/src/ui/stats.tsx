@@ -3,8 +3,10 @@
 
 import type { ReactNode } from 'react';
 
+import type { HelpId } from '../lib/help-texts.ts';
 import type { StateCounts } from '../protocol/types.ts';
 import { formatCount, percent } from '../lib/format.ts';
+import { HelpHint } from './help-hint.tsx';
 
 type StatTone = 'neutral' | 'wait' | 'late' | 'done';
 
@@ -17,16 +19,21 @@ const VALUE_TONES: Readonly<Record<StatTone, string>> = {
 
 interface StatProps {
   readonly label: string;
+  /** A help text about the number, next to the label. */
+  readonly hint?: HelpId;
   readonly value: ReactNode;
   readonly unit?: string;
   readonly detail?: ReactNode;
   readonly tone?: StatTone;
 }
 
-export function Stat({ label, value, unit, detail, tone = 'neutral' }: StatProps) {
+export function Stat({ label, hint, value, unit, detail, tone = 'neutral' }: StatProps) {
   return (
     <div className="flex min-w-0 flex-col gap-1.5 bg-panel px-4 py-3">
-      <dt className="eyebrow truncate">{label}</dt>
+      <dt className="eyebrow flex min-w-0 items-center gap-1.5">
+        <span className="truncate">{label}</span>
+        {hint !== undefined && <HelpHint id={hint} label={label} />}
+      </dt>
       <dd className={`font-mono text-2xl leading-none font-medium tnum ${VALUE_TONES[tone]}`}>
         {value}
         {unit !== undefined && <span className="ml-1 text-sm font-normal text-ink-3">{unit}</span>}
@@ -77,12 +84,12 @@ export function Meter({ value, max, label }: MeterProps) {
 }
 
 const STATE_SEGMENTS = [
-  { key: 'open', label: 'Open', className: 'bg-ink-3/40' },
-  { key: 'waiting', label: 'Waiting', className: 'bg-wait' },
-  { key: 'offered', label: 'Offered', className: 'bg-accent/60' },
-  { key: 'assigned', label: 'Assigned', className: 'bg-accent' },
-  { key: 'resolved', label: 'Resolved', className: 'bg-done' },
-] as const;
+  { key: 'open', label: 'Open', className: 'bg-ink-3/40', hint: 'state.open' },
+  { key: 'waiting', label: 'Waiting', className: 'bg-wait', hint: 'state.waiting' },
+  { key: 'offered', label: 'Offered', className: 'bg-accent/60', hint: 'state.offered' },
+  { key: 'assigned', label: 'Assigned', className: 'bg-accent', hint: 'state.assigned' },
+  { key: 'resolved', label: 'Resolved', className: 'bg-done', hint: 'state.resolved' },
+] as const satisfies readonly { readonly key: keyof StateCounts; readonly label: string; readonly className: string; readonly hint: HelpId }[];
 
 /** Open conversations by state, as one bar with a legend. */
 export function StateBar({ counts }: { readonly counts: StateCounts }) {
@@ -101,6 +108,7 @@ export function StateBar({ counts }: { readonly counts: StateCounts }) {
               <span aria-hidden="true" className={`size-2 rounded-[2px] ${s.className}`} />
               {s.label}
               <span className="font-mono text-ink tnum">{formatCount(counts[s.key])}</span>
+              <HelpHint id={s.hint} label={`${s.label} state`} />
             </li>
           ))}
         </ul>

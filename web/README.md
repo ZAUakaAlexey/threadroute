@@ -57,7 +57,8 @@ Screens use hash routes (`#/operator`), so the web server needs no rewrite rules
 src/protocol/   types, run-time parser, message builders, close codes, WebSocket client (no React)
 src/live/       Zustand store of the live view, session glue, shared clock tick, timers, hooks
 src/screens/    operator, supervisor and public screens
-src/ui/         shared components (panel, tables, tiles, select, message list, icons)
+src/ui/         shared components (panel, tables, tiles, select, message list, help hints, icons)
+src/lib/        formats, and help-texts.ts: every help hint and screen description, keyed by ID
 fake-gateway/   Node fake of the gateway for development and tests (not in the build)
 e2e/            Playwright tests, with axe checks of every screen in light and dark
 ```

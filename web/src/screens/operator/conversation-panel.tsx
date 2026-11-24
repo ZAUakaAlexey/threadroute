@@ -6,6 +6,8 @@ import { Button } from '../../ui/button.tsx';
 import { CheckIcon } from '../../ui/icons.tsx';
 import { languageName } from '../../ui/lang.ts';
 import { MessageList } from '../../ui/message-list.tsx';
+import { HelpHint } from '../../ui/help-hint.tsx';
+import { useHelpText } from '../../ui/help-values.ts';
 import { Panel } from '../../ui/panel.tsx';
 import { FirstResponseBadge } from './held-panel.tsx';
 
@@ -33,6 +35,7 @@ function ConversationView({ conversation }: { readonly conversation: OperatorCon
   const isReplying = useLive((s) => s.busy.has(`reply:${conversation.offer_id}`));
   const isResolving = useLive((s) => s.busy.has(`resolve:${conversation.offer_id}`));
   const isLive = useLive((s) => s.connection.phase === 'open');
+  const note = useHelpText('operator.conversation.note');
 
   function handleReply() {
     void session.offerAction('reply', conversation.offer_id);
@@ -45,12 +48,14 @@ function ConversationView({ conversation }: { readonly conversation: OperatorCon
   return (
     <Panel
       title="Conversation"
+      hint="operator.panel.conversation"
       className="flex flex-col lg:min-h-[480px]"
       meta={
         <span>
           {languageName(conversation.lang)}, session {conversation.session}
         </span>
       }
+      actions={level === null ? undefined : <HelpHint id={level === 'demo' ? 'live.messages.demo' : 'live.messages.full'} label="Messages" />}
     >
       <div className="grid gap-4 border-b border-line px-4 py-4 sm:grid-cols-[1fr_auto]">
         <div className="min-w-0">
@@ -61,19 +66,28 @@ function ConversationView({ conversation }: { readonly conversation: OperatorCon
         </div>
         <dl className="flex flex-wrap items-start gap-x-6 gap-y-2 text-xs">
           <div>
-            <dt className="eyebrow">Waiting</dt>
+            <dt className="eyebrow flex items-center gap-1.5">
+              Waiting
+              <HelpHint id="operator.waiting" label="Waiting" />
+            </dt>
             <dd className="text-lg">
               <Elapsed sinceUs={conversation.queued_at_us} label="Waiting time" />
             </dd>
           </div>
           <div>
-            <dt className="eyebrow">First response</dt>
+            <dt className="eyebrow flex items-center gap-1.5">
+              First response
+              <HelpHint id="operator.first-response" label="First response" />
+            </dt>
             <dd className="text-lg">
               <FirstResponseBadge row={conversation} hasCaption={false} />
             </dd>
           </div>
           <div>
-            <dt className="eyebrow">Messages</dt>
+            <dt className="eyebrow flex items-center gap-1.5">
+              Messages
+              <HelpHint id="operator.messages" label="Messages count" />
+            </dt>
             <dd className="font-mono text-lg tnum">
               {conversation.customer_messages}
               <span className="text-ink-3"> / {conversation.company_messages}</span>
@@ -97,8 +111,9 @@ function ConversationView({ conversation }: { readonly conversation: OperatorCon
         <Button onClick={handleResolve} disabled={isResolving}>
           Resolve
         </Button>
-        <p className="ml-auto max-w-sm text-xs text-ink-3">
-          "Mark replied" only records a marker. Nothing is posted to Bluesky.
+        <p className="ml-auto flex max-w-sm items-center gap-1.5 text-xs text-ink-3">
+          {note}
+          <HelpHint id="operator.actions" label="Conversation actions" />
         </p>
       </footer>
     </Panel>
