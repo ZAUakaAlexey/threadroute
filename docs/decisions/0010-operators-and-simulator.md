@@ -23,6 +23,7 @@ The router exposes an HTTP API for operator actions: go online or offline, accep
 - **Three outcomes.** A call answers "done", "already done" (a repeat, nothing changed) or a rejection with a reason code (the state moved on, for example the offer expired or the conversation was closed). Resolving a conversation that `conv` has already closed is a rejection, not "already done", because the operator did not end it.
 - **Replies.** A reply marker carries an ID chosen by the caller, so a repeated call does not record a second reply.
 - **Operators.** The simulator creates its operators through the API at start. A new operator is offline.
+- **Priority.** Since 2026-11-24 the request that creates or changes an operator may carry a priority from 0 to 9. It is 0 when it is absent, and the answer of the API shows it. The router uses it only to break a tie between operators with the same load (decision 0009). The gateway sends 1 for the operators of people, and the simulator sends none.
 
 ### How operators learn about offers
 

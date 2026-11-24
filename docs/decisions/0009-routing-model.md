@@ -28,7 +28,8 @@ Companies come and go within hours (decision 0008), so a dedicated team needs a 
 
 - A conversation that needs an operator waits in a queue. The queue of a conversation is its language, plus its company when that company has a dedicated team.
 - Inside a queue the order is by priority, then by waiting time. Priority starts at normal and rises when an SLA target is missed.
-- A conversation whose language is unknown (`und`) goes to a general queue that every operator of the shared pool can serve.
+- A conversation whose language is unknown (`und`) goes to a general queue. An operator serves it when their languages include `und`.
+- Since 2026-11-24 the operators of the general queue also take a conversation whose language no online operator has. See "Changes after the first live run of the console".
 
 ### Dedicated teams
 
@@ -41,7 +42,7 @@ Companies come and go within hours (decision 0008), so a dedicated team needs a 
 ### Assignment
 
 1. When a conversation opens or reopens, the router puts it in its queue. A reopened conversation is offered first to its previous operator, if that operator is online and has a free slot.
-2. For a waiting conversation the router picks an operator who is online, has the language, has a free slot and belongs to the right group (the team of the company, or the shared pool). Among those it picks the one with the lowest load.
+2. For a waiting conversation the router picks an operator who is online, has the language, has a free slot and belongs to the right group (the team of the company, or the shared pool). Among those it picks the one with the lowest load. Since 2026-11-24 a priority of the operator breaks a tie (see "Changes after the first live run of the console").
 3. The pick and the reservation of the slot happen in one database transaction with `FOR UPDATE SKIP LOCKED` on the conversation row and the operator row, so two router workers can never give one conversation to two operators or overfill one operator.
 4. The operator gets an offer and must accept within the accept timeout. On accept the conversation is assigned. On timeout or refusal the slot is freed, the conversation returns to the queue with its waiting time kept, and that operator is skipped for this conversation.
 5. The operator resolves the conversation when they are done. That frees the slot. A later customer message in the same session puts the conversation back in the queue, with the same operator preferred.
@@ -90,6 +91,32 @@ These points follow from the decisions above and from decisions 0007 and 0008.
 - **Capacity.** The load of an operator is counted from their live offers and assignments and is not stored. When the capacity of an operator is lowered below their load, they keep what they hold and get nothing new until the load is below the new capacity.
 - **One consumer process.** The router reads `conversations` as one process with several assignment workers inside. The database operations are safe for several processes, but the catch-up phase assumes one. The outbox is published under a database lock, so only one process publishes at a time.
 - **A conversation that never closes.** If `conv` loses its state, the "closed" event of a conversation never arrives. The slot is still freed when the operator resolves the conversation, so no operator stays blocked. The row of such a conversation stays in the database. Cleaning these rows up is not decided yet.
+
+## Changes after the first live run of the console (2026-11-24)
+
+The first run with a browser (41 minutes, README, stage 4) showed two problems in the rules above. The project owner chose a change for each on 2026-11-24.
+
+### A language that no online operator has
+
+Conversations in Danish, Dutch, Polish, Russian and other small languages waited for minutes and missed their targets, because no operator had the language. Such a conversation waited until `conv` closed it.
+
+- **Rule.** When no online operator of the shared pool has the language of a waiting conversation, operators who serve the general queue (`und`) may take it. When at least one online operator of the shared pool has the language, the conversation waits for those operators as before, also when all of them are busy.
+- **Checked at every pick.** The rule is not a move between queues. The conversation keeps its language and its place by priority and waiting time, and the router checks the rule each time it looks for an operator. So nothing has to move when the last operator of a language goes offline or the first one comes online.
+- **Teams.** Nothing changes for a team queue. A conversation of a team company whose language no team member has is already served from the shared pool, and this rule then applies to it there.
+- **Skips** work as before. "Every online operator who could take the conversation" now includes the operators of the general queue when the rule applies.
+- **Counted.** The router counts the offers made under this rule, so the share of conversations that nobody with the language served is visible.
+
+Options that were not chosen: use the general queue only after the assignment target has passed (60 seconds of waiting that nobody can use), and no change (an honest picture of a missing skill, but a conversation that can never be served).
+
+### An operator priority
+
+A person in the console waited 374 to 469 seconds for a first offer in the first minutes after a cold start, and 2 to 10 seconds later in the run. The cause: among operators with the same lowest load the router took the lowest operator ID, and the IDs of simulated operators sort before the IDs of people. While any simulated operator with the language was idle, a person got nothing.
+
+- **Rule.** An operator has a priority, a small whole number, 0 by default. Among the operators that pass every rule, the order is: the previous operator of the conversation, then the lowest load, then the highest priority, then the operator ID.
+- **Who sets it.** The caller of the operator API (decision 0010). The gateway gives the operators of people priority 1. The simulator sends none. The router still does not know whether an operator is a person.
+- **What it changes.** A person with no conversation gets the next conversation in their languages. A person who already holds one still loses to an idle simulated operator, so the simulated numbers change very little.
+
+Options that were not chosen: priority before load (a person gets offers while they have a free slot, which moves further away from "lowest load"), and no change.
 
 ## Choices confirmed by the project owner
 

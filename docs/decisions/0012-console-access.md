@@ -56,6 +56,7 @@ Recommendation: **B**. Rules that follow:
 - A closed connection puts the operator offline after a short grace time (15 seconds), so that a page reload does not drop their conversations. Offline returns the conversations to the queue (decision 0009).
 - A human operator chooses languages in the console and has a capacity of 2.
 - How long a human waits for a first offer is measured in the first run. In the stage 3 run the router made about 28 offers per minute for about 180 operators. If the wait is longer than a minute, a rule that prefers human operators is proposed as a change to decision 0009.
+- Measured on 2026-11-24: 374 to 469 seconds in the first minutes after a cold start, while simulated operators were idle, and 2 to 10 seconds later in the run. The project owner chose an operator priority that breaks a tie between operators with the same load (decision 0009, "An operator priority"). The gateway gives human operators priority 1.
 
 ### 5. How the token reaches the gateway
 
