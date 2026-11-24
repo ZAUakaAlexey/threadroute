@@ -12,9 +12,12 @@ build:
 test:
 	$(GO) test -race ./...
 
-# Needs Docker: starts a real Kafka broker with Testcontainers.
+# Needs Docker: starts real Kafka and Redis with Testcontainers. -p 1 runs
+# the packages one after another, because each one starts its own containers.
+INTEGRATION_PKGS := ./internal/bus/... ./internal/normalize/... ./internal/conv/...
+
 test-integration:
-	$(GO) test -race -count=1 -tags integration ./internal/bus/...
+	$(GO) test -race -count=1 -p 1 -tags integration $(INTEGRATION_PKGS)
 
 lint:
 	golangci-lint run ./...
@@ -22,7 +25,8 @@ lint:
 vuln:
 	govulncheck ./...
 
-# Starts Kafka and ingest. Add --profile record to also start the recorder.
+# Starts Kafka, Redis, ingest, normalize and conv. Add --profile record to
+# also start the recorder.
 up:
 	$(COMPOSE) up -d --build
 

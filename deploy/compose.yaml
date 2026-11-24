@@ -1,9 +1,17 @@
-# Local development stack for stage 1: Kafka, ingest and (optional) record.
+# Local development stack: Kafka, Redis, ingest, normalize, conv and
+# (optional) record.
 #
-#   docker compose -f deploy/compose.yaml up -d --build            # kafka + ingest
+#   docker compose -f deploy/compose.yaml up -d --build            # the pipeline
 #   docker compose -f deploy/compose.yaml --profile record up -d   # also record
 #
-# Every published port listens on 127.0.0.1 only. No secrets exist in stage 1.
+# Start order: ingest creates raw.bluesky and ingest.cursor, normalize waits
+# for raw.bluesky and creates events and events.control, conv waits for those
+# two and creates conversations. Each service waits a bounded time (2 minutes
+# by default) and then exits, and the restart policy starts it again, so a
+# cold start needs no manual steps.
+#
+# Every published port listens on 127.0.0.1 only. No secrets exist yet:
+# Redis has no password and is reachable from the host only.
 
 name: threadroute
 
@@ -62,6 +70,57 @@ services:
         limits:
           memory: 1g
 
+  # Deduplication keys of normalize, and conversation state, outboxes and
+  # applied-event markers of conv. normalize needs Redis 7.0 or newer.
+  redis:
+    image: redis:7.4.7-alpine
+    hostname: redis
+    restart: unless-stopped
+    # The uid and gid of the redis user in the image. The entrypoint then
+    # skips its chown and user switch, which would need capabilities.
+    user: "999:1000"
+    command:
+      - redis-server
+      # Below the container limit, so a full Redis refuses writes with an
+      # error before the kernel kills it. noeviction: a silently evicted
+      # dedup key, applied marker or conversation key would break
+      # deduplication and conversation state, so Redis must refuse writes
+      # instead. normalize and conv stop on a Redis error.
+      # The 2026-11-24 run grew by about 35 MiB per hour, and most keys
+      # live 7 to 8 hours, so about 250 MiB is expected after 8 hours of
+      # quiet traffic. 768mb leaves room for busier hours and bursts.
+      - --maxmemory
+      - 768mb
+      - --maxmemory-policy
+      - noeviction
+      # Memory only: no RDB snapshots, no append-only file. Redis holds post
+      # text, and decision 0004 removes it at once on a deletion. An
+      # append-only file would keep deleted text on disk until its next
+      # rewrite. The cost: a Redis restart loses the conversation state and
+      # the outbox, see the README.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    ports:
+      - "127.0.0.1:${THREADROUTE_REDIS_HOST_PORT:-6379}:6379"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          # maxmemory plus room for the process itself.
+          memory: 1g
+
   ingest:
     <<: *go-service
     build:
@@ -86,6 +145,91 @@ services:
       - "127.0.0.1:9464:9464"
     # Ingest lets the current batch finish (up to 10s) and then flushes the
     # producer (up to 10s) before it exits.
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  normalize:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: normalize
+    image: threadroute-normalize:dev
+    # The anchor merge is shallow, so the whole list is repeated here.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_REDIS_ADDR: redis:6379
+      THREADROUTE_REDIS_PASSWORD: ${THREADROUTE_REDIS_PASSWORD:-}
+      THREADROUTE_REDIS_DB: ${THREADROUTE_REDIS_DB:-0}
+      THREADROUTE_NORMALIZE_GROUP_ID: ${THREADROUTE_NORMALIZE_GROUP_ID:-threadroute-normalize}
+      THREADROUTE_NORMALIZE_TRANSACTIONAL_ID: ${THREADROUTE_NORMALIZE_TRANSACTIONAL_ID:-threadroute-normalize}
+      THREADROUTE_NORMALIZE_START: ${THREADROUTE_NORMALIZE_START:-beginning}
+      THREADROUTE_NORMALIZE_MAX_BATCH_RECORDS: ${THREADROUTE_NORMALIZE_MAX_BATCH_RECORDS:-1000}
+      THREADROUTE_NORMALIZE_DEDUP_KEY_LIFETIME: ${THREADROUTE_NORMALIZE_DEDUP_KEY_LIFETIME:-10m}
+      THREADROUTE_NORMALIZE_RAW_TOPIC_WAIT: ${THREADROUTE_NORMALIZE_RAW_TOPIC_WAIT:-2m}
+      THREADROUTE_NORMALIZE_METRICS_ADDR: ":9466"
+      THREADROUTE_NORMALIZE_PRODUCER_MAX_BUFFERED_RECORDS: ${THREADROUTE_NORMALIZE_PRODUCER_MAX_BUFFERED_RECORDS:-10000}
+      THREADROUTE_NORMALIZE_PRODUCER_MAX_BUFFERED_BYTES: ${THREADROUTE_NORMALIZE_PRODUCER_MAX_BUFFERED_BYTES:-33554432}
+      THREADROUTE_NORMALIZE_PRODUCER_DELIVERY_TIMEOUT: ${THREADROUTE_NORMALIZE_PRODUCER_DELIVERY_TIMEOUT:-2m}
+    ports:
+      - "127.0.0.1:9466:9466"
+    # A batch in progress gets 10s to commit and the end of the transaction
+    # up to 15s more (internal/normalize).
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  conv:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: conv
+    image: threadroute-conv:dev
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_REDIS_ADDR: redis:6379
+      THREADROUTE_REDIS_PASSWORD: ${THREADROUTE_REDIS_PASSWORD:-}
+      THREADROUTE_REDIS_DB: ${THREADROUTE_REDIS_DB:-0}
+      THREADROUTE_CONV_GROUP_ID: ${THREADROUTE_CONV_GROUP_ID:-threadroute-conv}
+      THREADROUTE_CONV_METRICS_ADDR: ":9467"
+      THREADROUTE_CONV_SWEEP_INTERVAL: ${THREADROUTE_CONV_SWEEP_INTERVAL:-1s}
+      THREADROUTE_CONV_INPUT_TOPIC_WAIT: ${THREADROUTE_CONV_INPUT_TOPIC_WAIT:-2m}
+      THREADROUTE_CONV_ADMISSION_THRESHOLD: ${THREADROUTE_CONV_ADMISSION_THRESHOLD:-10}
+      THREADROUTE_CONV_ADMISSION_WINDOW: ${THREADROUTE_CONV_ADMISSION_WINDOW:-1h}
+      THREADROUTE_CONV_ADMISSION_IDLE: ${THREADROUTE_CONV_ADMISSION_IDLE:-2h}
+      THREADROUTE_CONV_COMPANY_LIMIT: ${THREADROUTE_CONV_COMPANY_LIMIT:-0}
+      THREADROUTE_CONV_INACTIVITY_TIMEOUT: ${THREADROUTE_CONV_INACTIVITY_TIMEOUT:-30m}
+      THREADROUTE_CONV_TEXT_KEPT_AFTER_CLOSE: ${THREADROUTE_CONV_TEXT_KEPT_AFTER_CLOSE:-10m}
+      THREADROUTE_CONV_MESSAGES_KEPT: ${THREADROUTE_CONV_MESSAGES_KEPT:-50}
+      THREADROUTE_CONV_SESSION_RECORD_KEPT: ${THREADROUTE_CONV_SESSION_RECORD_KEPT:-24h}
+      THREADROUTE_CONV_EARLY_DELETION_KEPT: ${THREADROUTE_CONV_EARLY_DELETION_KEPT:-10m}
+      THREADROUTE_CONV_APPLIED_LIFETIME: ${THREADROUTE_CONV_APPLIED_LIFETIME:-7h}
+      THREADROUTE_CONV_KEY_MARGIN: ${THREADROUTE_CONV_KEY_MARGIN:-7h}
+    ports:
+      - "127.0.0.1:9467:9467"
+    # A normal batch takes milliseconds. If conv is killed in the middle of
+    # one, its offsets are not committed and the outbox stays in Redis, so
+    # the next start publishes it and redelivered records change nothing.
     stop_grace_period: 30s
     deploy:
       resources:
