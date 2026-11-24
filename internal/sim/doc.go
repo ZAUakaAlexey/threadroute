@@ -36,6 +36,16 @@
 // from an earlier run is never used: the start position of a partition is
 // the larger of its committed offset and the end offset read in step 4.
 //
+// # Stop
+//
+// On a clean stop (the context of Run ends), once the workers have
+// returned, the simulator puts every operator offline through the API, so
+// the router stops offering them conversations and returns what they hold
+// to the queues. This is bounded to 10 seconds; operators not confirmed by
+// then are counted in a log line and stay online in the router until the
+// next start (step 5 above). After an error exit, for example an outage of
+// the router, nothing is called: the restart does it.
+//
 // # Time
 //
 // Every delay of the behaviour (accept delay, handling and resolve times,

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,6 +43,10 @@ const (
 	assignPoll = 20 * time.Millisecond
 	// clientCloseTimeout bounds the close of the Kafka client at the end.
 	clientCloseTimeout = 10 * time.Second
+	// stopOfflineWait bounds putting every operator offline on a clean
+	// stop. Together with clientCloseTimeout it stays under the stop grace
+	// period of deploy/compose.yaml.
+	stopOfflineWait = 10 * time.Second
 )
 
 // Options are the dependencies of a Service.
@@ -74,6 +79,8 @@ type Service struct {
 	consumerOpts []kgo.Opt
 	ids          []string
 	langs        [][]string
+	// stopWait is stopOfflineWait. Tests change it.
+	stopWait time.Duration
 
 	running  atomic.Bool
 	assigned atomic.Bool
@@ -119,7 +126,7 @@ func New(o Options) (*Service, error) {
 	s := &Service{
 		cfg: o.Config, api: o.API, clock: o.Clock, logger: o.Logger, m: m,
 		topic: o.RoutingTopic, consumerOpts: o.ConsumerOpts,
-		langs: operatorLangs(scaled),
+		langs: operatorLangs(scaled), stopWait: stopOfflineWait,
 	}
 	for i := range s.langs {
 		s.ids = append(s.ids, operatorID(i+1))
@@ -178,6 +185,15 @@ func (s *Service) run(ctx context.Context) error {
 		return err
 	}
 	s.logger.Info("operators created or updated", "operators", len(s.ids))
+	// From here the operators exist in the router. On a clean stop they go
+	// offline, after the workers have returned (every path below waits for
+	// the errgroup), so no late online call can undo it. See "Stop" in the
+	// package documentation.
+	defer func() {
+		if ctx.Err() != nil {
+			s.offlineAtStop(ctx)
+		}
+	}()
 
 	ends, err := s.endOffsets(ctx, admin)
 	if err != nil {
@@ -407,6 +423,68 @@ func (s *Service) forEachOperator(ctx context.Context, action string, call func(
 		})
 	}
 	return g.Wait()
+}
+
+// offlineAtStop puts every operator offline, startParallel at a time,
+// within stopWait. A 503 or no answer is retried with a backoff until then.
+// It logs how many operators it could not put offline. parent has already
+// ended, so the calls use a new context.
+func (s *Service) offlineAtStop(parent context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), s.stopWait)
+	defer cancel()
+	var left atomic.Int64
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, startParallel)
+	for i := range s.ids {
+		wg.Go(func() {
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				left.Add(1)
+				return
+			}
+			defer func() { <-sem }()
+			if !s.offlineOne(ctx, s.ids[i]) {
+				left.Add(1)
+			}
+		})
+	}
+	wg.Wait()
+	n := left.Load()
+	if n > 0 {
+		s.logger.Warn("some operators could not be put offline at stop; the router keeps them online until the next start",
+			"operators", len(s.ids), "left", n, "wait", s.stopWait.String())
+		return
+	}
+	s.logger.Info("every operator put offline at stop", "operators", len(s.ids))
+}
+
+// offlineOne puts one operator offline and reports whether the router
+// confirmed it.
+func (s *Service) offlineOne(ctx context.Context, id string) bool {
+	backoff := minBackoff
+	for {
+		res, err := s.api.Offline(ctx, id)
+		label, _, out := classify(res, err)
+		s.m.calls.WithLabelValues(actionOffline, label).Inc()
+		switch out {
+		case outcomeSuccess:
+			return true
+		case outcomeRejected, outcomeFailed:
+			s.logger.Warn("operator not put offline at stop", "operator_id", id, "error", err)
+			return false
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		s.m.retries.WithLabelValues(actionOffline).Inc()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-s.clock.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
 }
 
 // outageClock tracks since when calls have failed without an answer. It

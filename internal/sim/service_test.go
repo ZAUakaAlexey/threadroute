@@ -1,10 +1,13 @@
 package sim
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
 	"slices"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -198,6 +201,133 @@ func TestServiceStop(t *testing.T) {
 	case <-time.After(15 * time.Second):
 		t.Fatal("Run did not stop")
 	}
+}
+
+// TestServiceStopPutsOperatorsOffline: a clean stop puts every operator
+// offline after its last online call, and gives up after the stop wait when
+// the router does not answer, with the count in the log.
+func TestServiceStopPutsOperatorsOffline(t *testing.T) {
+	c := newCluster(t)
+	tests := []struct {
+		name string
+		// down makes every call after the stop go unanswered.
+		down     bool
+		wantLeft string
+	}{
+		{name: "router answers"},
+		{name: "router gone", down: true, wantLeft: `"left":3`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := &fakeAPI{clock: SystemClock{}, settings: testSettings()}
+			var logs lockedBuffer
+			logger := slog.New(slog.NewJSONHandler(&logs, nil))
+			svc, err := New(Options{Config: testConfig(c.ListenAddrs()), API: api, Logger: logger, Registerer: prometheus.NewRegistry()})
+			if err != nil {
+				t.Fatal(err)
+			}
+			svc.stopWait = 300 * time.Millisecond
+			ctx, cancel := context.WithCancel(t.Context())
+			done := make(chan error, 1)
+			go func() { done <- svc.Run(ctx) }()
+			waitUntil(t, "online calls", func() bool { return len(api.callsOf(actionOnline)) == 3 })
+
+			before := len(api.callsOf(""))
+			if tt.down {
+				api.mu.Lock()
+				api.answer = func(call) (opapi.Result, error) { return "", errNoAnswer }
+				api.mu.Unlock()
+			}
+			stopped := time.Now()
+			cancel()
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("Run() = %v after a stop", err)
+				}
+			case <-time.After(15 * time.Second):
+				t.Fatal("Run did not stop")
+			}
+			if took := time.Since(stopped); took > 5*time.Second {
+				t.Errorf("stop took %s", took)
+			}
+
+			after := api.callsOf("")[before:]
+			offline := map[string]bool{}
+			for _, cl := range after {
+				if cl.action != actionOffline {
+					t.Errorf("call %s after the stop, want only offline calls", cl)
+					continue
+				}
+				offline[cl.op] = true
+			}
+			for _, id := range svc.ids {
+				if !offline[id] {
+					t.Errorf("no offline call for %s after the stop", id)
+				}
+			}
+			out := logs.String()
+			if tt.wantLeft != "" {
+				if !strings.Contains(out, tt.wantLeft) {
+					t.Errorf("log has no %s: %s", tt.wantLeft, out)
+				}
+			} else if !strings.Contains(out, "every operator put offline at stop") {
+				t.Errorf("log has no confirmation of the offline calls: %s", out)
+			}
+		})
+	}
+}
+
+// TestServiceOutageSkipsOfflineAtStop: after an outage exit nothing is
+// called at stop; the restart puts the operators offline.
+func TestServiceOutageSkipsOfflineAtStop(t *testing.T) {
+	c := newCluster(t)
+	prod, err := kgo.NewClient(kgo.SeedBrokers(c.ListenAddrs()...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(prod.Close)
+	api := &fakeAPI{clock: SystemClock{}, settings: testSettings()}
+	svc, err := New(Options{Config: testConfig(c.ListenAddrs()), API: api, Registerer: prometheus.NewRegistry()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- svc.Run(t.Context()) }()
+	waitUntil(t, "online calls", func() bool { return len(api.callsOf(actionOnline)) == 3 })
+	api.mu.Lock()
+	api.answer = func(call) (opapi.Result, error) { return "", errNoAnswer }
+	api.mu.Unlock()
+	produceRouting(t, prod, offeredEvent(customerID(1), op1, offerID(1), 1))
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrOutage) {
+			t.Fatalf("Run() = %v, want ErrOutage", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not stop after the outage limit")
+	}
+	if n := len(api.callsOf(actionOffline)); n != 3 {
+		t.Errorf("%d offline calls, want only the 3 of the start", n)
+	}
+}
+
+// lockedBuffer is a bytes.Buffer that is safe for concurrent writes.
+type lockedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
 }
 
 // TestServiceRestartSkipsOldEvents: a restart in the same group starts at
