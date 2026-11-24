@@ -1,9 +1,11 @@
-// Package defaults holds the stage 2 values that the decision records fix,
-// so normalize and conv start from the same numbers. They are defaults: each
-// service's configuration may override them.
+// Package defaults holds the values that the decision records fix, so the
+// services start from the same numbers. They are defaults: each service's
+// configuration may override them.
 //
-// Every window here is measured in source time, except DedupKeyLifetime,
-// which is the lifetime of a Redis key (decisions 0003, 0007 and 0008).
+// The windows of normalize and conv are measured in source time, except
+// DedupKeyLifetime, which is the lifetime of a Redis key (decisions 0003,
+// 0007 and 0008). The durations of the router are model time: machine time
+// multiplied by RouterSpeedFactor (decision 0009, "Clock").
 package defaults
 
 import "time"
@@ -47,4 +49,34 @@ const (
 	// companies. Decision 0008 chooses the real default after the one-hour
 	// measurement in stage 2. Until then it is NoCompanyLimit.
 	CompanyLimit = NoCompanyLimit
+)
+
+// Routing in the router (decisions 0009 and 0010). Durations are model time.
+const (
+	// OperatorCapacity is how many conversations an operator handles at
+	// once when it is created without a capacity (decision 0009).
+	OperatorCapacity = 4
+	// AcceptTimeout is how long an operator has to accept an offer.
+	AcceptTimeout = 20 * time.Second
+	// AssignmentTarget is the SLA target from entering the queue until an
+	// operator accepts.
+	AssignmentTarget = 60 * time.Second
+	// FirstResponseTarget is the SLA target until the first reply of the
+	// operator.
+	FirstResponseTarget = 120 * time.Second
+	// TeamFormLoad is the active load of a company at which it gets a
+	// dedicated team.
+	TeamFormLoad = 20
+	// TeamReleaseLoad releases a team when the active load stays below it
+	// for TeamReleaseAfter.
+	TeamReleaseLoad = 8
+	// TeamReleaseAfter is how long the load must stay below
+	// TeamReleaseLoad.
+	TeamReleaseAfter = 15 * time.Minute
+	// TeamMinSize and TeamMaxSize bound the size of a team.
+	TeamMinSize = 2
+	TeamMaxSize = 20
+	// RouterSpeedFactor multiplies the machine clock of the router timers.
+	// 1 for live traffic (decision 0009, "Clock").
+	RouterSpeedFactor = 1.0
 )

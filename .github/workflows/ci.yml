@@ -60,7 +60,7 @@ jobs:
       - name: integration tests (real Kafka, Redis and PostgreSQL via Testcontainers)
         run: >
           go test -race -count=1 -p 1 -tags integration
-          ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/...
+          ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/... ./internal/router/...
 
   image:
     runs-on: ubuntu-24.04
