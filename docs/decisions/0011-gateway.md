@@ -1,6 +1,6 @@
 # 0011. Gateway: live data for browsers
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-24
 
 ## Context
@@ -76,7 +76,7 @@ The gateway decides what a client may get from the identity it checked itself (d
 
 ## Choices confirmed by the project owner
 
-On 2026-11-24 the project owner chose the recommended option in points 2 to 5: text is read from Redis through the `conv` package (2A), `conv` publishes a "message removed" event (3A), a slow browser gets the current state of changed keys without a queue (4B), and the library is `coder/websocket` (5). Point 1, where the current state comes from, is still open, so this decision stays proposed.
+On 2026-11-24 the project owner chose the recommended option in every point: the gateway builds its own view from the two topics (1A), text is read from Redis through the `conv` package (2A), `conv` publishes a "message removed" event (3A), a slow browser gets the current state of changed keys without a queue (4B), and the library is `coder/websocket` (5).
 
 ## Details that follow
 
