@@ -4,17 +4,17 @@ threadroute reads the public Bluesky post stream, turns it into conversations an
 
 ## Status
 
-Stages 1 to 3 of 6 are implemented:
+Stages 1 to 4 of 6 are implemented:
 
 - Stage 1: ingest of the live stream into Kafka, and the recorder tool for load tests.
 - Stage 2: `normalize` and `conv`. Raw source events become channel-agnostic events without duplicates, and conversations with live state in Redis.
 - Stage 3: `router` and `sim`. Queues, assignment, dedicated teams and SLA timers in PostgreSQL, and simulated operators that work through the operator API.
+- Stage 4: `gateway` and the console in `web/`. Live updates over WebSocket for an operator screen and a supervisor screen, and a public page with totals only.
 
-The operators are simulated. Every number about waiting times or SLA targets describes the simulator and its settings, not real people.
+The operators are simulated. Every number about waiting times or SLA targets describes the simulator and its settings, not real people. A person who opens the console can take a seat as one more operator next to the simulated ones.
 
 Planned stages, not done yet:
 
-- Stage 4: `gateway` and the React console. Real-time updates over WebSocket, and the public page.
 - Stage 5: load tests. The replay tool plays recorded traffic at many times the live rate.
 - Stage 6: classification of conversations with an LLM, used for routing.
 
@@ -46,24 +46,44 @@ Planned stages, not done yet:
   routing  ---->  sim  ---->  operator API of the router (online, offline, accept, reply, resolve)
                    +-- :9469  /metrics  /healthz  /debug/pprof/
 
+  conversations  ---->  gateway  <---->  browsers (WebSocket /v1/ws, HTTP /v1/public/snapshot)
+  routing        ---->    |   |            through the console web server on :9473
+                          |   +-- :9471  /metrics  /healthz  /debug/pprof/
+                          |   +-- :9472  /v1/ws  /v1/public/snapshot
+                          +-- text of watched conversations from Redis (read only)
+                          +-- operator actions of people -> operator API of the router
+                          +-- "who am I" of a token -> site API (optional)
+
   raw.bluesky  ---->  record  ---->  compressed segment files outside the repository
                         +-- :9465  /metrics  /healthz  /debug/pprof/
 ```
 
 `ingest` reads the Bluesky Jetstream through the official SDK, which handles reconnects and failover between two hosts. For every batch it writes one Kafka record per event to `raw.bluesky` (`acks=all`, idempotent, zstd) and, only after Kafka has acknowledged all of them, the batch position to the compacted topic `ingest.cursor`. On start it reads that position and resumes from it, so a restart repeats a few seconds of events and never skips any. Delivery is at-least-once: duplicates are removed later in `normalize`. If Kafka is down for longer than the delivery timeout, ingest exits with an error and the container restart policy starts it again. `normalize` reads `raw.bluesky` and turns each source event into a channel-agnostic event: a customer or company message in `events`, or a deletion or author removal in `events.control`. Posts that are not replies, and authors that continue their own thread, are dropped and counted. It removes duplicates with Redis keys that live 10 minutes, and writes its output and its consumer offsets in one Kafka transaction, so a crash does not produce a second copy. `conv` reads both topics, decides which companies are busy enough to serve (10 different customers within one hour), and keeps the open conversations of those companies in Redis: messages, counters, sessions and close deadlines, all measured in source time. Every change is published to `conversations` through an outbox in Redis, with a sequence number per conversation, and these events carry no post text. `record` is a separate tool that copies the raw topic into files for load tests.
 
-`router` reads `conversations` and keeps the routing state in PostgreSQL. A conversation that opens, reopens, or gets a customer message after the operator resolved it goes into a queue: its language, plus its company when that company has a dedicated team. Assignment workers pick, in one database transaction with `FOR UPDATE SKIP LOCKED`, an online operator with the language, a free slot and the right group, with the lowest load. The operator gets an offer and has 20 seconds to accept; otherwise the conversation goes back to its queue, with its waiting time kept, and that operator is skipped for it. A slot is freed when the operator resolves the conversation, or when `conv` closes it. A company with 20 active conversations gets a dedicated team taken from the shared pool, sized by its load, and loses it after 15 minutes below 8. Two SLA targets are measured per session (60 seconds to accept, 120 seconds to the first reply), and a miss raises the priority. Every state change writes its routing events into an outbox table in the same transaction, and one publisher sends them to `routing` in order, with a sequence number per key. Timers run on the machine clock multiplied by a speed factor (1 for live traffic). At start the router first applies the backlog of `conversations` without making offers, then queues the conversations that are still open (reason `catch_up`). `sim` plays 200 operators against the operator API, the same API the console will use in stage 4. It reads `routing` to learn about offers, accepts after 1 to 8 seconds, leaves 3 percent of offers to time out, replies after a handling time (median 45 seconds) and resolves some minutes later (median 3 minutes), with long tails, and works in shifts (4 hours online, 30 minutes offline). On a clean stop it puts its operators offline, so the router returns their conversations to the queues; at start it puts them offline first and then starts the shifts. The reasons for these choices are in [docs/decisions/](docs/decisions/).
+`router` reads `conversations` and keeps the routing state in PostgreSQL. A conversation that opens, reopens, or gets a customer message after the operator resolved it goes into a queue: its language, plus its company when that company has a dedicated team. Assignment workers pick, in one database transaction with `FOR UPDATE SKIP LOCKED`, an online operator with the language, a free slot and the right group, with the lowest load. The operator gets an offer and has 20 seconds to accept; otherwise the conversation goes back to its queue, with its waiting time kept, and that operator is skipped for it. A slot is freed when the operator resolves the conversation, or when `conv` closes it. A company with 20 active conversations gets a dedicated team taken from the shared pool, sized by its load, and loses it after 15 minutes below 8. Two SLA targets are measured per session (60 seconds to accept, 120 seconds to the first reply), and a miss raises the priority. Every state change writes its routing events into an outbox table in the same transaction, and one publisher sends them to `routing` in order, with a sequence number per key. Timers run on the machine clock multiplied by a speed factor (1 for live traffic). At start the router first applies the backlog of `conversations` without making offers, then queues the conversations that are still open (reason `catch_up`). `sim` plays 200 operators against the operator API, the same API the gateway uses for people in the console. It reads `routing` to learn about offers, accepts after 1 to 8 seconds, leaves 3 percent of offers to time out, replies after a handling time (median 45 seconds) and resolves some minutes later (median 3 minutes), with long tails, and works in shifts (4 hours online, 30 minutes offline). On a clean stop it puts its operators offline, so the router returns their conversations to the queues; at start it puts them offline first and then starts the shifts.
+
+`gateway` connects browsers to all of this (decision 0011). At start it reads `conversations` and `routing` from the beginning, without a consumer group, and keeps the latest state of every conversation, operator, queue and team in memory. `/healthz` answers 200 when it has read up to the end offsets it saw at start and its data is fresh, and 503 while it cannot read the topics or is behind them. The topics are the only source of this view, so the view cannot disagree with them; to keep operators in a view that is built from topics with 24 hours of retention, the router publishes the snapshot of every operator again every 6 hours. Message text is not in the topics: the gateway reads it from Redis through a read-only function of `conv`, only for a conversation that a full-level screen watches, and does not keep it after it has sent it. When an author deletes a post, `conv` publishes a "message removed" event and the gateway tells the screens that show it to drop the text. A browser gets the current state when it connects and then, at most every 250 milliseconds, the new state of the rows that changed. A slow browser gets fewer and larger updates instead of a queue. A person who takes the operator role becomes an operator of their own with an ID that starts with `web-`, made by the gateway (decision 0012). Their actions go through the gateway to the operator API of the router, like the actions of `sim`. When the connection closes, the gateway waits 15 seconds (so a reload keeps the conversations) and then puts the operator offline, and the router returns their conversations to the queues. The public page does not use a WebSocket: it asks for a small JSON snapshot every two seconds, which the gateway builds once a second and the web server caches for one second. The protocol between the gateway and the browser is in [docs/gateway-protocol.md](docs/gateway-protocol.md), and the console itself is described in [web/README.md](web/README.md). The reasons for these choices are in [docs/decisions/](docs/decisions/).
+
+Access levels (decision 0012). The gateway decides the level from a token that it checks with the site API; the browser never asks for a level.
+
+| Level | Who | Sees | Can do |
+|---|---|---|---|
+| Public | anyone | totals only, no keys (decision 0013) | nothing |
+| Demo operator | anyone, limited number (5 operators at the same time) | their offers and conversations without text and author IDs, the supervisor screen without them. Accounts and messages appear under pseudonyms that change every day | accept, refuse, mark a reply, resolve |
+| Full | users on the owner's list (a role of the site, `THREADROUTE_GATEWAY_FULL_ROLES`) | the same with text and author IDs | the same |
+
+"Mark replied" records a marker only. Nothing is ever posted to Bluesky.
 
 ## Run it locally
 
 Prerequisites: Docker with Compose v2, GNU Make, and Go 1.27.4 for the tests (`GOTOOLCHAIN=go1.27.4` is set by the Makefile).
 
 ```sh
-make up        # builds the images, starts Kafka, Redis, PostgreSQL, ingest, normalize, conv, router and sim
+make up        # builds the images, starts Kafka, Redis, PostgreSQL, ingest, normalize, conv, router, sim, gateway and console
 make logs      # follows the logs (JSON lines)
 ```
 
-Ingest writes to `raw.bluesky` a few seconds after the start. normalize waits for that topic and creates `events` and `events.control`, and conv waits for those and creates `conversations`. The router starts when PostgreSQL is healthy, runs its migrations, waits for `conversations` and creates `routing`. sim waits for the operator API and for `routing`. Each one waits up to 2 minutes and then exits, and the restart policy starts it again, so a cold start needs no manual steps. Every published port listens on `127.0.0.1` only:
+Ingest writes to `raw.bluesky` a few seconds after the start. normalize waits for that topic and creates `events` and `events.control`, and conv waits for those and creates `conversations`. The router starts when PostgreSQL is healthy, runs its migrations, waits for `conversations` and creates `routing`. sim waits for the operator API and for `routing`. The gateway waits for both topics by itself and is ready a moment after the router. Each one waits up to 2 minutes and then exits, and the restart policy starts it again, so a cold start needs no manual steps. Every published port listens on `127.0.0.1` only:
 
 | Port | What |
 |---|---|
@@ -73,7 +93,10 @@ Ingest writes to `raw.bluesky` a few seconds after the start. normalize waits fo
 | 9467 | conv: the same endpoints |
 | 9468 | router: the same endpoints. `/healthz` answers 200 after the catch-up |
 | 9469 | sim: the same endpoints |
-| 9470 | operator API of the router, for example `curl 127.0.0.1:9470/v1/settings`. It has no authentication in stage 3 |
+| 9470 | operator API of the router, for example `curl 127.0.0.1:9470/v1/settings`. It has no authentication; on a server only the gateway may reach it |
+| 9471 | gateway: `/metrics`, `/healthz`, `/debug/pprof/`. `/healthz` answers 200 when the view has caught up and is fresh |
+| 9472 | gateway: `/v1/ws` and `/v1/public/snapshot` directly, without the web server. For tools and tests |
+| 9473 | the console: <http://127.0.0.1:9473/>. Set `THREADROUTE_CONSOLE_HOST_PORT` if the port is taken |
 | 6379 | Redis for tools on the host, for example `redis-cli -p 6379 info memory`. Set `THREADROUTE_REDIS_HOST_PORT` if the port is taken |
 | 5432 | PostgreSQL for tools on the host, for example `psql -h 127.0.0.1 -U threadroute threadroute`. Set `THREADROUTE_POSTGRES_HOST_PORT` if the port is taken |
 | 9094 | Kafka for tools on the host, for example `kcat -b localhost:9094 -L` |
@@ -122,6 +145,26 @@ On `http://127.0.0.1:9469/metrics` (sim):
 - `threadroute_sim_offers_seen_total`, `threadroute_sim_accepts_total`, `threadroute_sim_offers_missed_total`, `threadroute_sim_replies_total`, `threadroute_sim_resolves_total`
 - `threadroute_sim_api_calls_total`: operator API calls by action and result (done, already_done, rejected, unavailable, failed)
 - `threadroute_sim_consumer_lag_seconds`: time from the append of a routing record until sim read it
+
+The console has three screens. All of them work without signing in:
+
+- <http://127.0.0.1:9473/> is the public page: totals only, from `/v1/public/snapshot`.
+- <http://127.0.0.1:9473/#/operator> takes a seat as a demo operator. Pick your languages, switch "Online", and accept the offer that comes. "Mark replied" and "Resolve" end the work. Nothing is posted to Bluesky.
+- <http://127.0.0.1:9473/#/supervisor> shows the flow, the queues, the operators, the teams and the open conversations, with filters.
+
+The console service is nginx with the static build of `web/` (`deploy/console.Dockerfile`, `deploy/console.nginx.conf`). It forwards `/v1/ws` (with the WebSocket upgrade) and `/v1/public/snapshot` to the gateway, so the browser talks to one origin. It runs as a non-root user with a read-only root filesystem, sets a Content-Security-Policy that allows only the page's own origin (with one exception: inline `<style>` elements, which the dialog of the console adds to lock the page scroll) and the usual security headers, caches the files under `assets/` for a year (their names hold a content hash) and `index.html` not at all, and caches the public snapshot for one second.
+
+Without a site API (the default) every visitor gets the demo level: no post text and no author IDs. The full level needs a site that answers `GET <THREADROUTE_GATEWAY_SITE_API_URL>` with the bearer token of the browser as `{"user":{"id":1},"role":{"name":"<role>"}}`, a role listed in `THREADROUTE_GATEWAY_FULL_ROLES`, and a console built with `THREADROUTE_CONSOLE_SITE_TOKEN_KEY`, the `localStorage` key where the site keeps its token.
+
+Useful metrics on `http://127.0.0.1:9471/metrics` (gateway):
+
+- `threadroute_gateway_view_rows`: rows of the in-memory view by kind (conversations, operators, queues, teams)
+- `threadroute_gateway_events_total`: records read from the topics, by topic and result (applied, skipped, invalid)
+- `threadroute_gateway_lag_seconds`, `threadroute_gateway_stale`: how long the gateway has been behind the topics, and the current stale reason
+- `threadroute_gateway_connections`: open WebSocket connections by view and level
+- `threadroute_gateway_messages_sent_total`, `threadroute_gateway_bytes_sent_total`: server messages and bytes by type
+- `threadroute_gateway_tick_seconds`, `threadroute_gateway_slow_ticks_total`: time of one tick, and ticks that found a client still writing
+- `threadroute_gateway_clients_closed_total`, `threadroute_gateway_requests_total`, `threadroute_gateway_site_api_checks_total`, `threadroute_gateway_text_reads_total`, `threadroute_gateway_operators_put_offline_total`
 
 To start the recorder too (it writes to `$HOME/threadroute-recordings` on the host):
 
@@ -254,6 +297,7 @@ Router (`cmd/router`). `THREADROUTE_KAFKA_BROKERS`, `THREADROUTE_LOG_LEVEL` and 
 | `THREADROUTE_ROUTER_OUTBOX_KEEP`, `THREADROUTE_ROUTER_PRUNE_INTERVAL` | `1h`, `1m` | how long a sent outbox row is kept, and how often old rows are deleted |
 | `THREADROUTE_ROUTER_COUNTS_INTERVAL` | `5s` | how often the state gauges are sampled |
 | `THREADROUTE_ROUTER_OUTAGE_LIMIT` | `2m` | a loop that fails without a break this long (database or Kafka down) stops the process, and the restart policy starts it again |
+| `THREADROUTE_ROUTER_OPERATOR_REFRESH` | `6h` | an operator whose last operator event is older than this (machine time) is published again, so the gateway keeps it in its view |
 
 Sim (`cmd/sim`). `THREADROUTE_KAFKA_BROKERS` and `THREADROUTE_LOG_LEVEL` work as above. Behaviour durations are model time: sim divides them by the speed factor, which it reads from the router at start.
 
@@ -273,6 +317,36 @@ Sim (`cmd/sim`). `THREADROUTE_KAFKA_BROKERS` and `THREADROUTE_LOG_LEVEL` work as
 | `THREADROUTE_SIM_HANDLING_MEDIAN` | `45s` | median of the log-normal time from accept to reply, each draw capped at 20 times the median |
 | `THREADROUTE_SIM_RESOLVE_MEDIAN` | `3m` | median of the time from reply to resolve, capped the same way |
 | `THREADROUTE_SIM_SEED` | `1` | seed of the random generator |
+
+Gateway (`cmd/gateway`). `THREADROUTE_KAFKA_BROKERS`, `THREADROUTE_LOG_LEVEL` and the Redis variables work as above. Durations are machine time.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `THREADROUTE_GATEWAY_METRICS_ADDR` | `:9471` | listen address of metrics, pprof and health |
+| `THREADROUTE_GATEWAY_HTTP_ADDR` | `:9472` | listen address of `/v1/ws` and `/v1/public/snapshot` |
+| `THREADROUTE_GATEWAY_PATH_PREFIX` | empty | put before both paths, for a web server that forwards a prefix without removing it. Compose sets it empty, because the console forwards the paths as they are |
+| `THREADROUTE_GATEWAY_ROUTER_URL` | `http://127.0.0.1:9470` | base URL of the operator API. Compose sets `http://router:9470` |
+| `THREADROUTE_GATEWAY_ROUTER_TIMEOUT` | `5s` | limit of one call of the operator API |
+| `THREADROUTE_GATEWAY_SITE_API_URL` | empty | the "who am I" URL of the site API. Empty: no token is checked and every connection gets the demo level |
+| `THREADROUTE_GATEWAY_SITE_API_TIMEOUT`, `THREADROUTE_GATEWAY_SITE_API_CACHE` | `3s`, `1m` | limit of one call, and how long a successful answer is kept (under a hash of the token). An error or a timeout gives the demo level |
+| `THREADROUTE_GATEWAY_FULL_ROLES` | empty | comma-separated role names of the site that get the full level. Empty: nobody |
+| `THREADROUTE_GATEWAY_ALLOWED_ORIGINS` | `localhost:*,127.0.0.1:*` | browser origins that may open the WebSocket. A page from the same host is always allowed. Compose sets the console address (`127.0.0.1:9473,localhost:9473`); a server sets the site's host |
+| `THREADROUTE_GATEWAY_TRUST_PROXY` | `false` | take the client address from the right-most `X-Forwarded-For` entry. Only behind a web server that sets it; compose sets `true` |
+| `THREADROUTE_GATEWAY_DEMO_OPERATORS` | `5` | most demo operators at the same time; one more gets close code 4503 |
+| `THREADROUTE_GATEWAY_MAX_CONNECTIONS`, `THREADROUTE_GATEWAY_MAX_CONNECTIONS_PER_ADDR` | `2000`, `20` | most WebSocket connections in total and per client address |
+| `THREADROUTE_GATEWAY_TICK` | `250ms` | time between two state messages to one browser (250ms to 10s) |
+| `THREADROUTE_GATEWAY_OFFLINE_GRACE` | `15s` | a person stays online this long after the connection closed |
+| `THREADROUTE_GATEWAY_WRITE_TIMEOUT`, `THREADROUTE_GATEWAY_PING_INTERVAL` | `10s`, `20s` | a browser that does not take one message in time is closed; WebSocket ping interval |
+| `THREADROUTE_GATEWAY_LAG_LIMIT`, `THREADROUTE_GATEWAY_SOURCE_TIMEOUT` | `10s`, `5s` | the data is stale when the gateway is behind the topics longer than the lag limit, or could not read them for the source timeout |
+| `THREADROUTE_GATEWAY_FORGET_AFTER` | `1h` | a closed conversation, a released team and an offline person are kept this long after their last event |
+| `THREADROUTE_GATEWAY_SNAPSHOT_FRAME_ROWS` | `500` | most conversation rows in one frame of a first state |
+
+Console. These are read only by `deploy/compose.yaml`; the build settings of the console itself are in [web/README.md](web/README.md).
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `THREADROUTE_CONSOLE_HOST_PORT` | `9473` | host port of the console. The compose default of the allowed origins follows it |
+| `THREADROUTE_CONSOLE_SITE_TOKEN_KEY` | empty | the `localStorage` key of the site token, built into the console. Empty: the console never sends a token |
 
 ## Data and privacy
 
@@ -298,6 +372,8 @@ Conditions for every row: 29 minutes on 2026-11-23 from 21:02 UTC, the local com
 | Ingest memory | 45 to 90 MB resident, 62 MB median | the highest value was during the burst |
 | Kafka memory | 416 to 558 MiB for the container | broker heap capped at 512 MB |
 | Errors and restarts | 0 produce errors, 0 source errors, 0 restarts | |
+
+A second, short run on the same day (12:58 to 13:08 UTC, cold start, same settings) checked three things the first one did not: the language picker of the operator screen (a language added, 0 policy violations with the menu and a tooltip open), the text in the supervisor's message dialog at the full level, and the operator screen after a gateway restart (row above).
 
 What this run does not show: a full day, a quiet hour, or the busiest hour. Bursts like the one above were seen twice in about one hour of watching, so a daily size is not projected from this sample. A 24-hour measurement comes next.
 
@@ -374,6 +450,52 @@ After the window, three more tests ran:
 - `docker compose down -v` left no container, volume or network of the project.
 
 What this run does not show: a long catch-up of the router, dedicated teams, a rewrite of the Redis file, a full day, or a busy hour.
+
+### Stage 4: gateway and console
+
+Conditions for every row: 41 minutes on 2026-11-24 from 12:12:22 to 12:53:38 UTC, a cold start of the whole compose stack (with the gateway and the console) on the same laptop with Docker Desktop, live traffic of a midday hour (UTC). Default settings of every service, except the host ports of Redis and PostgreSQL (taken on this laptop) and the settings of the full level: a site API URL, one full role and a token key for the console. The images were built before, so the cold start does not include a build from scratch. The browser was a headless Chromium driven by Playwright, and some checks used a small WebSocket client; both talked to the console on `127.0.0.1:9473`. The full level used a local stub of the site API with a synthetic token, not the real site. The gateway was restarted twice and Kafka was paused once near the end, so the counters below are from a dump at minute 31, before those tests.
+
+The operators are simulated, and so is the routing that a demo operator joins. The waiting times below describe the simulator and its settings in one laptop run.
+
+| Measurement | Value | Note |
+|---|---|---|
+| Cold start | one `up -d --build`, no manual step. The gateway answered ready 12 s after the command started | 0 restarts of any container during the whole run |
+| View of the gateway at minute 31 | 1,673 conversations, 218 operators, 17 queues, 5 teams | closed conversations stay in the view for 1 hour; the supervisor list holds only open ones (2,496 rows against 2,498 open in `conv` at minute 41) |
+| Events applied by minute 31 | `conversations` 2,078, `routing` 9,208 | 0 skipped, 0 invalid, 0 fetch errors. `lag_seconds` was 0 in all 75 samples (every 30 s) |
+| Bytes sent by minute 31 | `state` 5.9 MB, `messages` 30 KB, `welcome` 12 KB, `result` 5 KB, `status` 1 KB | about 30 connections in the window, mostly short test sessions |
+| Tick | 7,330 ticks, mean 0.18 ms, 99.5% under 1.6 ms, all under 26 ms | 0 slow ticks |
+| Memory, median and highest | gateway 10.5 / 13.6 MiB, console (nginx) 9.7 / 10.1 MiB | container memory from `docker stats` every 30 s. One day of state is not measured yet |
+| First state of a supervisor | minute 5: 1 frame, 20 rows, 33 KB. Minute 31: 4 frames, about 1,700 rows, 556 KB (demo) and 703 KB (full). Minute 41: 5 frames, 2,496 rows, 801 KB (demo) | no WebSocket compression |
+| Time from "online" to the first offer of a demo operator | 4 operators that went online together at minute 6: 374, 450, 463 and 469 s; one more at minute 5: no offer within 300 s. From minute 13 on: 2.1, 2.1, 2.4, 3.9, 3.9, 5.2, 5.4, 10.2 and 10.4 s | the router picks the operator with the lowest number of live offers and assignments, and on a tie the lowest operator ID. `sim-op-` sorts before `web-`, so a person gets an offer only when no simulated operator with the language has a lower or equal load. At minute 10, 54 of 184 online simulated operators had none. Decision 0012 promised under a minute; the early waits are longer and are reported here, routing was not changed |
+| Demo operator, whole path | online, offer, accept, "mark replied", resolve: done in the browser and in 11 sessions of the WebSocket client | every result `done` |
+| Demo level on the wire | 0 `did:`, 0 `at://` and 0 text fields in every demo frame of operators and supervisors, and in the public snapshot | the public snapshot is about 1 KB, cached by nginx for 1 s (HIT and EXPIRED headers seen) |
+| Full level | with a token the stub accepts, an operator saw text in its conversation and a supervisor saw text in the message dialog (second run); a token without the role and a rejected token got the demo level | site API checks: 3 full, 1 signed in, 1 rejected, 1 cached, 26 without a token |
+| Demo seats | the sixth demo operator was closed with 4503 `no_operator_seat`, and the console showed "All demo operator seats are taken" | one address could take all 5 seats |
+| Wrong `Origin` | the WebSocket upgrade got HTTP 403, through nginx and on port 9472 | |
+| Page reload | the operator was live again 2.3 s after the reload, with the same operator ID, still online and still holding its conversation | after the page was closed for 25 s, the operator was offline and held 0 conversations |
+| Gateway restart (`docker compose restart gateway`) | ready 1.7 s after the restart began, after replaying 2,209 `conversations` and 9,770 `routing` events; the browser was live again 1.5 s after it lost the connection | a clean stop puts its own operators offline, so the orphan sweep had nothing to do. In a second run an operator who held a conversation came back after the restart as a new operator, offline, with 0 conversations, and the page gave no note about it |
+| Gateway killed (SIGKILL) and started | ready 2 s after the kill, after replaying 2,561 and 11,263 events; the browser was live again after 3 s; the orphan sweep put the 1 operator of the killed process offline within 70 s | |
+| Kafka paused for 40 s | `/healthz` answered 503 for about 32 s, from about 7 s after the pause until the unpause; the public snapshot said `stale` for about 31 s; the console showed the stale banner for 33.5 s and stopped its timers, and was live again right after the unpause | no container exited or restarted. A stopped broker (connections refused) was not tested |
+| Console build | JavaScript 468 KB in 4 files (147 KB with gzip; the largest file 280 KB, 86 KB with gzip), CSS 31 KB (7 KB with gzip), fonts 75 KB, 600 KiB in total | image 60.6 MB |
+
+What this run does not show: a deleted post that disappears from an open screen. `conv` published 42 "message removed" events in the run, but none of them was for one of the 4 conversations a full-level supervisor watched for 16 minutes, so this path was only tested with the fake gateway. It also does not show one day of gateway memory, a busy hour, or the real site API.
+
+### Known gaps
+
+- An edit of a post is not pushed live to a conversation that is open on a screen.
+- The router never deletes operators. Every visit to the operator screen leaves one `web-` operator in the database, and the router publishes it again every 6 hours. In this 41-minute run the view grew to 225 operators, 25 of them `web-`.
+- A conversation whose first events have left the topics (24 hours) does not show in the supervisor list.
+- Tokens that the site rejects are not cached, so every connection with such a token calls the site API.
+- There is no rate limit for new connections per address, and one address can take all 5 demo seats.
+- The access level is checked once per connection. A role taken away in the site counts only for the next connection.
+- The orphan sweep assumes one gateway process. A second process would put the operators of the first one offline.
+- The answer shape of the real site API is not verified live; this run used a local stub.
+- A person can wait minutes for a first offer while simulated operators with the same language have a lower or equal load, because the router breaks a tie by operator ID and `sim-op-` sorts before `web-` (up to 469 s in this run). Decision 0012 says to propose a rule that prefers human operators in that case, as a change to decision 0009.
+- The first state of a supervisor is sent without WebSocket compression: 801 KB for 2,496 conversations after 41 minutes.
+- The Content-Security-Policy of the console allows inline `<style>` elements, because the dialog adds one to lock the page scroll.
+- After a restart of the gateway, a person in the operator screen gets a new operator that is offline, and the conversations they held went back to the queue. Resume tokens live only in the memory of the gateway, and the console does not say what happened.
+- The memory of the gateway over one day of the live stream is not measured yet.
+- Where the gateway runs in production is not decided; it gets its own decision later.
 
 These tables are filled only with real measurements, together with the conditions they were taken under.
 
