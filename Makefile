@@ -14,7 +14,7 @@ test:
 
 # Needs Docker: starts real Kafka, Redis and PostgreSQL with Testcontainers. -p 1 runs
 # the packages one after another, because each one starts its own containers.
-INTEGRATION_PKGS := ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/... ./internal/router/... ./internal/sim/...
+INTEGRATION_PKGS := ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/... ./internal/router/... ./internal/sim/... ./internal/gateway/...
 
 test-integration:
 	$(GO) test -race -count=1 -p 1 -tags integration $(INTEGRATION_PKGS)

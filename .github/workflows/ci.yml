@@ -61,7 +61,7 @@ jobs:
         run: >
           go test -race -count=1 -p 1 -tags integration
           ./internal/bus/... ./internal/normalize/... ./internal/conv/... ./internal/pg/... ./internal/router/...
-          ./internal/sim/...
+          ./internal/sim/... ./internal/gateway/...
 
   image:
     runs-on: ubuntu-24.04
@@ -75,7 +75,7 @@ jobs:
         run: docker compose -f deploy/compose.yaml config -q
       - name: build the service images
         run: |
-          for cmd in ingest normalize conv router sim; do
+          for cmd in ingest normalize conv router sim gateway; do
             docker buildx build --load -f deploy/Dockerfile \
               --build-arg CMD=$cmd -t threadroute-$cmd:${{ github.sha }} .
           done
