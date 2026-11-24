@@ -79,3 +79,10 @@ jobs:
             docker buildx build --load -f deploy/Dockerfile \
               --build-arg CMD=$cmd -t threadroute-$cmd:${{ github.sha }} .
           done
+      # The console: the build of web/ in nginx. The context is web/, the
+      # nginx files come from deploy/ as a named context.
+      - name: build the console image
+        run: >
+          docker buildx build --load -f deploy/console.Dockerfile
+          --build-context deploy=deploy
+          -t threadroute-console:${{ github.sha }} web
