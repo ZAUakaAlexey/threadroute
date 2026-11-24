@@ -35,7 +35,7 @@ Companies come and go within hours (decision 0008), so a dedicated team needs a 
 
 - A company gets a dedicated team when the number of its conversations that are open at the same time reaches a threshold.
 - The team is a group of operators taken from the shared pool for the time the company needs them. Its size follows the load of the company: enough operators for its open conversations at their capacity, between a minimum and a maximum.
-- Team members serve only their company. Conversations of that company are served only by the team.
+- Team members serve only their company. Conversations of that company are served only by the team. Since 2026-11-24 the shared pool takes what a full team cannot (see "Overflow from a team to the shared pool").
 - The team is released when the company has stayed below a lower threshold for a set time, or when its admission ends. Its operators finish the conversations they already hold and go back to the shared pool. Conversations of the company that are still waiting go to the shared queues.
 - The two thresholds are different on purpose, so a company near the limit does not gain and lose its team again and again.
 - Since 2026-11-24 all teams together hold at most a share of the online operators. See "A cap on the operators that teams hold".
@@ -139,6 +139,19 @@ The project owner chose this option on 2026-11-24. Options that were not chosen:
 - **Idle team members help the shared pool.** It removes the free slots, but a team can then be busy when its company needs it, and it adds more rules and more edge cases. It can be added later if free team slots stay a problem.
 - **No new team while the shared queue is late.** It works against the loop directly, but teams then depend on the state of the queues, which is harder to explain and to test.
 - **More simulated operators and no rule change.** It helps for this traffic, and the loop comes back at the next peak.
+
+### Overflow from a team to the shared pool
+
+The first live check of the cap (a laptop run with a low form threshold and a cap of 20%) showed its other side. A team that the cap keeps small cannot serve its company, and the conversations of that company may go only to the team. In 20 minutes the team queues grew to 303 waiting conversations and the oldest waited 980 seconds, while the shared pool had free operators.
+
+- **Rule.** A conversation in a team queue is offered to a member of the team first. When no online team member with its language has a free slot, an operator of the shared pool may take it, by the same rules as a conversation of the shared queue (the language, or the general queue rule above).
+- **Always, not only at the cap.** The rule does not ask why the team is full. A team that is full for a few seconds before it grows also sends its extra conversations to the pool.
+- **Order.** The previous operator of the conversation, then a member of the team, then the lowest load, then the highest priority, then the operator ID.
+- **What a team is now.** A team is capacity that is kept for one company. It is no longer the only place where the conversations of that company are served. A busy company can still use the shared pool for what its team cannot take, in the same queue order as everyone else.
+- **Unchanged.** Team members still serve only their company. The size of a team still follows the active load of the company, which includes its conversations that a pool operator holds.
+- **Counted.** The router counts the offers that went from a team queue to an operator of the shared pool.
+
+The project owner chose this on 2026-11-24, before the cap was used on the server. The option that was not chosen: keep the strict rule, so that the cap also limits how much a busy company can get. It protects the pool better, but it leaves operators free while conversations wait.
 
 The rule for a language that no online operator has (above) removes a part of what fed the loop: conversations that nobody could serve stayed in a queue and counted for the load of their company. How much of the loop is left without the cap is not measured. The recorded stream of that day can be replayed against the new rules in the load tests.
 
