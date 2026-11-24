@@ -7,8 +7,10 @@
 // # Bodies
 //
 // Every request and response body is one JSON object of at most
-// MaxBodyBytes. Durations are whole microseconds in fields that end in
-// "_us", as in the event package.
+// MaxBodyBytes. Two answers may be larger, up to MaxSettingsBodyBytes: the
+// answer of SettingsWithChangesPath and every answer of PatternPutSettings,
+// because they carry the change log. Durations are whole microseconds in
+// fields that end in "_us", as in the event package.
 //
 // # Safe to repeat and safe when late
 //
@@ -29,6 +31,15 @@
 // Other errors are a bad request (400), an unknown operator or offer (404),
 // or a router that cannot answer now (503, retry later), each with an
 // ErrorResponse.
+//
+// # Stand settings
+//
+// The calls of SettingsPatterns read and change the stand settings of
+// decision 0014. stand.go describes them. A router from before decision
+// 0014 does not serve them: it answers PatternPutSettings with HTTP 405
+// and PatternPutSimDefaults with HTTP 404, both without an ErrorResponse,
+// and its PatternSettings answer has no "stand". A caller treats those
+// three like CodeSettingsOff.
 //
 // # Offers and assignments
 //
@@ -91,16 +102,83 @@ const (
 	// CodeOfferExpired, CodeOfferRefused, CodeOfferEnded or
 	// CodeAssignmentEnded.
 	PatternResolve = "POST /v1/operators/{operator_id}/offers/{offer_id}/resolve"
-	// PatternSettings reads the router settings that the simulator needs.
-	// No body. Answer: Settings.
+	// PatternSettings reads the router settings that the simulator and the
+	// gateway need, and the stand settings (Settings.Stand). No body.
+	// Answer: Settings. Without a query the answer leaves out
+	// StandState.Changes and stays below MaxBodyBytes, so a client built
+	// before decision 0014 can still read it. With the query
+	// QueryChanges=1 (SettingsWithChangesPath) it carries them and may be
+	// up to MaxSettingsBodyBytes. Another value of the query is the same
+	// as none.
 	PatternSettings = "GET /v1/settings"
+
+	// PatternPutSettings changes the stand settings. Body:
+	// SettingsChangeRequest. The router checks, in this order, and the
+	// first rule that fails gives the answer:
+	//
+	//  1. The body is a JSON object of the right shape: else HTTP 400,
+	//     CodeInvalidRequest without fields.
+	//  2. The router offers stand settings: else HTTP 501,
+	//     CodeSettingsOff.
+	//  3. SettingsChangeRequest.FieldErrors is empty: else HTTP 400,
+	//     CodeInvalidRequest with SettingsErrorResponse.Fields.
+	//  4. BaseVersion is the current version: else HTTP 409,
+	//     CodeSettingsConflict with SettingsErrorResponse.Settings (the
+	//     current settings with the change log).
+	//  5. The sim part is present when the stored set has one, and absent
+	//     when it has none: else HTTP 400, CodeInvalidRequest with a
+	//     FieldError for FieldSim.
+	//  6. The set differs from the current set: else HTTP 200,
+	//     SettingsChangeResponse with ResultAlreadyDone. Nothing is logged
+	//     and the interval does not start.
+	//  7. SettingsChangeInterval has passed since the last change by this
+	//     call: else HTTP 429, CodeSettingsTooSoon with
+	//     SettingsErrorResponse.RetryAfterMS.
+	//  8. Applied: the router stores the set with version plus one, logs
+	//     the change with Diff of the old and the new set, and answers
+	//     HTTP 200, SettingsChangeResponse with ResultDone.
+	//
+	// CodeUnavailable (503) and CodeInternal (500) can come at any step.
+	// Every error body is a SettingsErrorResponse. A repeat of a request
+	// that was applied gets CodeSettingsConflict (its base version is no
+	// longer current); the Settings of that answer show whether the set
+	// is the one the caller wanted.
+	PatternPutSettings = "PUT /v1/settings"
+
+	// PatternPutSimDefaults reports the values of the simulator
+	// environment. The simulator calls it at each of its starts, after it
+	// read PatternSettings. Body: SimDefaultsRequest. Answer:
+	// SimDefaultsResponse (HTTP 200).
+	//
+	// The router stores the values as Defaults.Sim. When the stored set
+	// has no sim part yet, it also stores them as Current.Sim: that is a
+	// change, with version plus one and a log entry by BySimulator. When
+	// it has one, Current does not change. The call is safe to repeat:
+	// the same values give ResultAlreadyDone. It is not subject to
+	// SettingsChangeInterval and does not start it.
+	//
+	// Errors, each a SettingsErrorResponse: HTTP 400 CodeInvalidRequest
+	// (with Fields when the values break the bounds; nothing is stored),
+	// HTTP 501 CodeSettingsOff, and CodeUnavailable or CodeInternal.
+	PatternPutSimDefaults = "PUT /v1/settings/sim-defaults"
 )
 
-// Patterns lists every route pattern of the API.
+// Patterns lists every route pattern that every router serves.
 var Patterns = []string{
 	PatternPutOperator, PatternOnline, PatternOffline, PatternAccept, PatternRefuse,
 	PatternReply, PatternResolve, PatternSettings,
 }
+
+// SettingsPatterns lists the route patterns of the stand settings
+// (decision 0014). A router that knows decision 0014 serves them next to
+// Patterns, also when it does not offer stand settings (it answers
+// CodeSettingsOff then). They are not in Patterns, so a router can be
+// built from this package before it has their handlers.
+var SettingsPatterns = []string{PatternPutSettings, PatternPutSimDefaults}
+
+// QueryChanges is the query parameter of PatternSettings that asks for the
+// change log.
+const QueryChanges = "changes"
 
 // OperatorPath returns the path of PatternPutOperator.
 func OperatorPath(operatorID string) string {
@@ -127,15 +205,30 @@ func ResolvePath(operatorID, offerID string) string {
 	return offerPath(operatorID, offerID) + "/resolve"
 }
 
-// SettingsPath returns the path of PatternSettings.
+// SettingsPath returns the path of PatternSettings and of
+// PatternPutSettings.
 func SettingsPath() string { return "/v1/settings" }
+
+// SettingsWithChangesPath returns the path and the query of PatternSettings
+// with the change log.
+func SettingsWithChangesPath() string { return SettingsPath() + "?" + QueryChanges + "=1" }
+
+// SimDefaultsPath returns the path of PatternPutSimDefaults.
+func SimDefaultsPath() string { return SettingsPath() + "/sim-defaults" }
 
 func offerPath(operatorID, offerID string) string {
 	return OperatorPath(operatorID) + "/offers/" + url.PathEscape(offerID)
 }
 
-// MaxBodyBytes is the largest request or response body.
+// MaxBodyBytes is the largest request or response body, except the answers
+// that MaxSettingsBodyBytes names.
 const MaxBodyBytes = 4096
+
+// MaxSettingsBodyBytes is the largest answer of SettingsWithChangesPath and
+// of PatternPutSettings. A full change log of MaxSettingsChanges entries
+// that each change every field, with labels of MaxByLen bytes, is below
+// half of it; a test checks this.
+const MaxSettingsBodyBytes = 32 << 10
 
 // ContentType is the media type of every body.
 const ContentType = "application/json"
@@ -300,6 +393,10 @@ type Settings struct {
 	// means "not known". The simulator does not use them.
 	AssignmentTargetUS    int64 `json:"assignment_target_us,omitempty"`
 	FirstResponseTargetUS int64 `json:"first_response_target_us,omitempty"`
+	// Stand is the stand settings block of decision 0014. It is optional:
+	// a router from before decision 0014, or one that does not offer stand
+	// settings, does not send it. Absent means "stand settings are off".
+	Stand *StandState `json:"stand,omitempty"`
 }
 
 // AcceptTimeout returns AcceptTimeoutUS as a duration.
@@ -325,6 +422,11 @@ func (s Settings) Validate() error {
 	}
 	if s.FirstResponseTargetUS < 0 {
 		errs = append(errs, fmt.Errorf("first_response_target_us: %d is negative", s.FirstResponseTargetUS))
+	}
+	if s.Stand != nil {
+		if err := s.Stand.Validate(); err != nil {
+			errs = append(errs, fmt.Errorf("stand: %w", err))
+		}
 	}
 	return errors.Join(errs...)
 }
@@ -365,6 +467,16 @@ const (
 	CodeUnavailable ErrorCode = "unavailable"
 	// CodeInternal: an unexpected error. 500.
 	CodeInternal ErrorCode = "internal"
+	// CodeSettingsConflict: the base version of a stand settings change is
+	// not the current version; someone changed the set first. 409.
+	CodeSettingsConflict ErrorCode = "settings_conflict"
+	// CodeSettingsTooSoon: the last stand settings change was less than
+	// SettingsChangeInterval ago. Retry after RetryAfterMS. 429.
+	CodeSettingsTooSoon ErrorCode = "settings_too_soon"
+	// CodeSettingsOff: this router does not offer stand settings, for
+	// example because its environment values are outside the bounds.
+	// Retrying does not help. 501.
+	CodeSettingsOff ErrorCode = "settings_off"
 )
 
 // Codes lists every error code.
@@ -372,6 +484,16 @@ var Codes = []ErrorCode{
 	CodeInvalidRequest, CodeOperatorNotFound, CodeOfferNotFound, CodeOfferExpired,
 	CodeOfferRefused, CodeOfferAccepted, CodeOfferEnded, CodeOfferNotAccepted,
 	CodeAssignmentEnded, CodeUnavailable, CodeInternal,
+	CodeSettingsConflict, CodeSettingsTooSoon, CodeSettingsOff,
+}
+
+func (c ErrorCode) valid() bool {
+	for _, k := range Codes {
+		if c == k {
+			return true
+		}
+	}
+	return false
 }
 
 // Status returns the HTTP status of the code. An unknown code gives 500.
@@ -382,10 +504,14 @@ func (c ErrorCode) Status() int {
 	case CodeOperatorNotFound, CodeOfferNotFound:
 		return http.StatusNotFound
 	case CodeOfferExpired, CodeOfferRefused, CodeOfferAccepted, CodeOfferEnded,
-		CodeOfferNotAccepted, CodeAssignmentEnded:
+		CodeOfferNotAccepted, CodeAssignmentEnded, CodeSettingsConflict:
 		return http.StatusConflict
+	case CodeSettingsTooSoon:
+		return http.StatusTooManyRequests
 	case CodeUnavailable:
 		return http.StatusServiceUnavailable
+	case CodeSettingsOff:
+		return http.StatusNotImplemented
 	default:
 		return http.StatusInternalServerError
 	}

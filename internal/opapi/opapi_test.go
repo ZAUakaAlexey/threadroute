@@ -21,19 +21,23 @@ const (
 // panics on an invalid pattern or on two patterns that conflict.
 func TestPatternsRegister(t *testing.T) {
 	mux := http.NewServeMux()
-	for _, p := range Patterns {
+	for _, p := range allPatterns() {
 		mux.HandleFunc(p, func(http.ResponseWriter, *http.Request) {})
 	}
-	if len(Patterns) != 8 {
-		t.Errorf("len(Patterns) = %d, want 8", len(Patterns))
+	if len(Patterns) != 8 || len(SettingsPatterns) != 2 {
+		t.Errorf("len(Patterns) = %d, len(SettingsPatterns) = %d, want 8 and 2", len(Patterns), len(SettingsPatterns))
 	}
+}
+
+func allPatterns() []string {
+	return append(append([]string{}, Patterns...), SettingsPatterns...)
 }
 
 // TestPathsMatchPatterns checks that each path builder gives a path that
 // the mux routes to its own pattern, with the wildcards set to the IDs.
 func TestPathsMatchPatterns(t *testing.T) {
 	mux := http.NewServeMux()
-	for _, p := range Patterns {
+	for _, p := range allPatterns() {
 		mux.HandleFunc(p, func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintf(w, "%s|%s|%s", r.Pattern, r.PathValue(ParamOperatorID), r.PathValue(ParamOfferID))
 		})
@@ -54,9 +58,12 @@ func TestPathsMatchPatterns(t *testing.T) {
 		{http.MethodPost, ReplyPath(testOperator, testOffer), PatternReply, testOperator, testOffer},
 		{http.MethodPost, ResolvePath(testOperator, testOffer), PatternResolve, testOperator, testOffer},
 		{http.MethodGet, SettingsPath(), PatternSettings, "", ""},
+		{http.MethodGet, SettingsWithChangesPath(), PatternSettings, "", ""},
+		{http.MethodPut, SettingsPath(), PatternPutSettings, "", ""},
+		{http.MethodPut, SimDefaultsPath(), PatternPutSimDefaults, "", ""},
 	}
 	for _, tt := range tests {
-		t.Run(tt.pattern, func(t *testing.T) {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, httptest.NewRequest(tt.method, tt.path, nil))
 			want := tt.pattern + "|" + tt.operator + "|" + tt.offer
@@ -231,6 +238,9 @@ func TestErrorCodes(t *testing.T) {
 		CodeAssignmentEnded:  409,
 		CodeUnavailable:      503,
 		CodeInternal:         500,
+		CodeSettingsConflict: 409,
+		CodeSettingsTooSoon:  429,
+		CodeSettingsOff:      501,
 	}
 	if len(Codes) != len(want) {
 		t.Errorf("len(Codes) = %d, want %d", len(Codes), len(want))
