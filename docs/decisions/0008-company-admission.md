@@ -58,6 +58,18 @@ The alternative was the wall clock, which is simpler but makes replay tests beha
 
 The limit setting accepts 0 for "no limit". With a maximum set, new companies are not admitted once it is reached, and a metric counts the refusals. The default value is chosen after the one-hour measurement in stage 2.
 
+## A full hour, measured later
+
+A 65-minute run of the whole pipeline on 2026-11-24 from 03:53 UTC (default settings, no company limit, a quiet hour of the day):
+
+- 269 companies were admitted, and none of the admissions ended.
+- 5,245 conversations opened and 2,290 closed. 26 were reopened in a new session.
+- The load is concentrated: 10 companies had 29 percent of the conversations, 50 companies had 67 percent. Half of the companies had 8 conversations or fewer.
+- The highest number of conversations open at the same time for one company was 126. For 43 companies it reached 20 or more.
+- 98 percent of the sessions were in English at that hour, and 15 languages appeared in total.
+
+The company limit stays at 0 (no limit) by default. These numbers are the base for choosing a limit for a small server.
+
 ## Details fixed before implementation
 
 - **No sweeper for admission.** The windows are checked when a customer message arrives, against the source time of that message. The service adds the customer to the company's set with that time, drops entries older than one hour before it, and counts. The same check ends an admission: if the company's previous customer message is more than 2 hours older than the new one, the company must reach the threshold again.
