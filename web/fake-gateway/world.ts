@@ -1,0 +1,648 @@
+// The synthetic world of the fake gateway: conversations, queues, simulated
+// and human operators, teams, and a small scenario. It works in machine
+// time (microseconds); durations on the wire are model time, as in the
+// real gateway (machine time * speedFactor).
+
+import type {
+  ConversationRow,
+  ConversationState,
+  OperatorConversation,
+  OperatorRow,
+  Presence,
+  PublicSnapshot,
+  QueueRow,
+  RemoveReason,
+  StaleReason,
+  TeamRow,
+  Totals,
+} from '../src/protocol/types.ts';
+import { createRng, type Rng } from './rng.ts';
+import { LANGUAGES, companyId, conversationKey, customerId, pickLanguage, sampleText } from './synthetic.ts';
+
+export interface WorldOptions {
+  readonly seed: number;
+  readonly speedFactor: number;
+  /** Manual worlds change only when the control API asks (for e2e tests). */
+  readonly isManual: boolean;
+  readonly acceptTimeoutUs?: number;
+  readonly assignmentTargetUs?: number;
+  readonly firstResponseTargetUs?: number;
+}
+
+export interface WorldMessage {
+  readonly id: string;
+  readonly direction: 'customer' | 'company';
+  readonly sourceUs: number;
+  readonly text: string;
+  readonly edited: boolean;
+}
+
+export interface Conversation {
+  readonly key: string;
+  readonly company: string;
+  readonly customer: string;
+  lang: string;
+  session: number;
+  state: ConversationState;
+  teamQueue: boolean;
+  priority: number;
+  operatorId: string | undefined;
+  offerId: string | undefined;
+  acceptByUs: number | undefined;
+  acceptedAtUs: number | undefined;
+  queuedAtUs: number | undefined;
+  firstResponseDueUs: number | undefined;
+  firstResponseMissed: boolean;
+  assignmentMissed: boolean;
+  replied: boolean;
+  readonly replyIds: Set<string>;
+  customerMessages: number;
+  companyMessages: number;
+  readonly openedSourceUs: number;
+  readonly messages: WorldMessage[];
+  readonly refusedBy: Set<string>;
+  simAcceptAtUs: number | undefined;
+  simResolveAtUs: number | undefined;
+  closeAtUs: number | undefined;
+}
+
+export interface Operator {
+  readonly id: string;
+  readonly kind: 'human' | 'simulated';
+  languages: string[];
+  readonly capacity: number;
+  presence: Presence;
+  team: string | undefined;
+}
+
+export interface Team {
+  readonly company: string;
+  readonly members: string[];
+  readonly formedAtUs: number;
+}
+
+export interface StaleState {
+  readonly stale: boolean;
+  readonly reason?: StaleReason;
+  readonly lagUs?: number;
+}
+
+export type WorldEvent =
+  | { readonly kind: 'message_added'; readonly key: string; readonly message: WorldMessage }
+  | { readonly kind: 'message_removed'; readonly key: string; readonly messageId: string; readonly reason: RemoveReason }
+  | { readonly kind: 'status' }
+  | { readonly kind: 'rekey' };
+
+export type ActionOutcome = { readonly outcome: 'done' | 'already_done' } | { readonly outcome: 'rejected'; readonly code: string; readonly message: string };
+
+const DONE: ActionOutcome = { outcome: 'done' };
+const HOUR_US = 3_600_000_000;
+const SIM_OPERATORS = 24;
+const COMPANIES = 9;
+const SCENARIO_CYCLE_US = 120_000_000;
+
+export class World {
+  readonly speedFactor: number;
+  readonly acceptTimeoutUs: number;
+  readonly assignmentTargetUs: number;
+  readonly firstResponseTargetUs: number;
+  readonly conversations = new Map<string, Conversation>();
+  readonly operators = new Map<string, Operator>();
+  readonly teams = new Map<string, Team>();
+  status: StaleState = { stale: false };
+  dayKey: string;
+  private readonly isManual: boolean;
+  private readonly rng: Rng;
+  private readonly listeners = new Set<(event: WorldEvent) => void>();
+  private readonly startedAtUs: number;
+  private lastScenarioStep = -1;
+  private counter = 0;
+  private humanCounter = 0;
+  private readonly addedAtUs: number[] = [];
+  private readonly missedAssignmentAtUs: number[] = [];
+  private readonly missedFirstResponseAtUs: number[] = [];
+  private readonly waits: { readonly atUs: number; readonly waitUs: number }[] = [];
+  private nextHumanOfferAtUs = 0;
+
+  constructor(options: WorldOptions, nowUs: number) {
+    this.speedFactor = options.speedFactor;
+    this.acceptTimeoutUs = options.acceptTimeoutUs ?? 20_000_000;
+    this.assignmentTargetUs = options.assignmentTargetUs ?? 60_000_000;
+    this.firstResponseTargetUs = options.firstResponseTargetUs ?? 120_000_000;
+    this.isManual = options.isManual;
+    this.rng = createRng(options.seed);
+    this.dayKey = `synthetic-day-key-${options.seed}-0`;
+    this.startedAtUs = nowUs;
+    this.populate(nowUs);
+  }
+
+  on(listener: (event: WorldEvent) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  private emit(event: WorldEvent): void {
+    for (const listener of this.listeners) listener(event);
+  }
+
+  private nextId(prefix: string): string {
+    this.counter += 1;
+    return `${prefix}-${this.counter.toString().padStart(5, '0')}`;
+  }
+
+  /** Machine time of a model duration. */
+  private machine(modelUs: number): number {
+    return modelUs / this.speedFactor;
+  }
+
+  // ------------------------------------------------------------ setup
+
+  private populate(nowUs: number): void {
+    for (let i = 1; i <= SIM_OPERATORS; i += 1) {
+      const langs = new Set<string>(['und', pickLanguage(this.rng), pickLanguage(this.rng)]);
+      if (i % 3 === 0) langs.add('en');
+      this.operators.set(`sim-op-${i.toString().padStart(4, '0')}`, {
+        id: `sim-op-${i.toString().padStart(4, '0')}`,
+        kind: 'simulated',
+        languages: [...langs].sort(),
+        capacity: this.rng.int(3, 4),
+        presence: i % 8 === 0 ? 'offline' : 'online',
+        team: undefined,
+      });
+    }
+    for (const n of [1, 2]) {
+      const company = companyId(n);
+      const members = [`sim-op-000${n * 2 - 1}`, `sim-op-000${n * 2}`];
+      this.teams.set(company, { company, members, formedAtUs: nowUs - 600_000_000 * n });
+      for (const id of members) {
+        const op = this.operators.get(id);
+        if (op !== undefined) op.team = company;
+      }
+    }
+    for (let i = 0; i < 36; i += 1) this.addConversation(nowUs - this.rng.int(3, 40) * 1_000_000, nowUs);
+    for (const c of this.conversations.values()) {
+      if (c.state === 'waiting' && this.rng.chance(0.6)) this.offerToSim(c, nowUs, true);
+    }
+  }
+
+  addConversation(openedUs: number, nowUs: number, lang = pickLanguage(this.rng)): Conversation {
+    const companyN = this.rng.int(1, COMPANIES);
+    const company = companyId(companyN);
+    const customer = customerId(this.rng.int(1, 999_999));
+    const key = conversationKey(company, customer);
+    const first: WorldMessage = { id: this.nextId('synth-msg'), direction: 'customer', sourceUs: openedUs, text: sampleText(this.rng, 'customer'), edited: false };
+    const conv: Conversation = {
+      key,
+      company,
+      customer,
+      lang,
+      session: 1,
+      state: 'waiting',
+      teamQueue: this.teams.has(company),
+      priority: 0,
+      operatorId: undefined,
+      offerId: undefined,
+      acceptByUs: undefined,
+      acceptedAtUs: undefined,
+      queuedAtUs: Math.min(nowUs, openedUs + 2_000_000),
+      firstResponseDueUs: undefined,
+      firstResponseMissed: false,
+      assignmentMissed: false,
+      replied: false,
+      replyIds: new Set(),
+      customerMessages: 1,
+      companyMessages: 0,
+      openedSourceUs: openedUs,
+      messages: [first],
+      refusedBy: new Set(),
+      simAcceptAtUs: undefined,
+      simResolveAtUs: undefined,
+      closeAtUs: undefined,
+    };
+    this.conversations.set(key, conv);
+    this.addedAtUs.push(nowUs);
+    return conv;
+  }
+
+  // ------------------------------------------------------------ operators
+
+  createHuman(languages: readonly string[]): Operator {
+    this.humanCounter += 1;
+    const op: Operator = {
+      id: `web-synth${this.humanCounter.toString().padStart(4, '0')}`,
+      kind: 'human',
+      languages: [...languages].sort(),
+      capacity: 2,
+      presence: 'offline',
+      team: undefined,
+    };
+    this.operators.set(op.id, op);
+    return op;
+  }
+
+  removeHuman(id: string, nowUs: number): void {
+    this.setPresence(id, 'offline', nowUs);
+    this.operators.delete(id);
+  }
+
+  humanCount(): number {
+    return [...this.operators.values()].filter((o) => o.kind === 'human').length;
+  }
+
+  setPresence(id: string, presence: Presence, nowUs: number): void {
+    const op = this.operators.get(id);
+    if (op === undefined) return;
+    op.presence = presence;
+    if (presence === 'offline') {
+      for (const c of this.conversations.values()) {
+        if (c.operatorId === id) this.returnToQueue(c);
+      }
+    } else if (op.kind === 'human') {
+      this.nextHumanOfferAtUs = nowUs + 1_500_000;
+    }
+  }
+
+  load(id: string): { readonly load: number; readonly offered: number } {
+    let load = 0;
+    let offered = 0;
+    for (const c of this.conversations.values()) {
+      if (c.operatorId !== id) continue;
+      if (c.state === 'offered') offered += 1;
+      if (c.state === 'offered' || c.state === 'assigned') load += 1;
+    }
+    return { load, offered };
+  }
+
+  // ------------------------------------------------------------ routing
+
+  private offer(c: Conversation, op: Operator, nowUs: number): void {
+    c.state = 'offered';
+    c.operatorId = op.id;
+    c.offerId = this.nextId('of-synth');
+    c.acceptByUs = Math.round(nowUs + this.machine(this.acceptTimeoutUs));
+  }
+
+  private offerToSim(c: Conversation, nowUs: number, isInitial = false): boolean {
+    const candidates = [...this.operators.values()].filter(
+      (o) =>
+        o.kind === 'simulated' &&
+        o.presence === 'online' &&
+        o.languages.includes(c.lang) &&
+        !c.refusedBy.has(o.id) &&
+        (c.teamQueue ? o.team === c.company : o.team === undefined) &&
+        this.load(o.id).load < o.capacity,
+    );
+    if (candidates.length === 0) return false;
+    candidates.sort((a, b) => this.load(a.id).load - this.load(b.id).load || a.id.localeCompare(b.id));
+    const op = candidates[0];
+    if (op === undefined) return false;
+    this.offer(c, op, nowUs);
+    if (isInitial && this.rng.chance(0.6)) {
+      this.accept(c, nowUs);
+      return true;
+    }
+    // About 5 percent of offers are left to time out.
+    c.simAcceptAtUs = this.rng.chance(0.05) ? undefined : nowUs + this.rng.int(800, 3500) * 1000;
+    return true;
+  }
+
+  /** Offers a waiting conversation (or a new one) to an online human operator. */
+  offerToHuman(op: Operator, nowUs: number): Conversation | undefined {
+    if (op.presence !== 'online' || this.load(op.id).load >= op.capacity) return undefined;
+    const waiting = [...this.conversations.values()]
+      .filter((c) => c.state === 'waiting' && op.languages.includes(c.lang) && !c.refusedBy.has(op.id) && !c.teamQueue)
+      .sort((a, b) => (a.queuedAtUs ?? 0) - (b.queuedAtUs ?? 0));
+    const lang = op.languages.includes('en') ? 'en' : (op.languages[0] ?? 'und');
+    const conv = waiting[0] ?? this.addConversation(nowUs - this.rng.int(3, 20) * 1_000_000, nowUs, lang);
+    if (conv.teamQueue) conv.teamQueue = false;
+    this.offer(conv, op, nowUs);
+    return conv;
+  }
+
+  private accept(c: Conversation, nowUs: number): void {
+    c.state = 'assigned';
+    c.acceptedAtUs = nowUs;
+    c.acceptByUs = undefined;
+    c.simAcceptAtUs = undefined;
+    c.firstResponseDueUs = Math.round((c.queuedAtUs ?? nowUs) + this.machine(this.firstResponseTargetUs));
+    this.waits.push({ atUs: nowUs, waitUs: Math.round((nowUs - (c.queuedAtUs ?? nowUs)) * this.speedFactor) });
+    const op = c.operatorId === undefined ? undefined : this.operators.get(c.operatorId);
+    if (op?.kind === 'simulated') c.simResolveAtUs = nowUs + this.rng.int(8, 40) * 1_000_000;
+  }
+
+  private returnToQueue(c: Conversation): void {
+    if (c.operatorId !== undefined && c.state === 'offered') c.refusedBy.add(c.operatorId);
+    c.state = 'waiting';
+    c.operatorId = undefined;
+    c.offerId = undefined;
+    c.acceptByUs = undefined;
+    c.acceptedAtUs = undefined;
+    c.simAcceptAtUs = undefined;
+    c.simResolveAtUs = undefined;
+  }
+
+  private resolve(c: Conversation, nowUs: number): void {
+    c.state = 'resolved';
+    c.operatorId = undefined;
+    c.offerId = undefined;
+    c.acceptedAtUs = undefined;
+    c.firstResponseDueUs = undefined;
+    c.queuedAtUs = undefined;
+    c.simResolveAtUs = undefined;
+    c.closeAtUs = nowUs + 6_000_000;
+  }
+
+  // ------------------------------------------------------------ actions
+
+  action(operatorId: string, action: string, offerId: string | undefined, requestId: string, nowUs: number): ActionOutcome {
+    const op = this.operators.get(operatorId);
+    if (op === undefined) return reject('operator_not_found', 'the operator is not known');
+    if (action === 'online' || action === 'offline') {
+      if (op.presence === action) return { outcome: 'already_done' };
+      this.setPresence(op.id, action, nowUs);
+      return DONE;
+    }
+    const c = [...this.conversations.values()].find((x) => x.offerId === offerId && x.operatorId === op.id);
+    if (c === undefined) return reject('unknown_offer', 'the offer is not live for this operator');
+    switch (action) {
+      case 'accept':
+        if (c.state === 'assigned') return { outcome: 'already_done' };
+        if ((c.acceptByUs ?? 0) <= nowUs) return reject('offer_expired', 'accept: the offer is expired');
+        this.accept(c, nowUs);
+        return DONE;
+      case 'refuse':
+        if (c.state === 'assigned') return reject('offer_accepted', 'refuse: the offer was accepted');
+        this.returnToQueue(c);
+        return DONE;
+      case 'reply':
+        if (c.state !== 'assigned') return reject('offer_not_accepted', 'reply: the offer is not accepted');
+        if (c.replyIds.has(requestId)) return { outcome: 'already_done' };
+        c.replyIds.add(requestId);
+        c.replied = true;
+        c.firstResponseDueUs = undefined;
+        return DONE;
+      case 'resolve':
+        if (c.state !== 'assigned') return reject('offer_not_accepted', 'resolve: the offer is not accepted');
+        this.resolve(c, nowUs);
+        return DONE;
+      default:
+        return reject('invalid_request', 'unknown action');
+    }
+  }
+
+  setLanguages(operatorId: string, languages: readonly string[]): void {
+    const op = this.operators.get(operatorId);
+    if (op !== undefined) op.languages = [...languages].sort();
+  }
+
+  // ------------------------------------------------------------ scenario steps
+
+  addCustomerMessage(c: Conversation, nowUs: number): WorldMessage {
+    const message: WorldMessage = { id: this.nextId('synth-msg'), direction: 'customer', sourceUs: nowUs, text: sampleText(this.rng, 'customer'), edited: false };
+    c.messages.push(message);
+    c.customerMessages += 1;
+    this.addedAtUs.push(nowUs);
+    this.emit({ kind: 'message_added', key: c.key, message });
+    return message;
+  }
+
+  removeMessage(c: Conversation, messageId: string, reason: RemoveReason): boolean {
+    const index = c.messages.findIndex((m) => m.id === messageId);
+    if (index < 0) return false;
+    c.messages.splice(index, 1);
+    this.emit({ kind: 'message_removed', key: c.key, messageId, reason });
+    return true;
+  }
+
+  setStale(status: StaleState): void {
+    this.status = status;
+    this.emit({ kind: 'status' });
+  }
+
+  rekey(): void {
+    const [base, n] = [this.dayKey.slice(0, this.dayKey.lastIndexOf('-')), Number(this.dayKey.split('-').at(-1))];
+    this.dayKey = `${base}-${n + 1}`;
+    this.emit({ kind: 'rekey' });
+  }
+
+  heldByHumans(): Conversation[] {
+    return [...this.conversations.values()].filter(
+      (c) => c.state === 'assigned' && c.operatorId !== undefined && this.operators.get(c.operatorId)?.kind === 'human',
+    );
+  }
+
+  // ------------------------------------------------------------ time
+
+  step(nowUs: number): void {
+    for (const c of this.conversations.values()) this.stepConversation(c, nowUs);
+    if (this.isManual) return;
+    // The scenario runs while stale too: it is what ends the stale spell.
+    this.stepScenario(nowUs);
+    if (this.status.stale) return;
+    this.stepArrivals(nowUs);
+    this.stepHumans(nowUs);
+  }
+
+  private stepConversation(c: Conversation, nowUs: number): void {
+    if (c.state === 'offered' && (c.acceptByUs ?? 0) <= nowUs) this.returnToQueue(c);
+    const isQueued = c.state === 'waiting' || c.state === 'offered';
+    if (isQueued && !c.assignmentMissed && (nowUs - (c.queuedAtUs ?? nowUs)) * this.speedFactor > this.assignmentTargetUs) {
+      c.assignmentMissed = true;
+      c.priority += 1;
+      this.missedAssignmentAtUs.push(nowUs);
+    }
+    if (c.state === 'assigned' && c.firstResponseDueUs !== undefined && c.firstResponseDueUs <= nowUs && !c.replied) {
+      c.firstResponseMissed = true;
+      c.firstResponseDueUs = undefined;
+      this.missedFirstResponseAtUs.push(nowUs);
+    }
+    if (c.closeAtUs !== undefined && c.closeAtUs <= nowUs) {
+      this.conversations.delete(c.key);
+      return;
+    }
+    if (this.isManual || this.status.stale) return;
+    if (c.state === 'offered' && c.simAcceptAtUs !== undefined && c.simAcceptAtUs <= nowUs) this.accept(c, nowUs);
+    if (c.state === 'assigned' && c.simResolveAtUs !== undefined && c.simResolveAtUs <= nowUs) this.resolve(c, nowUs);
+    if (c.state === 'waiting' && this.rng.chance(0.25)) this.offerToSim(c, nowUs);
+  }
+
+  private stepArrivals(nowUs: number): void {
+    if (this.conversations.size < 60 && this.rng.chance(0.35)) this.addConversation(nowUs - this.rng.int(1, 4) * 1_000_000, nowUs);
+    if (this.rng.chance(0.08)) {
+      const assigned = [...this.conversations.values()].filter((c) => c.state === 'assigned');
+      if (assigned.length > 0) this.addCustomerMessage(this.rng.pick(assigned), nowUs);
+    }
+  }
+
+  private stepHumans(nowUs: number): void {
+    if (nowUs < this.nextHumanOfferAtUs) return;
+    for (const op of this.operators.values()) {
+      if (op.kind === 'human') this.offerToHuman(op, nowUs);
+    }
+    this.nextHumanOfferAtUs = nowUs + 9_000_000;
+  }
+
+  /** The repeating scenario of the dev mode: a message, a removal, an operator away, a stale spell. */
+  private stepScenario(nowUs: number): void {
+    const step = Math.floor(((nowUs - this.startedAtUs) % SCENARIO_CYCLE_US) / 5_000_000);
+    if (step === this.lastScenarioStep) return;
+    this.lastScenarioStep = step;
+    const held = this.heldByHumans();
+    const target = held[0];
+    switch (step) {
+      case 4:
+        if (target !== undefined) this.addCustomerMessage(target, nowUs);
+        break;
+      case 7: {
+        const message = target?.messages.at(-1);
+        if (target !== undefined && message !== undefined) this.removeMessage(target, message.id, 'deleted');
+        break;
+      }
+      case 10:
+        this.setPresence('sim-op-0005', 'offline', nowUs);
+        break;
+      case 15:
+        this.setPresence('sim-op-0005', 'online', nowUs);
+        break;
+      case 18:
+        this.setStale({ stale: true, reason: 'source_unavailable', lagUs: 4_000_000 });
+        break;
+      case 19:
+        this.setStale({ stale: false });
+        break;
+    }
+  }
+
+  // ------------------------------------------------------------ views
+
+  operatorRow(op: Operator): OperatorRow {
+    const { load, offered } = this.load(op.id);
+    return {
+      id: op.id,
+      kind: op.kind,
+      languages: op.languages,
+      capacity: op.capacity,
+      presence: op.presence,
+      load,
+      offered,
+      ...(op.team === undefined ? {} : { team: op.team }),
+    };
+  }
+
+  operatorConversation(c: Conversation): OperatorConversation {
+    return {
+      id: c.key,
+      company: c.company,
+      customer: c.customer,
+      lang: c.lang,
+      session: c.session,
+      state: c.state === 'offered' ? 'offered' : 'assigned',
+      offer_id: c.offerId ?? 'of-none',
+      ...(c.state === 'offered' ? { accept_by_us: c.acceptByUs ?? 1 } : { accepted_at_us: c.acceptedAtUs ?? 1 }),
+      queued_at_us: c.queuedAtUs ?? c.openedSourceUs,
+      ...(c.firstResponseDueUs === undefined ? {} : { first_response_due_us: c.firstResponseDueUs }),
+      first_response_missed: c.firstResponseMissed,
+      replied: c.replied,
+      priority: c.priority,
+      customer_messages: c.customerMessages,
+      company_messages: c.companyMessages,
+      ...(c.messages.length === 0 ? {} : { last_message_source_us: c.messages.at(-1)?.sourceUs ?? c.openedSourceUs }),
+    };
+  }
+
+  conversationRow(c: Conversation): ConversationRow {
+    const isHeld = c.state === 'offered' || c.state === 'assigned';
+    const isQueued = isHeld || c.state === 'waiting';
+    return {
+      id: c.key,
+      company: c.company,
+      customer: c.customer,
+      lang: c.lang,
+      session: c.session,
+      state: c.state,
+      team_queue: c.teamQueue,
+      priority: c.priority,
+      ...(isHeld && c.operatorId !== undefined ? { operator_id: c.operatorId } : {}),
+      ...(isQueued && c.queuedAtUs !== undefined ? { queued_at_us: c.queuedAtUs } : {}),
+      assignment_missed: c.assignmentMissed,
+      first_response_missed: c.firstResponseMissed,
+      customer_messages: c.customerMessages,
+      company_messages: c.companyMessages,
+      opened_source_us: c.openedSourceUs,
+    };
+  }
+
+  queueRows(): QueueRow[] {
+    return LANGUAGES.map((lang) => {
+      const queued = [...this.conversations.values()].filter((c) => c.lang === lang && (c.state === 'waiting' || c.state === 'offered'));
+      const waiting = queued.filter((c) => c.state === 'waiting');
+      const oldest = Math.min(...queued.map((c) => c.queuedAtUs ?? Number.MAX_SAFE_INTEGER));
+      return {
+        id: lang,
+        waiting: waiting.length,
+        team_waiting: waiting.filter((c) => c.teamQueue).length,
+        offered: queued.length - waiting.length,
+        ...(queued.length > 0 ? { oldest_queued_at_us: oldest } : {}),
+        missed_assignment: queued.filter((c) => c.assignmentMissed).length,
+      };
+    });
+  }
+
+  teamRows(): TeamRow[] {
+    return [...this.teams.values()].map((t) => ({
+      id: t.company,
+      members: t.members,
+      active_load: [...this.conversations.values()].filter((c) => c.company === t.company && c.state !== 'resolved').length,
+      formed_at_us: t.formedAtUs,
+    }));
+  }
+
+  totals(nowUs: number): Totals {
+    const counts = { open: 0, waiting: 0, offered: 0, assigned: 0, resolved: 0 };
+    for (const c of this.conversations.values()) counts[c.state] += 1;
+    const online = [...this.operators.values()].filter((o) => o.presence === 'online');
+    const sinceHour = nowUs - HOUR_US;
+    const waits = this.waits.filter((w) => w.atUs > sinceHour).map((w) => w.waitUs).sort((a, b) => a - b);
+    return {
+      messages_per_second: Math.round((this.addedAtUs.filter((t) => t > nowUs - 10_000_000).length / 10) * 100) / 100,
+      conversations: counts,
+      companies_active: new Set([...this.conversations.values()].map((c) => c.company)).size,
+      operators_online: online.length,
+      humans_online: online.filter((o) => o.kind === 'human').length,
+      slots_capacity: online.reduce((sum, o) => sum + o.capacity, 0),
+      slots_used: online.reduce((sum, o) => sum + this.load(o.id).load, 0),
+      missed_assignment: this.missedAssignmentAtUs.filter((t) => t > sinceHour).length,
+      missed_first_response: this.missedFirstResponseAtUs.filter((t) => t > sinceHour).length,
+      wait_p50_us: quantile(waits, 0.5),
+      wait_p90_us: quantile(waits, 0.9),
+    };
+  }
+
+  publicSnapshot(nowUs: number): PublicSnapshot {
+    return {
+      version: 1,
+      generated_at_us: nowUs,
+      stale: this.status.stale,
+      speed_factor: this.speedFactor,
+      totals: this.totals(nowUs),
+      queues: this.queueRows()
+        .map((q) => ({
+          lang: q.id,
+          waiting: q.waiting,
+          offered: q.offered,
+          oldest_wait_us: q.oldest_queued_at_us === undefined ? 0 : Math.round((nowUs - q.oldest_queued_at_us) * this.speedFactor),
+          missed_assignment: q.missed_assignment,
+        }))
+        .sort((a, b) => a.lang.localeCompare(b.lang)),
+    };
+  }
+}
+
+function quantile(sorted: readonly number[], q: number): number {
+  if (sorted.length === 0) return 0;
+  return sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))] ?? 0;
+}
+
+function reject(code: string, message: string): ActionOutcome {
+  return { outcome: 'rejected', code, message };
+}

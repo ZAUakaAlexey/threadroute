@@ -1,0 +1,143 @@
+@import 'tailwindcss';
+
+/* Latin subsets only: the console text is English. */
+@font-face {
+  font-family: 'IBM Plex Sans Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 700;
+  src: url('../node_modules/@fontsource-variable/ibm-plex-sans/files/ibm-plex-sans-latin-wght-normal.woff2')
+    format('woff2-variations');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2') format('woff2');
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 500;
+  src: url('../node_modules/@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-500-normal.woff2') format('woff2');
+}
+
+/*
+ * Colour has a meaning here: blue is an action or an offer, amber is
+ * waiting, red is late or missed, green is done. Everything else is ink on
+ * paper. The dark theme follows the system setting.
+ */
+:root {
+  color-scheme: light;
+  --paper: oklch(97.6% 0.004 85);
+  --panel: oklch(99.4% 0.002 85);
+  --sunken: oklch(95% 0.005 85);
+  --ink: oklch(22% 0.01 260);
+  --ink-2: oklch(42% 0.012 260);
+  --ink-3: oklch(52% 0.012 260);
+  --line: oklch(89% 0.006 85);
+  --line-strong: oklch(80% 0.008 85);
+  --accent: oklch(47% 0.17 262);
+  --accent-ink: oklch(99% 0 0);
+  --accent-soft: oklch(94% 0.03 262);
+  --wait: oklch(52% 0.12 65);
+  --wait-soft: oklch(95% 0.045 80);
+  --late: oklch(50% 0.17 27);
+  --late-soft: oklch(95% 0.03 25);
+  --done: oklch(48% 0.1 160);
+  --done-soft: oklch(95% 0.035 160);
+  --focus: oklch(55% 0.19 262);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --paper: oklch(17% 0.006 260);
+    --panel: oklch(20.5% 0.007 260);
+    --sunken: oklch(15% 0.006 260);
+    --ink: oklch(94% 0.005 85);
+    --ink-2: oklch(78% 0.008 85);
+    --ink-3: oklch(70% 0.01 85);
+    --line: oklch(29% 0.008 260);
+    --line-strong: oklch(38% 0.01 260);
+    --accent: oklch(72% 0.13 262);
+    --accent-ink: oklch(18% 0.02 262);
+    --accent-soft: oklch(28% 0.05 262);
+    --wait: oklch(80% 0.13 75);
+    --wait-soft: oklch(28% 0.05 75);
+    --late: oklch(74% 0.15 27);
+    --late-soft: oklch(28% 0.06 25);
+    --done: oklch(78% 0.12 160);
+    --done-soft: oklch(27% 0.045 160);
+    --focus: oklch(75% 0.14 262);
+  }
+}
+
+@theme inline {
+  --font-sans: 'IBM Plex Sans Variable', ui-sans-serif, system-ui, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'SFMono-Regular', monospace;
+
+  --color-paper: var(--paper);
+  --color-panel: var(--panel);
+  --color-sunken: var(--sunken);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-soft: var(--accent-soft);
+  --color-wait: var(--wait);
+  --color-wait-soft: var(--wait-soft);
+  --color-late: var(--late);
+  --color-late-soft: var(--late-soft);
+  --color-done: var(--done);
+  --color-done-soft: var(--done-soft);
+  --color-focus: var(--focus);
+}
+
+@layer base {
+  html {
+    background-color: var(--paper);
+    color: var(--ink);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    min-height: 100dvh;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      transition-duration: 0.01ms !important;
+      animation-duration: 0.01ms !important;
+    }
+  }
+}
+
+@utility eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.6875rem;
+  line-height: 1rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+@utility tnum {
+  font-variant-numeric: tabular-nums;
+}
