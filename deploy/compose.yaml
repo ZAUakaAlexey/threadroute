@@ -1,5 +1,5 @@
 # Local development stack: Kafka, Redis, PostgreSQL, ingest, normalize,
-# conv, router, sim and (optional) record.
+# conv, router, sim, gateway, console and (optional) record.
 #
 #   docker compose -f deploy/compose.yaml up -d --build            # the pipeline
 #   docker compose -f deploy/compose.yaml --profile record up -d   # also record
@@ -11,11 +11,20 @@
 # of the router and for routing. Each service waits a bounded time (2
 # minutes by default, 1 minute for PostgreSQL) and then exits, and the
 # restart policy starts it again, so a cold start needs no manual steps.
+# The gateway starts after the router and waits for conversations and
+# routing by itself; its /healthz answers 200 when it has caught up. The
+# console (nginx) starts after the gateway and serves the browser on
+# http://127.0.0.1:9473/, with /v1/ws and /v1/public/snapshot forwarded to
+# the gateway.
 #
 # Every published port listens on 127.0.0.1 only. The only secret is the
 # PostgreSQL password. Its default here is for this local stack only; set
 # THREADROUTE_POSTGRES_PASSWORD in .env for anything else. Redis has no
-# password and is reachable from the host only.
+# password and is reachable from the host only. Without
+# THREADROUTE_GATEWAY_SITE_API_URL every browser gets the demo level (no post
+# text, no author IDs).
+#
+# The console build needs Compose 2.17 or newer (additional_contexts).
 
 name: threadroute
 
@@ -347,6 +356,7 @@ services:
       THREADROUTE_ROUTER_PRUNE_INTERVAL: ${THREADROUTE_ROUTER_PRUNE_INTERVAL:-1m}
       THREADROUTE_ROUTER_COUNTS_INTERVAL: ${THREADROUTE_ROUTER_COUNTS_INTERVAL:-5s}
       THREADROUTE_ROUTER_OUTAGE_LIMIT: ${THREADROUTE_ROUTER_OUTAGE_LIMIT:-2m}
+      THREADROUTE_ROUTER_OPERATOR_REFRESH: ${THREADROUTE_ROUTER_OPERATOR_REFRESH:-6h}
     ports:
       - "127.0.0.1:9468:9468"
       - "127.0.0.1:9470:9470"
@@ -401,6 +411,112 @@ services:
       resources:
         limits:
           memory: 256m
+
+  # Live view for browsers (decision 0011). It reads conversations and
+  # routing from the beginning, text from Redis, and calls the operator API
+  # of the router. Browsers reach it through the console service below.
+  gateway:
+    <<: *go-service
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      args:
+        CMD: gateway
+    image: threadroute-gateway:dev
+    # The gateway waits for the topics by itself and reports "not ready"
+    # until it has caught up, so the router only has to be started.
+    depends_on:
+      kafka:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      router:
+        condition: service_started
+    environment:
+      THREADROUTE_KAFKA_BROKERS: kafka:9092
+      THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
+      THREADROUTE_REDIS_ADDR: redis:6379
+      THREADROUTE_REDIS_PASSWORD: ${THREADROUTE_REDIS_PASSWORD:-}
+      THREADROUTE_REDIS_DB: ${THREADROUTE_REDIS_DB:-0}
+      THREADROUTE_GATEWAY_METRICS_ADDR: ":9471"
+      THREADROUTE_GATEWAY_HTTP_ADDR: ":9472"
+      # The console forwards /v1/ws and /v1/public/snapshot as they are.
+      THREADROUTE_GATEWAY_PATH_PREFIX: ""
+      THREADROUTE_GATEWAY_ROUTER_URL: http://router:9470
+      THREADROUTE_GATEWAY_ROUTER_TIMEOUT: ${THREADROUTE_GATEWAY_ROUTER_TIMEOUT:-5s}
+      # Empty: no token is checked and every connection gets the demo level.
+      THREADROUTE_GATEWAY_SITE_API_URL: ${THREADROUTE_GATEWAY_SITE_API_URL:-}
+      THREADROUTE_GATEWAY_SITE_API_TIMEOUT: ${THREADROUTE_GATEWAY_SITE_API_TIMEOUT:-3s}
+      THREADROUTE_GATEWAY_SITE_API_CACHE: ${THREADROUTE_GATEWAY_SITE_API_CACHE:-1m}
+      THREADROUTE_GATEWAY_FULL_ROLES: ${THREADROUTE_GATEWAY_FULL_ROLES:-}
+      # The console address on the host. A page from the same host as the
+      # request is always allowed, and the console passes the Host header.
+      THREADROUTE_GATEWAY_ALLOWED_ORIGINS: ${THREADROUTE_GATEWAY_ALLOWED_ORIGINS:-127.0.0.1:${THREADROUTE_CONSOLE_HOST_PORT:-9473},localhost:${THREADROUTE_CONSOLE_HOST_PORT:-9473}}
+      # The console sets X-Forwarded-For. A client on the host that talks
+      # to port 9472 directly can set it too, which only matters for the
+      # connection limits of this local stack.
+      THREADROUTE_GATEWAY_TRUST_PROXY: "true"
+      THREADROUTE_GATEWAY_DEMO_OPERATORS: ${THREADROUTE_GATEWAY_DEMO_OPERATORS:-5}
+      THREADROUTE_GATEWAY_MAX_CONNECTIONS: ${THREADROUTE_GATEWAY_MAX_CONNECTIONS:-2000}
+      THREADROUTE_GATEWAY_MAX_CONNECTIONS_PER_ADDR: ${THREADROUTE_GATEWAY_MAX_CONNECTIONS_PER_ADDR:-20}
+      THREADROUTE_GATEWAY_TICK: ${THREADROUTE_GATEWAY_TICK:-250ms}
+      THREADROUTE_GATEWAY_OFFLINE_GRACE: ${THREADROUTE_GATEWAY_OFFLINE_GRACE:-15s}
+      THREADROUTE_GATEWAY_WRITE_TIMEOUT: ${THREADROUTE_GATEWAY_WRITE_TIMEOUT:-10s}
+      THREADROUTE_GATEWAY_PING_INTERVAL: ${THREADROUTE_GATEWAY_PING_INTERVAL:-20s}
+      THREADROUTE_GATEWAY_LAG_LIMIT: ${THREADROUTE_GATEWAY_LAG_LIMIT:-10s}
+      THREADROUTE_GATEWAY_SOURCE_TIMEOUT: ${THREADROUTE_GATEWAY_SOURCE_TIMEOUT:-5s}
+      THREADROUTE_GATEWAY_FORGET_AFTER: ${THREADROUTE_GATEWAY_FORGET_AFTER:-1h}
+      THREADROUTE_GATEWAY_SNAPSHOT_FRAME_ROWS: ${THREADROUTE_GATEWAY_SNAPSHOT_FRAME_ROWS:-500}
+    ports:
+      - "127.0.0.1:9471:9471"
+      - "127.0.0.1:9472:9472"
+    # On stop the gateway closes every connection and puts its human
+    # operators offline (up to 10s each).
+    stop_grace_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+
+  # The console in web/, built into static files and served by nginx, which
+  # also forwards /v1/ws and /v1/public/snapshot to the gateway. The browser
+  # talks to one origin: http://127.0.0.1:9473/.
+  console:
+    build:
+      context: ../web
+      dockerfile: ../deploy/console.Dockerfile
+      # The nginx files of deploy/, without sending the repository.
+      additional_contexts:
+        deploy: .
+      args:
+        # The localStorage key of the site token. Empty: the console never
+        # sends a token, so every user gets the demo level.
+        VITE_SITE_TOKEN_KEY: ${THREADROUTE_CONSOLE_SITE_TOKEN_KEY:-}
+    image: threadroute-console:dev
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+    ports:
+      - "127.0.0.1:${THREADROUTE_CONSOLE_HOST_PORT:-9473}:8080"
+    read_only: true
+    # Temporary files, the pid file and the cache of the public snapshot.
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 64m
 
   record:
     <<: *go-service

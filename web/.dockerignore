@@ -1,0 +1,13 @@
+# Build context of deploy/console.Dockerfile. Only what `pnpm build` needs.
+*
+!package.json
+!pnpm-lock.yaml
+!.npmrc
+!index.html
+!vite.config.ts
+!tsconfig*.json
+!src/
+!public/
+**/*.test.ts
+**/*.test.tsx
+src/test/
