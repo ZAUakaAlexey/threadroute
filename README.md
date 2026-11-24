@@ -102,7 +102,7 @@ Stop the stack with `make down`. To also remove the Kafka data volume:
 docker compose -f deploy/compose.yaml --profile record down -v
 ```
 
-Other targets: `make build`, `make test` (unit tests with the race detector, no Docker), `make test-integration` (real Kafka and Redis through Testcontainers, one package at a time, needs Docker), `make lint`, `make vuln`.
+Other targets: `make build`, `make test` (unit tests with the race detector, no Docker), `make test-integration` (real Kafka, Redis and PostgreSQL through Testcontainers, one package at a time, needs Docker), `make lint`, `make vuln`, `make generate` (regenerates the sqlc query code in `internal/pg/pgdb` with the pinned sqlc version, needs a C compiler; CI fails when the committed code differs).
 
 ## Configuration
 
