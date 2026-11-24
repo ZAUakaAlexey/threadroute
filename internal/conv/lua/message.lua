@@ -71,11 +71,12 @@ end
 -- sequence number, conversation event, admission or deadline. An edit of a
 -- message that is not stored (never admitted, purged or deleted) is dropped
 -- and never opens a conversation. A pending early deletion or author
--- removal still wins.
+-- removal still wins. The field e = '1' marks an edited text for the text
+-- reader. Only edited messages carry it, so other messages cost nothing.
 local stored = redis.call('EXISTS', k_text(msg_id)) == 1
 if edited then
   if stored and not text_removed then
-    redis.call('HSET', k_text(msg_id), 'x', text, 'lg', langs)
+    redis.call('HSET', k_text(msg_id), 'x', text, 'lg', langs, 'e', '1')
     R.result = 'edited'
   else
     R.result = 'edit_dropped'
@@ -231,7 +232,11 @@ if t > tonumber(c.last) then
   c.last = fmt(t)
 end
 
--- Text, ordered by source time, newest KEPT messages only.
+-- Text, ordered by source time, newest KEPT messages only. Text hash
+-- fields: k conversation key, a author, d direction, t source time, x text,
+-- lg language tags as sent, e '1' after an edit (absent otherwise). Messages
+-- dropped here by the limit give no 'message_removed' event: that event is
+-- only for deletions and author removals (decision 0011).
 if not text_removed then
   redis.call('ZADD', k_msgs(key), fmt(t), msg_id)
   redis.call('HSET', k_text(msg_id), 'k', key, 'a', author, 'd', dir, 't', fmt(t), 'x', text, 'lg', langs)

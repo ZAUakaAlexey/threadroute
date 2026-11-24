@@ -135,14 +135,26 @@ end
 
 -- emit appends one conversation event to the outbox of the conversation's
 -- partition and gives it the next sequence number. The caller saves c.
-local function emit(c, typ, at, msg_id, dir, response, reason)
+-- reason is the close reason of a 'closed' event. rm_reason is the remove
+-- reason of a 'message_removed' event; the field rr is written only then,
+-- so the other entries do not grow.
+local function emit(c, typ, at, msg_id, dir, response, reason, rm_reason)
   c.q = fmt(tonumber(c.q) + 1)
-  redis.call('XADD', k_outbox(c.p), '*',
-    'ty', typ, 'ch', c.ch, 'co', c.co, 'cu', c.cu,
-    's', c.s, 'q', c.q, 't', fmt(at), 'o', c.o, 'l', c.l,
-    'nc', c.nc, 'nk', c.nk,
-    'm', msg_id or '', 'd', dir or '',
-    'r', response and fmt(response) or '', 'cr', reason or '')
+  if rm_reason then
+    redis.call('XADD', k_outbox(c.p), '*',
+      'ty', typ, 'ch', c.ch, 'co', c.co, 'cu', c.cu,
+      's', c.s, 'q', c.q, 't', fmt(at), 'o', c.o, 'l', c.l,
+      'nc', c.nc, 'nk', c.nk,
+      'm', msg_id or '', 'd', dir or '',
+      'r', '', 'cr', '', 'rr', rm_reason)
+  else
+    redis.call('XADD', k_outbox(c.p), '*',
+      'ty', typ, 'ch', c.ch, 'co', c.co, 'cu', c.cu,
+      's', c.s, 'q', c.q, 't', fmt(at), 'o', c.o, 'l', c.l,
+      'nc', c.nc, 'nk', c.nk,
+      'm', msg_id or '', 'd', dir or '',
+      'r', response and fmt(response) or '', 'cr', reason or '')
+  end
   OB[c.p] = true
   count('ev_' .. typ)
 end
@@ -178,6 +190,63 @@ local function drop_text(id)
     redis.call('SREM', k_author(x[2]), id)
   end
   redis.call('DEL', k_text(id))
+end
+
+-- remove_texts removes the stored messages ids because their author deleted
+-- them or was removed (reason 'deleted' or 'author_removed'), and appends one
+-- 'message_removed' event per message whose text was stored, at source time
+-- at (decision 0011). Each event goes to the outbox of the message's own
+-- conversation, with the next sequence number of that conversation and its
+-- current session, also when that session is closed. An ID whose text hash
+-- is gone (an index entry left by the safety lifetime) gives no event.
+--
+-- Each conversation is loaded and saved once. Messages of one conversation
+-- get their events in source time order, then by ID, so the result does not
+-- depend on the order of a set. The work is one HMGET per ID and one load
+-- and save per conversation, on top of what drop_text does.
+--
+-- A text whose conversation record is gone cannot get a valid event: there
+-- is no sequence number, partition or session. The text is removed and the
+-- case is counted as removed_without_event. It needs a record lost by its
+-- safety lifetime, or a record forgotten after SESSION_KEPT while a purge of
+-- the same partition is still due.
+local function remove_texts(ids, reason, at)
+  local by_key = {}
+  local keys = {}
+  for _, id in ipairs(ids) do
+    local x = redis.call('HMGET', k_text(id), 'k', 'd', 't')
+    if x[1] then
+      if not by_key[x[1]] then
+        by_key[x[1]] = {}
+        keys[#keys + 1] = x[1]
+      end
+      local list = by_key[x[1]]
+      list[#list + 1] = { id = id, d = x[2] or '', t = tonumber(x[3] or '0') }
+    end
+  end
+  table.sort(keys)
+  for _, key in ipairs(keys) do
+    local list = by_key[key]
+    table.sort(list, function(a, b)
+      if a.t ~= b.t then
+        return a.t < b.t
+      end
+      return a.id < b.id
+    end)
+    local c = load_conv(key)
+    for _, m in ipairs(list) do
+      if c then
+        emit(c, 'message_removed', at, m.id, m.d, nil, nil, reason)
+        count('rm_' .. reason)
+      else
+        count('removed_without_event')
+      end
+      drop_text(m.id)
+    end
+    if c then
+      save_conv(key, c)
+    end
+  end
 end
 
 -- refresh_text renews the safety lifetime of the text of an open

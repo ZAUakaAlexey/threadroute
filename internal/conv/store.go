@@ -82,6 +82,11 @@ type Result struct {
 	Due, PurgeDue int
 	// Purged counts messages whose text a sweep removed after the close.
 	Purged int
+	// Removed counts the message_removed events appended, by reason.
+	Removed map[event.RemoveReason]int
+	// RemovedWithoutEvent counts texts that a deletion or a removal dropped
+	// with no event, because the record of their conversation was gone.
+	RemovedWithoutEvent int
 }
 
 // Store applies events to the conversation state in Redis. It is safe for
@@ -387,6 +392,8 @@ func parseResult(cmd *redis.Cmd) (Result, error) {
 			r.PurgeDue = int(n)
 		case k == "purged":
 			r.Purged = int(n)
+		case k == "removed_without_event":
+			r.RemovedWithoutEvent = int(n)
 		case k == "ob":
 			for part := range strings.SplitSeq(v, ",") {
 				p, err := strconv.ParseInt(part, 10, 32)
@@ -400,6 +407,11 @@ func parseResult(cmd *redis.Cmd) (Result, error) {
 				r.Closed = map[event.CloseReason]int{}
 			}
 			r.Closed[event.CloseReason(strings.TrimPrefix(k, "closed_"))] += int(n)
+		case strings.HasPrefix(k, "rm_"):
+			if r.Removed == nil {
+				r.Removed = map[event.RemoveReason]int{}
+			}
+			r.Removed[event.RemoveReason(strings.TrimPrefix(k, "rm_"))] += int(n)
 		case strings.HasPrefix(k, "ev_"):
 			r.Events += int(n)
 		}
@@ -449,6 +461,7 @@ func entryEvent(values map[string]any) (event.Conversation, error) {
 		Direction:        event.Direction(str("d")),
 		ResponseTime:     time.Duration(num("r")) * time.Microsecond,
 		CloseReason:      event.CloseReason(str("cr")),
+		RemoveReason:     event.RemoveReason(str("rr")),
 	}
 	if err := errors.Join(errs...); err != nil {
 		return c, fmt.Errorf("outbox entry: %w", err)

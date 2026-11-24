@@ -1,6 +1,8 @@
 package conv
 
 import (
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -66,12 +68,18 @@ func TestDeletionBeforeMessage(t *testing.T) {
 }
 
 // TestControlOrderSameState runs each control event before and after its
-// message and compares the final Redis state, outbox included.
+// message and compares the final Redis state, outbox included. The one
+// allowed difference is the message_removed event (decision 0011): with the
+// message first, its text was stored and the control event removes it with
+// an event; with the control event first, no text is ever stored and no
+// event is due. So the removed events and the sequence numbers are left out
+// of the comparison, and the removed events are checked on their own.
 func TestControlOrderSameState(t *testing.T) {
 	tests := []struct {
 		name    string
 		msgs    func() []event.Message
 		control func() event.Control
+		removed int // message_removed events when the message comes first
 	}{
 		{
 			name: "deletion",
@@ -79,6 +87,7 @@ func TestControlOrderSameState(t *testing.T) {
 				return []event.Message{customerMsg(testCompany, testAlice, "test:a1", time.Minute)}
 			},
 			control: func() event.Control { return deletion("test:a1", testAlice, 2*time.Minute) },
+			removed: 1,
 		},
 		{
 			// One message only. A company message that follows the customer
@@ -90,6 +99,7 @@ func TestControlOrderSameState(t *testing.T) {
 				return []event.Message{customerMsg(testCompany, testAlice, "test:a1", time.Minute)}
 			},
 			control: func() event.Control { return removal(testAlice, 2*time.Minute) },
+			removed: 1,
 		},
 		{
 			name: "company removal",
@@ -101,7 +111,7 @@ func TestControlOrderSameState(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			run := func(controlFirst bool) string {
+			run := func(controlFirst bool) (string, int) {
 				env := newTestEnv(t, testRules())
 				// The admitting conversation has its own keys; it is the
 				// same in both orders.
@@ -113,14 +123,36 @@ func TestControlOrderSameState(t *testing.T) {
 					env.apply(t, tt.msgs()...)
 					env.control(t, tt.control())
 				}
-				return env.snapshot(t)
+				snap := env.snapshot(t)
+				if tt.removed > 0 {
+					snap = withoutRemoved(snap)
+				}
+				return snap, len(env.removedOf(t, testCompany, testAlice))
 			}
-			after, before := run(false), run(true)
+			after, removedAfter := run(false)
+			before, removedBefore := run(true)
 			if after != before {
 				t.Errorf("state differs.\nmessage first:\n%s\ncontrol first:\n%s", after, before)
 			}
+			if removedAfter != tt.removed || removedBefore != 0 {
+				t.Errorf("removed events: %d with the message first, %d with the control first, want %d and 0",
+					removedAfter, removedBefore, tt.removed)
+			}
 		})
 	}
+}
+
+var (
+	removedEntry = regexp.MustCompile(` ?\[[^\[\]]*ty=message_removed[^\[\]]*\]`)
+	seqField     = regexp.MustCompile(`\bq=[0-9]+`)
+)
+
+// withoutRemoved drops the message_removed outbox entries and every
+// sequence number from a snapshot.
+func withoutRemoved(snapshot string) string {
+	s := removedEntry.ReplaceAllString(snapshot, "")
+	s = strings.ReplaceAll(s, "[ [", "[[")
+	return seqField.ReplaceAllString(s, "q=")
 }
 
 func TestCustomerRemoval(t *testing.T) {

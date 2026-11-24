@@ -56,7 +56,23 @@
 // message that is not stored is dropped as edit_dropped and never opens a
 // conversation, and a pending early deletion or removal still wins. A
 // message event without Edited whose message ID is already stored is a
-// duplicate.
+// duplicate. An applied edit sets the field e of the text hash, which the
+// TextReader reports as StoredMessage.Edited.
+//
+// # Removed messages
+//
+// A deletion or an author removal that drops a stored text appends one
+// message_removed event (decision 0011) to the outbox of the message's
+// conversation, in the same script, with the next sequence number of that
+// conversation. The event carries the current session and counters of the
+// conversation, also when that session is closed and its text is still
+// kept, so it can follow the closed event. An author removal writes the
+// removed events of a conversation before its closed event, in source time
+// order of the messages and then by ID. No event is written for a deletion
+// that is remembered because the text is not stored (early, repeated, or
+// after the purge), for texts dropped by the MessagesKept limit or by the
+// purge after the close, or for a text whose conversation record is gone
+// (counted as removed_without_event).
 //
 // # Rules where the decision records are silent
 //
@@ -93,7 +109,7 @@
 //	cand:<company>   zset   customer -> time, at most N members  window + margin
 //	c:<conv key>     hash   session record and counters          timeout + 24h + margin
 //	m:<conv key>     zset   message ID -> source time            timeout + text kept + margin
-//	x:<message ID>   hash   text, author, conversation           timeout + text kept + margin
+//	x:<message ID>   hash   text, author, conversation, edit     timeout + text kept + margin
 //	au:<author>      set    message IDs of the author            timeout + text kept + margin
 //	cc:, ck:<author> set    open conversations as customer, as company
 //	dl:<partition>   zset   conv key -> close deadline (us)      no lifetime

@@ -4,6 +4,10 @@ package conv
 
 import (
 	"context"
+	"fmt"
+	"slices"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,7 +263,153 @@ func TestIntegration(t *testing.T) {
 				}
 			}
 		}
+
+		// Second part: message_removed events go through the same outbox
+		// and survive a restart. The messages are applied directly, so
+		// their text is surely stored before the control events arrive
+		// (the two topics are consumed independently). Their source times
+		// are after the 3 hour message of conversationInput, so no
+		// watermark closes and purges them first. New conversation keys,
+		// so the topic holds nothing older for them.
+		env.admit(t, testCompany3, 3*time.Hour)
+		env.apply(t,
+			customerMsg(testCompany3, testDave, "test:d1", 3*time.Hour+time.Minute),
+			customerMsg(testCompany3, testDave, "test:d2", 3*time.Hour+2*time.Minute),
+			customerMsg(testCompany3, testErin, "test:e1", 3*time.Hour+time.Minute),
+			companyMsg(testCompany3, testErin, "test:k1", 3*time.Hour+2*time.Minute),
+			customerMsg(testCompany3, testErin, "test:e2", 3*time.Hour+3*time.Minute),
+		)
+		controls := []event.Control{
+			deletion("test:d1", testDave, 3*time.Hour+4*time.Minute),
+			removal(testErin, 3*time.Hour+5*time.Minute),
+		}
+		produceControls(t, brokers, controls...)
+		controlsApplied := func() bool {
+			return env.applied(t, controls[0].(event.Deletion).EventID) &&
+				env.applied(t, controls[1].(event.AuthorRemoval).EventID)
+		}
+
+		third := startServiceGroup(t, brokers, "it-outbox", env.store, &failingPublisher{})
+		select {
+		case err := <-third.done:
+			close(third.done)
+			if err == nil {
+				t.Fatal("third Run() = nil, want the publish error")
+			}
+		case <-time.After(time.Minute):
+			t.Fatal("third run did not fail")
+		}
+		// The two control events can come in different polls, so the failed
+		// run may have applied only the first one. At least one removed
+		// event waits in the outbox for the restart.
+		if n := len(env.removedOf(t, testCompany3, testDave)) + len(env.removedOf(t, testCompany3, testErin)); n == 0 {
+			t.Fatal("no message_removed event in the outbox after the failed publish")
+		}
+
+		fourth := startServiceGroup(t, brokers, "it-outbox", env.store, newPublisher(t, brokers))
+		waitFor(t, "the removed events published", func() bool {
+			st, err := env.store.Stats(testCtx(t), bus.PartitionsEvents)
+			// The admission at 3 hours moved the watermark of partition 0
+			// past the deadline of the admitting conversation of
+			// testCompany (only the customer that reached the threshold
+			// opened one). Wait until the sweeper closed it, so no close is
+			// left unpublished when the service stops.
+			admitting := testCustomer(900 + env.store.Rules().AdmissionThreshold - 1)
+			return err == nil && st.OutboxPending == 0 && controlsApplied() &&
+				env.conv(t, testCompany, admitting)["st"] == "c"
+		})
+		if err := fourth.stop(); err != nil {
+			t.Fatal(err)
+		}
+		perConv = dedupe(readConversations(t, brokers, 1))
+		assertAllPublished(t, env, perConv)
+		removedIn := func(who string) []string {
+			var out []string
+			for _, ev := range perConv[convKey(testCompany3, who)] {
+				if ev.Type == event.TypeMessageRemoved {
+					out = append(out, string(ev.RemoveReason)+" "+ev.MessageID)
+				}
+			}
+			return out
+		}
+		if got, want := removedIn(testDave), []string{"deleted test:d1"}; !slices.Equal(got, want) {
+			t.Errorf("dave: removed events %v, want %v", got, want)
+		}
+		if got, want := removedIn(testErin), []string{"author_removed test:e1", "author_removed test:e2"}; !slices.Equal(got, want) {
+			t.Errorf("erin: removed events %v, want %v", got, want)
+		}
+		erin := perConv[convKey(testCompany3, testErin)]
+		if last := erin[len(erin)-1]; last.Type != event.TypeClosed || last.CloseReason != event.CloseCustomerRemoved {
+			t.Errorf("erin: last event %+v, want closed by the removal", last)
+		}
 	})
+
+	// The memory cost of the edit marker of the text hash, on real Redis:
+	// the change of used_memory when n text hashes get the marker. It only
+	// logs the numbers; run with -v to see them.
+	t.Run("EditMarkerMemory", func(t *testing.T) {
+		env := newRealEnv(t, redisAddr)
+		ctx := testCtx(t)
+		const n = 2000
+		usedMemory := func() int64 {
+			info := env.rdb.InfoMap(ctx, "memory").Val()
+			v, err := strconv.ParseInt(info["Memory"]["used_memory"], 10, 64)
+			if err != nil {
+				t.Fatalf("used_memory: %v", err)
+			}
+			return v
+		}
+		for _, size := range []int{40, 150, 300} {
+			if err := env.rdb.FlushAll(ctx).Err(); err != nil {
+				t.Fatal(err)
+			}
+			empty := usedMemory()
+			pipe := env.rdb.Pipeline()
+			for i := range n {
+				pipe.HSet(ctx, fmt.Sprintf("%sx:test:mem:%d", DefaultKeyPrefix, i),
+					"k", convKey(testCompany, testCustomer(i)), "a", testCustomer(i), "d", "customer",
+					"t", "1767268860123456", "x", strings.Repeat("y", size), "lg", "en")
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				t.Fatal(err)
+			}
+			without := usedMemory()
+			enc := env.rdb.ObjectEncoding(ctx, DefaultKeyPrefix+"x:test:mem:0").Val()
+			for i := range n {
+				pipe.HSet(ctx, fmt.Sprintf("%sx:test:mem:%d", DefaultKeyPrefix, i), "e", "1")
+			}
+			if _, err := pipe.Exec(ctx); err != nil {
+				t.Fatal(err)
+			}
+			with := usedMemory()
+			t.Logf("text %d bytes, encoding %s: %d bytes per message, marker +%d bytes per edited message",
+				size, enc, (without-empty)/n, (with-without)/n)
+		}
+	})
+}
+
+// Synthetic, clearly fake IDs used only by the outbox test, so its
+// conversations have keys of their own in the conversations topic.
+const (
+	testCompany3 = "did:plc:testcompanythree0000000000"
+	testDave     = "did:plc:testdave00000000000000000"
+	testErin     = "did:plc:testerin00000000000000000"
+)
+
+func produceControls(t *testing.T, brokers []string, controls ...event.Control) {
+	t.Helper()
+	cl := newKafkaClient(t, brokers)
+	recs := make([]*kgo.Record, len(controls))
+	for i, c := range controls {
+		b, err := event.MarshalControl(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		recs[i] = &kgo.Record{Topic: bus.TopicControl, Key: event.AuthorKey(c.Author()), Value: b}
+	}
+	if err := cl.ProduceSync(testCtx(t), recs...).FirstErr(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func newRealEnv(t *testing.T, addr string) *testEnv {

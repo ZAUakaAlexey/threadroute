@@ -1,5 +1,6 @@
 -- Applies one author removal (decisions 0004 and 0007):
---   * every stored message of the author is deleted,
+--   * every stored message of the author is deleted, with one
+--     'message_removed' event per message (decision 0011),
 --   * open conversations where the author is the customer close with
 --     'customer_removed',
 --   * open conversations where the author is the company close with
@@ -17,10 +18,14 @@ if not mark_applied(event_id) then
   return result()
 end
 
+-- Every stored message of the author gets a 'message_removed' event in its
+-- own conversation (decision 0011). The work is bounded as before this
+-- event existed: one pass over the author index, which holds at most
+-- MessagesKept messages per conversation of the author, and only while
+-- their text is kept. The events are written and the conversations saved
+-- before close_all, which loads the records again.
 local ids = redis.call('SMEMBERS', k_author(author))
-for _, id in ipairs(ids) do
-  drop_text(id)
-end
+remove_texts(ids, 'author_removed', at)
 redis.call('DEL', k_author(author))
 count('messages_removed', #ids)
 
