@@ -80,6 +80,12 @@ func unescapeKeyPart(s string) (string, error) {
 	return keyUnescaper.Replace(s), nil
 }
 
+// CompanyKey returns the record key of a team event in the routing topic:
+// the company ID as it is (decision 0009).
+func CompanyKey(companyID string) []byte {
+	return []byte(companyID)
+}
+
 // AuthorKey returns the record key of a control event in the events.control
 // topic: the author ID as it is (decision 0006).
 func AuthorKey(authorID string) []byte {

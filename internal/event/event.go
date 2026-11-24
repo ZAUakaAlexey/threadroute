@@ -8,6 +8,9 @@
 //     topic. normalize writes them and conv reads them.
 //   - Conversation is a conversation event in the conversations topic. conv
 //     writes it and the router and the gateway read it.
+//   - Routing is a routing event in the routing topic. The router writes
+//     it, and the simulator and the gateway read it (decisions 0009 and
+//     0010).
 //
 // # Wire format
 //
@@ -41,9 +44,9 @@ type Channel string
 const ChannelBluesky Channel = "bluesky"
 
 // ErrUnknownKind is returned, wrapped, when a control event has an unknown
-// kind or a conversation event has an unknown type. A newer writer may add
-// kinds, so a reader can check for it with errors.Is, skip the record and
-// count it.
+// kind, or a conversation or routing event has an unknown type. A newer
+// writer may add kinds, so a reader can check for it with errors.Is, skip
+// the record and count it.
 var ErrUnknownKind = errors.New("unknown event kind")
 
 // micros returns t as unix microseconds, or 0 for the zero time.

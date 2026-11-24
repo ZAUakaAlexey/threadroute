@@ -104,7 +104,7 @@ func TestIntegrationRealBroker(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		specs := []TopicSpec{raw, EventsTopicSpec(), ControlTopicSpec(), ConversationsTopicSpec(), CursorTopicSpec()}
+		specs := []TopicSpec{raw, EventsTopicSpec(), ControlTopicSpec(), ConversationsTopicSpec(), RoutingTopicSpec(), CursorTopicSpec()}
 		testEnsureTopicsOnBroker(t, brokers, specs)
 
 		// The smallest valid limits give the smallest segment.bytes

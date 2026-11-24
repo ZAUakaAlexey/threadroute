@@ -3,6 +3,8 @@
 // topic names, partition counts, topic configs, record headers and the
 // cursor record.
 //
+// The routing topic of stage 3 (decision 0009) is listed here too.
+//
 // It also has the Kafka client code built on these names: topic setup
 // (EnsureTopics), the raw writer (RawWriter) and the cursor reader
 // (ReadCursor).
@@ -28,6 +30,10 @@ const (
 	// TopicConversations holds conversation events from conv, keyed by
 	// conversation key (decision 0007).
 	TopicConversations = "conversations"
+	// TopicRouting holds routing events from the router (decision 0009).
+	// Conversation events are keyed by conversation key, team events by
+	// company ID.
+	TopicRouting = "routing"
 	// TopicCursor holds the resume position of the source reader, keyed by
 	// source name. It is compacted.
 	TopicCursor = "ingest.cursor"
@@ -40,6 +46,7 @@ const (
 	PartitionsEvents        int32 = 16
 	PartitionsControl       int32 = 6
 	PartitionsConversations int32 = 16
+	PartitionsRouting       int32 = 16
 	PartitionsCursor        int32 = 1
 )
 
@@ -177,8 +184,9 @@ func RawTopicSpec(l RawLimits) (TopicSpec, error) {
 	}, nil
 }
 
-// Retention of the stage 2 topics (decisions 0004 and 0006). Time is the
-// main limit. The size limits below are only a safety net.
+// Retention of the stage 2 topics (decisions 0004 and 0006) and of the
+// routing topic of stage 3. Time is the main limit. The size limits below
+// are only a safety net.
 const (
 	// EventsRetention is retention.ms of TopicEvents (decision 0006).
 	EventsRetention = 6 * time.Hour
@@ -187,7 +195,9 @@ const (
 	// ConversationsRetention is retention.ms of TopicConversations
 	// (decision 0004).
 	ConversationsRetention = 24 * time.Hour
-	// Stage2SegmentInterval is segment.ms of the three topics above.
+	// RoutingRetention is retention.ms of TopicRouting.
+	RoutingRetention = 24 * time.Hour
+	// Stage2SegmentInterval is segment.ms of the topics above.
 	// Retention only deletes closed segments, and with the broker default
 	// a segment closes after 7 days or 1 GiB, so without this setting a
 	// small topic would keep records far longer than its retention. With 1
@@ -197,9 +207,10 @@ const (
 	Stage2SegmentInterval = time.Hour
 )
 
-// Total size limits of the stage 2 topics, over all partitions, in decimal
-// bytes (decision 0006, "Details fixed before implementation"). They are far
-// above the expected size and are a safety net only.
+// Total size limits of the stage 2 topics and the routing topic, over all
+// partitions, in decimal bytes (decision 0006, "Details fixed before
+// implementation"). They are far above the expected size and are a safety
+// net only.
 //
 // Each limit is split the same way as the raw topic limit (see
 // RawLimits.SegmentBytes and RawLimits.PerPartitionBytes): the
@@ -216,6 +227,8 @@ const (
 	ControlMaxBytes int64 = 512_000_000
 	// ConversationsMaxBytes is the size limit of TopicConversations: 1 GB.
 	ConversationsMaxBytes int64 = 1_000_000_000
+	// RoutingMaxBytes is the size limit of TopicRouting: 1 GB.
+	RoutingMaxBytes int64 = 1_000_000_000
 )
 
 // EventsTopicSpec returns the spec of TopicEvents: delete cleanup,
@@ -237,6 +250,13 @@ func ControlTopicSpec() TopicSpec {
 // Stage2SegmentInterval, and LogAppendTime timestamps.
 func ConversationsTopicSpec() TopicSpec {
 	return limitedSpec(TopicConversations, PartitionsConversations, ConversationsRetention, ConversationsMaxBytes)
+}
+
+// RoutingTopicSpec returns the spec of TopicRouting: delete cleanup,
+// RoutingRetention, RoutingMaxBytes, Stage2SegmentInterval, and
+// LogAppendTime timestamps. The router owns the topic and ensures it.
+func RoutingTopicSpec() TopicSpec {
+	return limitedSpec(TopicRouting, PartitionsRouting, RoutingRetention, RoutingMaxBytes)
 }
 
 // sizeSplit returns segment.bytes and retention.bytes for a topic with the
