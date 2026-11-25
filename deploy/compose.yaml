@@ -499,7 +499,8 @@ services:
       resources:
         limits:
           # Its state is the whole floor, and its start reads both topics
-          # from the beginning: about 180 to 210 MiB on a day of data.
+          # from the beginning: between about 180 and 290 MiB on a day of
+          # data, and the peak differs from start to start.
           # GOMEMLIMIT above is 400MiB (about 80 percent).
           memory: 512m
 
