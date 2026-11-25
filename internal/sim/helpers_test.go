@@ -21,8 +21,6 @@ type fakeClock struct {
 	mu      sync.Mutex
 	now     time.Time
 	waiters []waiter
-	// added is signalled when a waiter is added.
-	added *sync.Cond
 }
 
 type waiter struct {
@@ -33,19 +31,7 @@ type waiter struct {
 var epoch = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 func newFakeClock() *fakeClock {
-	c := &fakeClock{now: epoch}
-	c.added = sync.NewCond(&c.mu)
-	return c
-}
-
-// waitWaiters blocks until at least n waiters wait for a later time, so a
-// test moves the clock only once the code under test is waiting.
-func (c *fakeClock) waitWaiters(n int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for len(c.waiters) < n {
-		c.added.Wait()
-	}
+	return &fakeClock{now: epoch}
 }
 
 func (c *fakeClock) Now() time.Time {
@@ -64,7 +50,6 @@ func (c *fakeClock) After(d time.Duration) <-chan time.Time {
 		return ch
 	}
 	c.waiters = append(c.waiters, waiter{at: at, ch: ch})
-	c.added.Broadcast()
 	return ch
 }
 
@@ -118,11 +103,6 @@ type fakeAPI struct {
 	settingsErr error
 	// settingsFn answers Settings when set, instead of the two fields.
 	settingsFn func() (opapi.Settings, error)
-	// simDefaults answers PutSimDefaults. nil answers CodeSettingsOff, as
-	// a router from before decision 0014.
-	simDefaults func(req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
-	// reports are the bodies of PutSimDefaults.
-	reports []opapi.SimSettings
 	// anyOperator makes Offline answer for an operator that was never put.
 	// Without it such a call gets CodeOperatorNotFound, as in the router.
 	anyOperator bool
@@ -171,17 +151,6 @@ func (a *fakeAPI) setSettings(s opapi.Settings, err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.settings, a.settingsErr = s, err
-}
-
-func (a *fakeAPI) PutSimDefaults(_ context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-	a.mu.Lock()
-	a.reports = append(a.reports, req.Sim)
-	f := a.simDefaults
-	a.mu.Unlock()
-	if f == nil {
-		return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeSettingsOff)
-	}
-	return f(req)
 }
 
 func (a *fakeAPI) PutOperator(_ context.Context, id string, req opapi.OperatorRequest) (opapi.OperatorResponse, error) {
@@ -235,12 +204,6 @@ var errNoAnswer = errors.New("dial tcp: connection refused")
 
 func apiError(code opapi.ErrorCode) error {
 	return &opapi.Error{Status: code.Status(), ErrorResponse: opapi.ErrorResponse{Code: code, Message: "test"}}
-}
-
-func settingsError(code opapi.ErrorCode, fields ...opapi.FieldError) error {
-	return &opapi.SettingsError{Status: code.Status(), SettingsErrorResponse: opapi.SettingsErrorResponse{
-		ErrorResponse: opapi.ErrorResponse{Code: code, Message: "test"}, Fields: fields,
-	}}
 }
 
 // harness drives an engine synchronously: events by hand, the fake clock

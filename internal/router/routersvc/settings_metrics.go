@@ -18,12 +18,13 @@ type standSource interface {
 // no update call:
 //
 //   - settings_value{name}: each value of the current set, by its field
-//     name of opapi.SettingsFields. The sim values appear once a simulator
-//     reported.
-//   - settings_version: the version of the current set, 0 while nothing is
-//     stored or when the router does not offer stand settings.
+//     name of opapi.SettingsFields. The sim values appear once the set has
+//     a sim part, which the router stores at its start.
+//   - settings_version: the version of the current set, 0 when the router
+//     does not offer stand settings.
 //   - settings_changes_total{source}: the changes this process applied, by
-//     source (console or simulator).
+//     source: console (PUT /v1/settings) or defaults (the defaults of the
+//     code stored at start).
 type settingsCollector struct {
 	src     standSource
 	value   *prometheus.Desc
@@ -39,10 +40,10 @@ func newSettingsCollector(src standSource) *settingsCollector {
 			"Values of the stand settings in use, by field name (decision 0014). Durations are microseconds of model time.",
 			[]string{"name"}, nil),
 		version: prometheus.NewDesc(name("settings_version"),
-			"Version of the stand settings in use, 0 while nothing is stored or when the router does not offer them.",
+			"Version of the stand settings in use, 0 when the router does not offer them.",
 			nil, nil),
 		changes: prometheus.NewDesc(name("settings_changes_total"),
-			"Stand settings changes applied by this process, by source (console or simulator).",
+			"Stand settings changes applied by this process, by source (console, or defaults for the defaults stored at start).",
 			[]string{"source"}, nil),
 	}
 }
@@ -62,5 +63,5 @@ func (c *settingsCollector) Collect(ch chan<- prometheus.Metric) {
 	}
 	ch <- prometheus.MustNewConstMetric(c.version, prometheus.GaugeValue, float64(snap.Version))
 	ch <- prometheus.MustNewConstMetric(c.changes, prometheus.CounterValue, float64(snap.ConsoleChanges), router.SourceConsole)
-	ch <- prometheus.MustNewConstMetric(c.changes, prometheus.CounterValue, float64(snap.SimulatorChanges), router.SourceSimulator)
+	ch <- prometheus.MustNewConstMetric(c.changes, prometheus.CounterValue, float64(snap.DefaultsChanges), router.SourceDefaults)
 }

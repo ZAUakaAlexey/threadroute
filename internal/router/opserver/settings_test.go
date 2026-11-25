@@ -23,7 +23,6 @@ type fakeStand struct {
 	mu          sync.Mutex
 	withChanges []bool
 	puts        []opapi.SettingsChangeRequest
-	sims        []opapi.SimDefaultsRequest
 	res         opapi.Result
 	err         error
 }
@@ -51,23 +50,19 @@ func (f *fakeStand) PutSettings(_ context.Context, req opapi.SettingsChangeReque
 	return opapi.SettingsChangeResponse{Result: f.res, Settings: *testStand()}, f.err
 }
 
-func (f *fakeStand) PutSimDefaults(_ context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.sims = append(f.sims, req)
-	return opapi.SimDefaultsResponse{Result: f.res, Settings: *testStand()}, f.err
-}
-
 func (f *fakeStand) calls() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return len(f.puts) + len(f.sims)
+	return len(f.puts)
 }
 
 const (
 	validPut = `{"settings":{"teams":{"form_load":30,"release_load":8,"release_after_us":900000000,` +
 		`"min_size":2,"max_size":20,"max_share":0.5}},"base_version":0,"by":"test-user"}`
-	validSim = `{"sim":{"operators":200,"capacity":4,"handling_median_us":45000000,` +
+	// simDefaultsPath is the path of the simulator report that the first
+	// version of decision 0014 had. No route serves it any more.
+	simDefaultsPath = "/v1/settings/sim-defaults"
+	validSim        = `{"sim":{"operators":200,"capacity":4,"handling_median_us":45000000,` +
 		`"resolve_median_us":180000000,"missed_offer_share":0.03}}`
 )
 
@@ -121,19 +116,15 @@ func TestStandOff(t *testing.T) {
 	if s := decode[opapi.Settings](t, rec); rec.Code != http.StatusOK || s.Stand != nil {
 		t.Errorf("GET: status %d, stand %+v", rec.Code, s.Stand)
 	}
-	for _, c := range []struct{ path, body string }{
-		{opapi.SettingsPath(), validPut}, {opapi.SimDefaultsPath(), validSim},
-	} {
-		rec := serve(h, http.MethodPut, c.path, c.body)
-		er := decode[opapi.SettingsErrorResponse](t, rec)
-		if rec.Code != http.StatusNotImplemented || er.Code != opapi.CodeSettingsOff || er.Validate() != nil {
-			t.Errorf("PUT %s: status %d, answer %+v", c.path, rec.Code, er)
-		}
-		// Step 1 comes before step 2.
-		rec = serve(h, http.MethodPut, c.path, `{"settings":`)
-		if er := decode[opapi.SettingsErrorResponse](t, rec); rec.Code != http.StatusBadRequest || er.Code != opapi.CodeInvalidRequest {
-			t.Errorf("PUT %s with a broken body: status %d, answer %+v", c.path, rec.Code, er)
-		}
+	rec = serve(h, http.MethodPut, opapi.SettingsPath(), validPut)
+	er := decode[opapi.SettingsErrorResponse](t, rec)
+	if rec.Code != http.StatusNotImplemented || er.Code != opapi.CodeSettingsOff || er.Validate() != nil {
+		t.Errorf("PUT: status %d, answer %+v", rec.Code, er)
+	}
+	// Step 1 comes before step 2.
+	rec = serve(h, http.MethodPut, opapi.SettingsPath(), `{"settings":`)
+	if er := decode[opapi.SettingsErrorResponse](t, rec); rec.Code != http.StatusBadRequest || er.Code != opapi.CodeInvalidRequest {
+		t.Errorf("PUT with a broken body: status %d, answer %+v", rec.Code, er)
 	}
 }
 
@@ -157,9 +148,7 @@ func TestSettingsBadBodies(t *testing.T) {
 		{"share as a string", opapi.SettingsPath(), put(`"max_share":"0.5"`)},
 		{"base version as a string", opapi.SettingsPath(), `{"settings":{},"base_version":"1","by":"x"}`},
 		{"oversized", opapi.SettingsPath(), `{"by":"` + long + `"}`},
-		{"sim null", opapi.SimDefaultsPath(), "null"},
-		{"sim count with a fraction", opapi.SimDefaultsPath(), `{"sim":{"operators":200.0}}`},
-		{"sim oversized", opapi.SimDefaultsPath(), `{"sim":{},"x":"` + long + `"}`},
+		{"sim count with a fraction", opapi.SettingsPath(), `{"settings":{"teams":{},"sim":{"operators":200.0}},"base_version":1,"by":"x"}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -193,17 +182,8 @@ func TestSettingsPuts(t *testing.T) {
 			st.puts[0].Settings.Sim != nil {
 			t.Errorf("core got %+v", st.puts)
 		}
-		rec = serve(h, http.MethodPut, opapi.SimDefaultsPath(), validSim)
-		if resp := decode[opapi.SimDefaultsResponse](t, rec); rec.Code != http.StatusOK || resp.Result != res {
-			t.Errorf("PUT sim defaults: status %d, answer %+v", rec.Code, resp)
-		}
-		if len(st.sims) != 1 || st.sims[0].Sim.MissedOfferShare != 0.03 {
-			t.Errorf("core got %+v", st.sims)
-		}
-		for _, action := range []string{"put_settings", "put_sim_defaults"} {
-			if n := counterValue(t, reg, "threadroute_router_operator_actions_total", action, string(res)); n != 1 {
-				t.Errorf("%s %s counted %v times", action, res, n)
-			}
+		if n := counterValue(t, reg, "threadroute_router_operator_actions_total", "put_settings", string(res)); n != 1 {
+			t.Errorf("put_settings %s counted %v times", res, n)
 		}
 	}
 	h, _ := newTestHandler(t, &fakeStand{res: "maybe"})
@@ -212,8 +192,7 @@ func TestSettingsPuts(t *testing.T) {
 	}
 }
 
-// TestSettingsErrorAnswers maps every error of the core on both PUT
-// routes. Every body is a SettingsErrorResponse that passes its own
+// TestSettingsErrorAnswers maps every error of the core on the PUT route. Every body is a SettingsErrorResponse that passes its own
 // Validate.
 func TestSettingsErrorAnswers(t *testing.T) {
 	coreErr := func(code opapi.ErrorCode) *opapi.SettingsError {
@@ -244,27 +223,23 @@ func TestSettingsErrorAnswers(t *testing.T) {
 			func(r opapi.SettingsErrorResponse) bool { return r.Code == opapi.CodeInternal }},
 	}
 	for _, tt := range tests {
-		for _, c := range []struct{ path, body string }{
-			{opapi.SettingsPath(), validPut}, {opapi.SimDefaultsPath(), validSim},
-		} {
-			t.Run(tt.name+" "+c.path, func(t *testing.T) {
-				h, _ := newTestHandler(t, &fakeStand{err: tt.err})
-				rec := serve(h, http.MethodPut, c.path, c.body)
-				if rec.Code != tt.status {
-					t.Fatalf("status %d, want %d, body %s", rec.Code, tt.status, rec.Body)
-				}
-				r := decode[opapi.SettingsErrorResponse](t, rec)
-				if err := r.Validate(); err != nil {
-					t.Errorf("answer %+v: %v", r, err)
-				}
-				if r.Code.Status() != tt.status || strings.Contains(r.Message, "secret") {
-					t.Errorf("answer %+v", r)
-				}
-				if tt.check != nil && !tt.check(r) {
-					t.Errorf("answer %+v", r)
-				}
-			})
-		}
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := newTestHandler(t, &fakeStand{err: tt.err})
+			rec := serve(h, http.MethodPut, opapi.SettingsPath(), validPut)
+			if rec.Code != tt.status {
+				t.Fatalf("status %d, want %d, body %s", rec.Code, tt.status, rec.Body)
+			}
+			r := decode[opapi.SettingsErrorResponse](t, rec)
+			if err := r.Validate(); err != nil {
+				t.Errorf("answer %+v: %v", r, err)
+			}
+			if r.Code.Status() != tt.status || strings.Contains(r.Message, "secret") {
+				t.Errorf("answer %+v", r)
+			}
+			if tt.check != nil && !tt.check(r) {
+				t.Errorf("answer %+v", r)
+			}
+		})
 	}
 }
 
@@ -273,8 +248,15 @@ func TestSettingsRoutesRegistered(t *testing.T) {
 	if rec := serve(h, http.MethodPost, opapi.SettingsPath(), validPut); rec.Code != http.StatusMethodNotAllowed {
 		t.Errorf("POST settings: status %d, want 405", rec.Code)
 	}
-	if rec := serve(h, http.MethodGet, opapi.SimDefaultsPath(), ""); rec.Code != http.StatusMethodNotAllowed {
-		t.Errorf("GET sim defaults: status %d, want 405", rec.Code)
+	// The report of the simulator is gone: an old simulator gets the
+	// answer of an unknown path, and nothing reaches the core.
+	st := &fakeStand{res: opapi.ResultDone}
+	h, _ = newTestHandler(t, st)
+	if rec := serve(h, http.MethodPut, simDefaultsPath, validSim); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT sim defaults: status %d, want 404", rec.Code)
+	}
+	if n := st.calls(); n != 0 {
+		t.Errorf("%d calls reached the core", n)
 	}
 }
 

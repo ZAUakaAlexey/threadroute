@@ -5,6 +5,7 @@ package routersvc
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -186,9 +187,42 @@ type running struct {
 	done   chan error
 }
 
+// storeTeams stores the team numbers of the scenario as the stand settings
+// before the first start, when they differ from the defaults of the code.
+// The stored set is the only source of these numbers (decision 0014), so
+// without it the seed would replace them. The numbers must be within the
+// bounds of opapi: a scenario runs with the stand settings on, as a real
+// stand does. A stored row is kept, so a restart of the scenario keeps its
+// set.
+func (sc *scenario) storeTeams() {
+	sc.t.Helper()
+	c := sc.rcfg
+	teams := opapi.TeamSettings{
+		FormLoad: c.TeamFormLoad, ReleaseLoad: c.TeamReleaseLoad, ReleaseAfterUS: c.TeamReleaseAfter.Microseconds(),
+		MinSize: c.TeamMinSize, MaxSize: c.TeamMaxSize, MaxShare: c.TeamMaxShare,
+	}
+	if teams == opapi.DefaultTeamSettings() {
+		return
+	}
+	if err := teams.Validate(); err != nil {
+		sc.t.Fatalf("the team numbers of the scenario are outside the bounds of the stand settings: %v", err)
+	}
+	sim := opapi.DefaultSimSettings()
+	b, err := json.Marshal(opapi.StandSettings{Teams: teams, Sim: &sim})
+	if err != nil {
+		sc.t.Fatal(err)
+	}
+	_, err = sc.h.pool.Exec(sc.t.Context(), `INSERT INTO stand_settings (version, current_set, updated_at)
+		VALUES (1, $1, $2) ON CONFLICT (id) DO NOTHING`, b, sc.clock.Now())
+	if err != nil {
+		sc.t.Fatal(err)
+	}
+}
+
 // newService builds a Service without starting it.
 func (sc *scenario) newService() (*Service, *prometheus.Registry) {
 	sc.t.Helper()
+	sc.storeTeams()
 	reg := prometheus.NewRegistry()
 	svc, err := New(sc.t.Context(), Options{
 		Config: sc.config(), Pool: sc.h.pool, Logger: testLogger(), Registerer: reg, Clock: sc.clock,
@@ -221,7 +255,26 @@ func (sc *scenario) start() *running {
 	sc.t.Helper()
 	r := sc.run(sc.newService())
 	waitFor(sc.t, 60*time.Second, "service ready", r.svc.Ready)
+	sc.requireStandOn(r)
 	return r
+}
+
+// requireStandOn checks that the service offers the stand settings and
+// runs with the stored set, so no scenario runs with them off unnoticed.
+func (sc *scenario) requireStandOn(r *running) {
+	sc.t.Helper()
+	snap := r.svc.Core().StandSnapshot()
+	if !snap.Enabled || snap.Version < 1 || snap.Current.Sim == nil {
+		sc.t.Fatalf("stand settings are not on after the start: %+v", snap)
+	}
+	s, err := r.api.Settings(sc.t.Context())
+	if err != nil || s.Stand == nil || s.Stand.Version != snap.Version {
+		sc.t.Fatalf("GET /v1/settings after the start: stand %+v, %v; want version %d", s.Stand, err, snap.Version)
+	}
+	if got := r.svc.Core().Config(); got.TeamFormLoad != snap.Current.Teams.FormLoad ||
+		got.TeamReleaseAfter.Microseconds() != snap.Current.Teams.ReleaseAfterUS {
+		sc.t.Fatalf("team numbers in use %+v, want the stored set %+v", got, snap.Current.Teams)
+	}
 }
 
 // stop stops the service and checks that it stopped cleanly. It is safe

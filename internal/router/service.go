@@ -136,15 +136,12 @@ type Service struct {
 	// rules is the snapshot of the routing numbers in use (settings.go).
 	// Read it with config, once per operation that needs the team numbers.
 	rules atomic.Pointer[rules]
-	// envTeams is the team part of the configuration given to New: the
-	// defaults of the teams part of the stand settings.
-	envTeams opapi.TeamSettings
 	// standOn reports whether the Service offers stand settings. Only
 	// LoadSettings sets it.
 	standOn atomic.Bool
-	// consoleChanges and simChanges count the stand settings changes this
-	// Service applied.
-	consoleChanges, simChanges atomic.Int64
+	// consoleChanges and defaultsChanges count the stand settings changes
+	// this Service applied.
+	consoleChanges, defaultsChanges atomic.Int64
 }
 
 // New builds a Service. The configuration must be valid.
@@ -158,8 +155,8 @@ func New(db DB, cfg Config, clock Clock, logger *slog.Logger) (*Service, error) 
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	s := &Service{db: db, clock: clock, logger: logger, envTeams: teamsOf(cfg)}
-	s.rules.Store(&rules{cfg: cfg, current: opapi.StandSettings{Teams: s.envTeams}})
+	s := &Service{db: db, clock: clock, logger: logger}
+	s.rules.Store(&rules{cfg: cfg, current: opapi.StandSettings{Teams: teamsOf(cfg)}})
 	return s, nil
 }
 

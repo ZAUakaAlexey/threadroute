@@ -335,18 +335,12 @@ func TestPutStandSettings(t *testing.T) {
 		put  func(*Client) (opapi.Result, opapi.Settings, error)
 	}
 	changeReq := opapi.SettingsChangeRequest{Settings: testSet(), BaseVersion: 30, By: "guest"}
-	simReq := opapi.SimDefaultsRequest{Sim: *testSet().Sim}
 	putSettings := call{"PutSettings", "/v1/settings", mustJSON(t, changeReq),
 		func(c *Client) (opapi.Result, opapi.Settings, error) {
 			resp, err := c.PutSettings(t.Context(), changeReq)
 			return resp.Result, resp.Settings, err
 		}}
-	putSim := call{"PutSimDefaults", "/v1/settings/sim-defaults", mustJSON(t, simReq),
-		func(c *Client) (opapi.Result, opapi.Settings, error) {
-			resp, err := c.PutSimDefaults(t.Context(), simReq)
-			return resp.Result, resp.Settings, err
-		}}
-	both := []call{putSettings, putSim}
+	puts := []call{putSettings}
 
 	ok := func(r opapi.Result, s opapi.Settings) string {
 		return mustJSON(t, opapi.SettingsChangeResponse{Result: r, Settings: s})
@@ -357,7 +351,8 @@ func TestPutStandSettings(t *testing.T) {
 	brokenStand.Stand = &opapi.StandState{Version: -1, Current: testSet(), Defaults: testSet()}
 	brokenBase := testSettings(0, 0)
 	brokenBase.SpeedFactor = 0
-	// A valid set at version 30 that no simulator has reported to yet.
+	// A valid set at version 30 without a sim part, as an older router may
+	// answer.
 	noSim := testSettings(0, 0)
 	noSim.Stand.Current.Sim, noSim.Stand.Defaults.Sim = nil, nil
 	large := testSettings(opapi.MaxSettingsChanges, opapi.MaxByLen)
@@ -380,13 +375,11 @@ func TestPutStandSettings(t *testing.T) {
 		// check checks the *opapi.SettingsError.
 		check func(t *testing.T, e *opapi.SettingsError)
 	}{
-		{name: "done", calls: both, a: answer{200, ok(opapi.ResultDone, current)}, want: opapi.ResultDone},
-		{name: "already done", calls: both, a: answer{200, ok(opapi.ResultAlreadyDone, current)}, want: opapi.ResultAlreadyDone},
+		{name: "done", calls: puts, a: answer{200, ok(opapi.ResultDone, current)}, want: opapi.ResultDone},
+		{name: "already done", calls: puts, a: answer{200, ok(opapi.ResultAlreadyDone, current)}, want: opapi.ResultAlreadyDone},
 		{name: "full log above the small limit", calls: []call{putSettings},
 			a: answer{200, ok(opapi.ResultDone, large)}, want: opapi.ResultDone},
-		{name: "full log above the small limit", calls: []call{putSim},
-			a: answer{200, ok(opapi.ResultDone, large)}, plain: "larger than 4096"},
-		{name: "invalid with fields", calls: both, a: errAnswer(t, opapi.SettingsErrorResponse{
+		{name: "invalid with fields", calls: puts, a: errAnswer(t, opapi.SettingsErrorResponse{
 			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeInvalidRequest, Message: "invalid settings"},
 			Fields: []opapi.FieldError{
 				{Field: opapi.FieldTeamReleaseLoad, Reason: "20 is not below teams.form_load (20)"},
@@ -397,7 +390,7 @@ func TestPutStandSettings(t *testing.T) {
 				t.Errorf("error %+v", e)
 			}
 		}},
-		{name: "invalid without fields", calls: both,
+		{name: "invalid without fields", calls: puts,
 			a:    answer{400, `{"code":"invalid_request","message":"body is not a JSON object"}`},
 			code: opapi.CodeInvalidRequest, status: 400, check: func(t *testing.T, e *opapi.SettingsError) {
 				if len(e.Fields) != 0 {
@@ -423,7 +416,6 @@ func TestPutStandSettings(t *testing.T) {
 				t.Errorf("settings %+v", e.Settings)
 			}
 		}},
-		{name: "no sim part", calls: []call{putSim}, a: answer{200, ok(opapi.ResultDone, noSim)}, plain: "no sim part"},
 		{name: "no sim part", calls: []call{putSettings}, a: answer{200, ok(opapi.ResultDone, noSim)}, want: opapi.ResultDone},
 		{name: "conflict with a broken stand block", calls: []call{putSettings}, a: answer{409, mustJSON(t, opapi.SettingsErrorResponse{
 			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeSettingsConflict, Message: "m"},
@@ -444,34 +436,30 @@ func TestPutStandSettings(t *testing.T) {
 		}},
 		{name: "too soon without the wait", calls: []call{putSettings},
 			a: answer{429, `{"code":"settings_too_soon","message":"m"}`}, plain: "retry_after_ms"},
-		{name: "off", calls: both, a: errAnswer(t, opapi.SettingsErrorResponse{
+		{name: "off", calls: puts, a: errAnswer(t, opapi.SettingsErrorResponse{
 			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeSettingsOff, Message: "stand settings are off"},
 		}), code: opapi.CodeSettingsOff, status: 501},
-		{name: "bare 404", calls: both, a: bare(404), code: opapi.CodeSettingsOff, status: 404},
-		{name: "bare 405", calls: both, a: bare(405), code: opapi.CodeSettingsOff, status: 405},
-		{name: "404 with an error answer", calls: both,
+		{name: "bare 404", calls: puts, a: bare(404), code: opapi.CodeSettingsOff, status: 404},
+		{name: "bare 405", calls: puts, a: bare(405), code: opapi.CodeSettingsOff, status: 405},
+		{name: "404 with an error answer", calls: puts,
 			a:    answer{404, `{"code":"operator_not_found","message":"m"}`},
 			code: opapi.CodeOperatorNotFound, status: 404},
-		{name: "unavailable", calls: both,
+		{name: "unavailable", calls: puts,
 			a:    answer{503, `{"code":"unavailable","message":"database not reachable"}`},
 			code: opapi.CodeUnavailable, status: 503},
-		{name: "proxy 502", calls: both, a: bare(502), code: opapi.CodeUnavailable, status: 502},
-		{name: "bare 500", calls: both, a: bare(500), code: opapi.CodeInternal, status: 500},
-		{name: "unknown code", calls: both, a: answer{500, `{"code":"nope","message":"m"}`}, plain: "not a known code"},
-		{name: "above the small limit", calls: []call{putSim}, a: answer{200, pad(opapi.MaxBodyBytes)}, plain: "larger than 4096"},
-		{name: "error above the small limit", calls: []call{putSim},
-			a:     answer{400, `{"code":"invalid_request","message":"` + strings.Repeat("a", opapi.MaxBodyBytes) + `"}`},
-			plain: "larger than 4096"},
+		{name: "proxy 502", calls: puts, a: bare(502), code: opapi.CodeUnavailable, status: 502},
+		{name: "bare 500", calls: puts, a: bare(500), code: opapi.CodeInternal, status: 500},
+		{name: "unknown code", calls: puts, a: answer{500, `{"code":"nope","message":"m"}`}, plain: "not a known code"},
 		{name: "above the large limit", calls: []call{putSettings},
 			a: answer{200, pad(opapi.MaxSettingsBodyBytes)}, plain: "larger than 32768"},
-		{name: "broken stand block", calls: both, a: answer{200, ok(opapi.ResultDone, brokenStand)}, plain: "stand: version: -1"},
-		{name: "stand block of the wrong shape", calls: both,
+		{name: "broken stand block", calls: puts, a: answer{200, ok(opapi.ResultDone, brokenStand)}, plain: "stand: version: -1"},
+		{name: "stand block of the wrong shape", calls: puts,
 			a:     answer{200, `{"result":"done","settings":{"speed_factor":1,"accept_timeout_us":1,"capacity_default":1,"stand":"x"}}`},
 			plain: "decode answer"},
-		{name: "no stand block", calls: both, a: answer{200, ok(opapi.ResultDone, noStand)}, plain: "no stand block"},
-		{name: "broken base", calls: both, a: answer{200, ok(opapi.ResultDone, brokenBase)}, plain: "speed_factor"},
-		{name: "unknown result", calls: both, a: answer{200, ok("maybe", current)}, plain: "unknown result"},
-		{name: "not JSON", calls: both, a: answer{200, `ok`}, plain: "decode answer"},
+		{name: "no stand block", calls: puts, a: answer{200, ok(opapi.ResultDone, noStand)}, plain: "no stand block"},
+		{name: "broken base", calls: puts, a: answer{200, ok(opapi.ResultDone, brokenBase)}, plain: "speed_factor"},
+		{name: "unknown result", calls: puts, a: answer{200, ok("maybe", current)}, plain: "unknown result"},
+		{name: "not JSON", calls: puts, a: answer{200, `ok`}, plain: "decode answer"},
 	}
 	for _, tt := range tests {
 		for _, cl := range tt.calls {
@@ -511,7 +499,7 @@ func TestPutStandSettings(t *testing.T) {
 	}
 }
 
-// TestPutOldRouter runs both PUT calls against a mux like the one of a
+// TestPutOldRouter runs the PUT call against a mux like the one of a
 // router from before decision 0014, which serves only GET /v1/settings of
 // the settings paths.
 func TestPutOldRouter(t *testing.T) {
@@ -523,8 +511,6 @@ func TestPutOldRouter(t *testing.T) {
 
 	_, err := c.PutSettings(t.Context(), opapi.SettingsChangeRequest{Settings: testSet(), By: "guest"})
 	settingsError(t, err, opapi.CodeSettingsOff, http.StatusMethodNotAllowed)
-	_, err = c.PutSimDefaults(t.Context(), opapi.SimDefaultsRequest{Sim: *testSet().Sim})
-	settingsError(t, err, opapi.CodeSettingsOff, http.StatusNotFound)
 
 	for _, read := range []func() (opapi.Settings, error){
 		func() (opapi.Settings, error) { return c.Settings(t.Context()) },
@@ -547,8 +533,5 @@ func TestPutUnreachable(t *testing.T) {
 	}
 	if _, err := c.PutSettings(t.Context(), opapi.SettingsChangeRequest{Settings: testSet(), By: "guest"}); err == nil || Code(err) != "" {
 		t.Errorf("PutSettings: error %v, want a plain error", err)
-	}
-	if _, err := c.PutSimDefaults(t.Context(), opapi.SimDefaultsRequest{}); err == nil || Code(err) != "" {
-		t.Errorf("PutSimDefaults: error %v, want a plain error", err)
 	}
 }

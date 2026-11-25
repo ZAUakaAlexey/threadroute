@@ -8,28 +8,17 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/ZAUakaAlexey/threadroute/internal/defaults"
 )
 
-// defaultSet returns the starting values of decisions 0009 and 0010 as a
-// stand set, with the sim part.
+// defaultSet returns the defaults of the table of decision 0014 as a stand
+// set, with the sim part, written out here a second time on purpose.
 func defaultSet() StandSettings {
 	return StandSettings{
 		Teams: TeamSettings{
-			FormLoad:       defaults.TeamFormLoad,
-			ReleaseLoad:    defaults.TeamReleaseLoad,
-			ReleaseAfterUS: defaults.TeamReleaseAfter.Microseconds(),
-			MinSize:        defaults.TeamMinSize,
-			MaxSize:        defaults.TeamMaxSize,
-			MaxShare:       defaults.TeamMaxShare,
+			FormLoad: 20, ReleaseLoad: 8, ReleaseAfterUS: 900_000_000, MinSize: 2, MaxSize: 20, MaxShare: 0.5,
 		},
 		Sim: &SimSettings{
-			Operators:        defaults.SimOperators,
-			Capacity:         defaults.OperatorCapacity,
-			HandlingMedianUS: defaults.SimHandlingMedian.Microseconds(),
-			ResolveMedianUS:  defaults.SimResolveMedian.Microseconds(),
-			MissedOfferShare: defaults.SimMissedOfferShare,
+			Operators: 200, Capacity: 4, HandlingMedianUS: 45_000_000, ResolveMedianUS: 180_000_000, MissedOfferShare: 0.03,
 		},
 	}
 }
@@ -99,8 +88,56 @@ func TestBoundsJSON(t *testing.T) {
 }
 
 func TestDefaultsAreWithinBounds(t *testing.T) {
-	if err := defaultSet().Validate(); err != nil {
-		t.Errorf("the defaults of decisions 0009 and 0010 break the bounds: %v", err)
+	got := DefaultStandSettings()
+	if got.Sim == nil || !got.Equal(defaultSet()) {
+		t.Fatalf("DefaultStandSettings() = %+v, want the table of decision 0014 %+v", got, defaultSet())
+	}
+	if err := got.Validate(); err != nil {
+		t.Errorf("the defaults break the bounds: %v", err)
+	}
+	if err := DefaultTeamSettings().Validate(); err != nil {
+		t.Errorf("the team defaults break the bounds: %v", err)
+	}
+	if err := DefaultSimSettings().Validate(); err != nil {
+		t.Errorf("the sim defaults break the bounds: %v", err)
+	}
+	// Each call returns its own sim part.
+	other := DefaultStandSettings()
+	other.Sim.Operators = 11
+	if DefaultStandSettings().Sim.Operators != 200 {
+		t.Error("DefaultStandSettings shares its sim part between calls")
+	}
+	// The state of a router that stored the defaults passes its own rules.
+	st := StandState{
+		Version: 1, Current: DefaultStandSettings(), Defaults: DefaultStandSettings(),
+		Changes: []SettingsChange{{ChangedAtUS: 1, Version: 1, By: ByDefaults, Fields: Diff(StandSettings{}, DefaultStandSettings())}},
+	}
+	if err := st.Validate(); err != nil {
+		t.Errorf("state after the seed is not valid: %v", err)
+	}
+}
+
+func TestReservedBy(t *testing.T) {
+	tests := []struct {
+		by       string
+		reserved bool
+	}{
+		{ByDefaults, true},
+		{BySimulator, true},
+		{"guest", false},
+		{"user:7", false},
+		{"Defaults", false},
+	}
+	for _, tt := range tests {
+		if got := ReservedBy(tt.by); got != tt.reserved {
+			t.Errorf("ReservedBy(%q) = %v, want %v", tt.by, got, tt.reserved)
+		}
+		req := SettingsChangeRequest{Settings: defaultSet(), BaseVersion: 1, By: tt.by}
+		fes := req.FieldErrors()
+		refused := len(fes) == 1 && fes[0].Field == FieldBy && strings.Contains(fes[0].Reason, "reserved")
+		if refused != tt.reserved || (!tt.reserved && len(fes) > 0) {
+			t.Errorf("request by %q: FieldErrors() = %v, want refused %v", tt.by, fes, tt.reserved)
+		}
 	}
 }
 
@@ -446,13 +483,6 @@ func TestSettingsChangeRequest(t *testing.T) {
 	}
 	bad.By = "a\x00b"
 	assertErrors(t, bad.Validate(), "by: byte 1 is not printable ASCII")
-
-	sim := SimDefaultsRequest{Sim: *defaultSet().Sim}
-	if err := sim.Validate(); err != nil {
-		t.Errorf("SimDefaultsRequest.Validate() error = %v", err)
-	}
-	sim.Sim.Operators = 9999
-	assertErrors(t, sim.Validate(), "sim.operators: 9999 is not between 10 and 500")
 }
 
 func testSettings(changes int) Settings {
@@ -628,7 +658,7 @@ func TestSettingsAnswersFormat(t *testing.T) {
 	s := Settings{SpeedFactor: 1, AcceptTimeoutUS: 20_000_000, CapacityDefault: 4, Stand: &StandState{
 		Version: 1, Current: defaultSet(), Defaults: defaultSet(),
 	}}
-	got := string(mustJSON(t, SimDefaultsResponse{Result: ResultDone, Settings: s}))
+	got := string(mustJSON(t, SettingsChangeResponse{Result: ResultDone, Settings: s}))
 	set := `{"teams":{"form_load":20,"release_load":8,"release_after_us":900000000,"min_size":2,"max_size":20,"max_share":0.5},` +
 		`"sim":{"operators":200,"capacity":4,"handling_median_us":45000000,"resolve_median_us":180000000,"missed_offer_share":0.03}}`
 	want := `{"result":"done","settings":{"speed_factor":1,"accept_timeout_us":20000000,"capacity_default":4,` +
@@ -638,9 +668,6 @@ func TestSettingsAnswersFormat(t *testing.T) {
 	}
 	if err := errors.Join(s.Validate(), s.ValidateStand()); err != nil {
 		t.Error(err)
-	}
-	if got := SimDefaultsPath(); got != "/v1/settings/sim-defaults" {
-		t.Errorf("SimDefaultsPath() = %s", got)
 	}
 	if got := SettingsWithChangesPath(); got != "/v1/settings?changes=1" {
 		t.Errorf("SettingsWithChangesPath() = %s", got)

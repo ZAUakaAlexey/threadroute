@@ -553,13 +553,16 @@ func TestIntegration(t *testing.T) {
 		if ws == nil || !ws.MayChange || other.w.Settings == nil || other.w.Settings.MayChange {
 			t.Fatalf("welcome settings %+v / %+v", ws, other.w.Settings)
 		}
-		// No simulator runs here: version 0, no sim part, nothing logged.
-		if ws.Version != 0 || ws.Current.Sim != nil || len(ws.Changes) != 0 {
+		// The router seeded the defaults of the code at its start: version
+		// 1, both parts, one change by the reserved label.
+		def := opapi.DefaultStandSettings()
+		if ws.Version != 1 || !ws.Current.Equal(def) || !ws.Defaults.Equal(def) || len(ws.Changes) != 1 ||
+			ws.Changes[0].By != opapi.ByDefaults || len(other.w.Settings.Changes) != 1 || other.w.Settings.Changes[0].By != "" {
 			t.Fatalf("first settings %+v", ws)
 		}
 		next := cloneSet(ws.Current)
 		next.Teams.MaxShare = 0.3
-		sup.send(gwapi.ChangeSettings{RequestID: "set-1", BaseVersion: 0, Settings: next})
+		sup.send(gwapi.ChangeSettings{RequestID: "set-1", BaseVersion: 1, Settings: next})
 		var pushed *gwapi.Settings
 		res := sup.until("result set-1", func(m gwapi.ServerMessage) bool {
 			if u, ok := m.(gwapi.SettingsUpdate); ok {
@@ -568,27 +571,27 @@ func TestIntegration(t *testing.T) {
 			r, ok := m.(gwapi.Result)
 			return ok && r.RequestID == "set-1"
 		}).(gwapi.Result)
-		if res.Outcome != gwapi.OutcomeDone || pushed == nil || pushed.Version != 1 ||
-			len(pushed.Changes) != 1 || pushed.Changes[0].By != "user:7" || pushed.Current.Teams.MaxShare != 0.3 {
+		if res.Outcome != gwapi.OutcomeDone || pushed == nil || pushed.Version != 2 ||
+			len(pushed.Changes) != 2 || pushed.Changes[0].By != "user:7" || pushed.Current.Teams.MaxShare != 0.3 {
 			t.Fatalf("result %+v after settings %+v", res, pushed)
 		}
 		u := other.until("settings push", func(m gwapi.ServerMessage) bool { _, ok := m.(gwapi.SettingsUpdate); return ok }).(gwapi.SettingsUpdate)
-		if u.Settings.Version != 1 || u.Settings.Changes[0].By != "" {
+		if u.Settings.Version != 2 || u.Settings.Changes[0].By != "" {
 			t.Fatalf("push %+v", u.Settings)
 		}
 		// The same set again changes nothing; an old base is a conflict.
-		sup.send(gwapi.ChangeSettings{RequestID: "set-2", BaseVersion: 1, Settings: next})
+		sup.send(gwapi.ChangeSettings{RequestID: "set-2", BaseVersion: 2, Settings: next})
 		if r := sup.result("set-2"); r.Outcome != gwapi.OutcomeAlreadyDone {
 			t.Fatalf("repeat %+v", r)
 		}
-		sup.send(gwapi.ChangeSettings{RequestID: "set-3", BaseVersion: 0, Settings: next})
+		sup.send(gwapi.ChangeSettings{RequestID: "set-3", BaseVersion: 1, Settings: next})
 		if r := sup.result("set-3"); r.Code != gwapi.CodeSettingsConflict {
 			t.Fatalf("old base %+v", r)
 		}
 		// One change per 10 seconds for the whole stand.
 		again := cloneSet(next)
 		again.Teams.MaxShare = 0.4
-		sup.send(gwapi.ChangeSettings{RequestID: "set-4", BaseVersion: 1, Settings: again})
+		sup.send(gwapi.ChangeSettings{RequestID: "set-4", BaseVersion: 2, Settings: again})
 		if r := sup.result("set-4"); r.Code != gwapi.CodeSettingsTooSoon || r.RetryAfterMS < 1 || r.RetryAfterMS > 10000 {
 			t.Fatalf("too soon %+v", r)
 		}

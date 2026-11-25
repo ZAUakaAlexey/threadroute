@@ -3,7 +3,6 @@ package sim
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,16 +15,19 @@ import (
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 )
 
+// simDefaultsPath is the path of the simulator report that the first
+// version of decision 0014 had. The simulator must never call it.
+const simDefaultsPath = "/v1/settings/sim-defaults"
+
 // fakeRouter serves the operator API over HTTP by the contract of opapi,
 // with the stand settings of a fakeStand. A nil stand is a router without
-// stand settings: no stand block, and no route for the report.
+// stand settings: no stand block.
 type fakeRouter struct {
 	stand *fakeStand
 
 	mu  sync.Mutex
 	ops map[string]*opapi.Operator
-	// reports counts the requests to the path of PatternPutSimDefaults,
-	// also when no route serves it.
+	// reports counts the requests to simDefaultsPath.
 	reports int
 }
 
@@ -45,21 +47,6 @@ func newFakeRouter(stand *fakeStand) (*fakeRouter, *httptest.Server) {
 		}
 		writeJSON(w, http.StatusOK, s)
 	})
-	if stand != nil {
-		mux.HandleFunc(opapi.PatternPutSimDefaults, func(w http.ResponseWriter, req *http.Request) {
-			var body opapi.SimDefaultsRequest
-			if err := json.NewDecoder(req.Body).Decode(&body); err != nil {
-				writeJSON(w, http.StatusBadRequest, opapi.ErrorResponse{Code: opapi.CodeInvalidRequest, Message: err.Error()})
-				return
-			}
-			resp, err := r.standOf().report(body)
-			if se, ok := errors.AsType[*opapi.SettingsError](err); ok {
-				writeJSON(w, se.Status, se.SettingsErrorResponse)
-				return
-			}
-			writeJSON(w, http.StatusOK, resp)
-		})
-	}
 	mux.HandleFunc(opapi.PatternPutOperator, func(w http.ResponseWriter, req *http.Request) {
 		var body opapi.OperatorRequest
 		if err := json.NewDecoder(req.Body).Decode(&body); err != nil || body.Validate() != nil {
@@ -102,7 +89,7 @@ func newFakeRouter(stand *fakeStand) (*fakeRouter, *httptest.Server) {
 	mux.HandleFunc(opapi.PatternOnline, presence(opapi.PresenceOnline))
 	mux.HandleFunc(opapi.PatternOffline, presence(opapi.PresenceOffline))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path == opapi.SimDefaultsPath() {
+		if req.URL.Path == simDefaultsPath {
 			r.mu.Lock()
 			r.reports++
 			r.mu.Unlock()
@@ -179,26 +166,27 @@ func runHTTPSim(t *testing.T, url string) (*Service, *prometheus.Registry, func(
 	}
 }
 
-// TestHTTPStandChange: the report at start and the poll over HTTP with the
-// real client. The environment becomes the stored set, a change from the
-// console is applied on the run, and a clean stop puts every operator
-// offline, also the created ones.
+// TestHTTPStandChange: the start and the poll over HTTP with the real
+// client. The simulator starts with the stored set, which differs from its
+// config, applies a change from the console on the run, and a clean stop
+// puts every operator offline, also the created ones. It never reports.
 func TestHTTPStandChange(t *testing.T) {
-	fs := newFakeStand()
+	stored := envSim(standBehaviour())
+	stored.Operators, stored.Capacity = 12, 5
+	fs := storedStand(stored)
 	router, srv := newFakeRouter(fs)
 	defer srv.Close()
 	svc, reg, stop := runHTTPSim(t, srv.URL)
 
-	waitUntil(t, "10 operators online with the default capacity", func() bool { return router.onlineWith(10, 4) })
-	st := fs.state()
-	if st.Version != 1 || st.Current.Sim == nil || *st.Current.Sim != envSim(standBehaviour()) {
-		t.Fatalf("stored after the report: %+v", st)
+	waitUntil(t, "12 operators online with the stored capacity", func() bool { return router.onlineWith(12, 5) })
+	if got := testutil.ToFloat64(svc.m.settingsVersion); got != 1 {
+		t.Errorf("version metric %v, want 1", got)
 	}
 
-	next := *st.Current.Sim
-	next.Operators, next.Capacity = 12, 6
+	next := stored
+	next.Operators, next.Capacity = 14, 6
 	fs.set(next)
-	waitUntil(t, "12 operators online with capacity 6", func() bool { return router.onlineWith(12, 6) })
+	waitUntil(t, "14 operators online with capacity 6", func() bool { return router.onlineWith(14, 6) })
 	waitUntil(t, "version metric", func() bool { return testutil.ToFloat64(svc.m.settingsVersion) == 2 })
 	if got := testutil.ToFloat64(svc.m.settingsChanges); got != 1 {
 		t.Errorf("changes metric %v, want 1", got)
@@ -207,9 +195,9 @@ func TestHTTPStandChange(t *testing.T) {
 		t.Errorf("%d value series (%v), want 5", n, err)
 	}
 
-	next.Operators = 10
+	next.Operators = 12
 	fs.set(next)
-	waitUntil(t, "10 operators online after the change back", func() bool { return router.onlineWith(10, 6) })
+	waitUntil(t, "12 operators online after the change back", func() bool { return router.onlineWith(12, 6) })
 	if got := testutil.ToFloat64(svc.m.operatorsAside); got != 2 {
 		t.Errorf("put aside metric %v, want 2", got)
 	}
@@ -217,14 +205,14 @@ func TestHTTPStandChange(t *testing.T) {
 	if on := router.online(); len(on) != 0 {
 		t.Errorf("online after the stop: %v", on)
 	}
-	if n := router.reportCount(); n != 1 {
-		t.Errorf("%d reports, want 1", n)
+	if n := router.reportCount(); n != 0 {
+		t.Errorf("%d reports, want none", n)
 	}
 }
 
 // TestHTTPStandOff: a router without stand settings. The simulator runs
-// from its environment and never reports, then reports once the stand
-// block appears.
+// with its config, then picks up the stored set once the stand block
+// appears. It never reports.
 func TestHTTPStandOff(t *testing.T) {
 	router, srv := newFakeRouter(nil)
 	defer srv.Close()
@@ -237,18 +225,14 @@ func TestHTTPStandOff(t *testing.T) {
 	if got := testutil.ToFloat64(svc.m.settingsValue.WithLabelValues(opapi.FieldSimCapacity)); got != 4 {
 		t.Errorf("capacity metric %v, want the router default 4", got)
 	}
-	// The router learns stand settings. The fake router has no route for
-	// the report, so it answers 404 like a router from before decision
-	// 0014, which the client reads as settings off.
-	fs := newFakeStand()
+	stored := envSim(standBehaviour())
+	stored.Operators, stored.Capacity = 12, 6
 	router.mu.Lock()
-	router.stand = fs
+	router.stand = storedStand(stored)
 	router.mu.Unlock()
-	waitUntil(t, "two reports", func() bool { return router.reportCount() >= 2 })
-	if got := testutil.ToFloat64(svc.m.settingsVersion); got != 0 {
-		t.Errorf("version metric %v with a report route missing, want 0", got)
-	}
-	if !router.onlineWith(10, 4) {
-		t.Errorf("online %v, want the 10 of the environment", router.online())
+	waitUntil(t, "12 operators online with capacity 6", func() bool { return router.onlineWith(12, 6) })
+	waitUntil(t, "version metric", func() bool { return testutil.ToFloat64(svc.m.settingsVersion) == 1 })
+	if n := router.reportCount(); n != 0 {
+		t.Errorf("%d reports, want none", n)
 	}
 }

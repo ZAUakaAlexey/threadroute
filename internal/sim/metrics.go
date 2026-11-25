@@ -112,7 +112,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 			"Sim values in effect, by field name of the stand settings (decision 0014). Durations are microseconds of model time.")),
 			[]string{"name"}),
 		settingsVersion: gauge("settings_version",
-			"Version of the stand settings whose sim part is applied, 0 when the simulator runs from its environment."),
+			"Version of the stand settings whose sim part is applied, 0 while the router offers no stand settings and the simulator runs with the defaults of the code."),
 		settingsChanges: counter("settings_changes_total",
 			"Changes of the sim values applied while the simulator runs."),
 		operatorsActive: gauge("operators_active",

@@ -13,7 +13,7 @@
 // opapi.PatternSettings (decision 0014) are served through the optional
 // interface Stand. When the Operators value does not have it, the handler
 // answers like a router that does not offer stand settings: GET has no
-// "stand", and both PUT routes answer opapi.CodeSettingsOff. Every request
+// "stand", and PUT answers opapi.CodeSettingsOff. Every request
 // body is at most opapi.MaxBodyBytes; only answers may be larger.
 package opserver
 
@@ -62,9 +62,6 @@ type Stand interface {
 	ReadSettings(ctx context.Context, withChanges bool) (opapi.Settings, error)
 	// PutSettings runs steps 2 to 8 of opapi.PatternPutSettings.
 	PutSettings(ctx context.Context, req opapi.SettingsChangeRequest) (opapi.SettingsChangeResponse, error)
-	// PutSimDefaults serves opapi.PatternPutSimDefaults after the body was
-	// decoded.
-	PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
 }
 
 // DefaultTimeout bounds the work of one request.
@@ -125,8 +122,7 @@ func NewHandler(ops Operators, o Options) (http.Handler, error) {
 		opapi.PatternResolve:     h.offer("resolve", ops.Resolve),
 		opapi.PatternSettings:    h.settings,
 		// The stand settings (decision 0014).
-		opapi.PatternPutSettings:    h.putSettings,
-		opapi.PatternPutSimDefaults: h.putSimDefaults,
+		opapi.PatternPutSettings: h.putSettings,
 	}
 	patterns := append(append([]string{}, opapi.Patterns...), opapi.SettingsPatterns...)
 	if len(routes) != len(patterns) {
@@ -243,26 +239,6 @@ func (h *handler) putSettings(r *http.Request) (int, any) {
 		return h.settingsFail(r, action, errSettingsOff)
 	}
 	resp, err := h.stand.PutSettings(r.Context(), req)
-	if err != nil {
-		return h.settingsFail(r, action, err)
-	}
-	return h.settingsDone(r, action, resp.Result, resp)
-}
-
-// putSimDefaults answers opapi.PatternPutSimDefaults, with the same order
-// of checks as putSettings.
-func (h *handler) putSimDefaults(r *http.Request) (int, any) {
-	const action = "put_sim_defaults"
-	var req opapi.SimDefaultsRequest
-	if err := decodeObject(r.Body, &req); err != nil {
-		return h.settingsFail(r, action, &opapi.SettingsError{SettingsErrorResponse: opapi.SettingsErrorResponse{
-			ErrorResponse: opapi.ErrorResponse{Code: opapi.CodeInvalidRequest, Message: err.Error()},
-		}})
-	}
-	if h.stand == nil {
-		return h.settingsFail(r, action, errSettingsOff)
-	}
-	resp, err := h.stand.PutSimDefaults(r.Context(), req)
 	if err != nil {
 		return h.settingsFail(r, action, err)
 	}

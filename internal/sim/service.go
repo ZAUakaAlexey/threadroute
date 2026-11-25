@@ -181,10 +181,7 @@ func (s *Service) run(ctx context.Context) error {
 		"capacity_default", settings.CapacityDefault,
 		"stand_settings", settings.Stand != nil)
 	s.capacityDefault = settings.CapacityDefault
-	st, err := s.startStand(ctx, settings)
-	if err != nil {
-		return err
-	}
+	st := s.startStand(settings)
 	b := s.startBehaviour(st)
 	if err := s.setOperators(b); err != nil {
 		return err
@@ -278,9 +275,7 @@ func (s *Service) run(ctx context.Context) error {
 		g.Go(func() error { return s.work(gctx, eng, q) })
 	}
 	g.Go(func() error { return s.schedule(gctx, eng, queues) })
-	if st.mode != standInvalid {
-		g.Go(func() error { return s.pollStand(gctx, eng, st) })
-	}
+	g.Go(func() error { return s.pollStand(gctx, eng, st) })
 	s.running.Store(true)
 	return g.Wait()
 }

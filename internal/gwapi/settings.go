@@ -23,11 +23,12 @@ type Settings struct {
 	// Version is the version of Current, opapi.StandState.Version. 0 means
 	// that nothing is stored yet. ChangeSettings.BaseVersion takes it.
 	Version int64 `json:"version"`
-	// Current is the set in use. Current.Sim is absent until a simulator
-	// has reported.
+	// Current is the set in use. Current.Sim is optional: a router stores
+	// it at its start, but an older router may leave it out.
 	Current opapi.StandSettings `json:"current"`
-	// Defaults are the values of the environments, for "reset to
-	// defaults". Defaults.Sim is absent exactly when Current.Sim is.
+	// Defaults are the defaults of the code (opapi.DefaultStandSettings),
+	// for "reset to defaults". Defaults.Sim is absent exactly when
+	// Current.Sim is.
 	Defaults opapi.StandSettings `json:"defaults"`
 	// Bounds are the rules of every value, opapi.Bounds. The console takes
 	// them from here and never hard-codes a number.

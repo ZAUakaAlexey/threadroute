@@ -1,7 +1,6 @@
 package sim
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"strings"
@@ -24,26 +23,35 @@ func testTeams() opapi.TeamSettings {
 	}
 }
 
-// fakeStand is the stand settings store of a router, by the contract of
-// opapi.PatternPutSimDefaults. It is safe for concurrent use.
+// fakeStand is the stand settings store of a router, as the simulator sees
+// it through PatternSettings. It is safe for concurrent use.
 type fakeStand struct {
-	mu       sync.Mutex
-	version  int64
-	teams    opapi.TeamSettings
-	current  *opapi.SimSettings
-	defaults *opapi.SimSettings
+	mu      sync.Mutex
+	version int64
+	teams   opapi.TeamSettings
+	current *opapi.SimSettings
 }
 
+// newFakeStand returns a store at version 0, without a sim part, as an
+// older router that has stored nothing yet.
 func newFakeStand() *fakeStand { return &fakeStand{teams: testTeams()} }
 
-// state returns the stand block.
+// storedStand returns a store that holds sim at version 1.
+func storedStand(sim opapi.SimSettings) *fakeStand {
+	fs := newFakeStand()
+	fs.set(sim)
+	return fs
+}
+
+// state returns the stand block. The defaults are the defaults of the code,
+// with a sim part exactly when the current set has one.
 func (f *fakeStand) state() *opapi.StandState {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	st := &opapi.StandState{Version: f.version}
-	st.Current.Teams, st.Defaults.Teams = f.teams, f.teams
+	st.Current.Teams, st.Defaults.Teams = f.teams, opapi.DefaultTeamSettings()
 	if f.current != nil {
-		cur, def := *f.current, *f.defaults
+		cur, def := *f.current, opapi.DefaultSimSettings()
 		st.Current.Sim, st.Defaults.Sim = &cur, &def
 	}
 	return st
@@ -56,35 +64,10 @@ func (f *fakeStand) settings() opapi.Settings {
 	return s
 }
 
-// report is PatternPutSimDefaults.
-func (f *fakeStand) report(req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-	if fes := req.FieldErrors(); len(fes) > 0 {
-		return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeInvalidRequest, fes...)
-	}
-	f.mu.Lock()
-	res := opapi.ResultAlreadyDone
-	if f.defaults == nil || *f.defaults != req.Sim {
-		res = opapi.ResultDone
-	}
-	d := req.Sim
-	f.defaults = &d
-	if f.current == nil {
-		c := req.Sim
-		f.current = &c
-		f.version++
-		res = opapi.ResultDone
-	}
-	f.mu.Unlock()
-	return opapi.SimDefaultsResponse{Result: res, Settings: f.settings()}, nil
-}
-
 // set stores a new sim part, as a change from the console.
 func (f *fakeStand) set(sim opapi.SimSettings) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.defaults == nil {
-		f.defaults = &sim
-	}
 	f.current = &sim
 	f.version++
 }
@@ -97,19 +80,11 @@ func (f *fakeStand) changeTeams() {
 	f.version++
 }
 
-// wipe forgets everything, as a new database.
-func (f *fakeStand) wipe() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.version, f.current, f.defaults = 0, nil, nil
-}
-
 // standAPI connects a fake API to a fake stand.
 func standAPI(api *fakeAPI, fs *fakeStand) {
 	api.mu.Lock()
 	defer api.mu.Unlock()
 	api.settingsFn = func() (opapi.Settings, error) { return fs.settings(), nil }
-	api.simDefaults = fs.report
 }
 
 // standService returns a service for the stand tests, without Kafka.
@@ -143,7 +118,8 @@ func standBehaviour() Behaviour {
 
 func envSim(b Behaviour) opapi.SimSettings { return simOf(b, testSettings().CapacityDefault) }
 
-// TestStartStand: the outcomes of the report at start.
+// TestStartStand: the mode at start comes from the settings read at start,
+// and the simulator calls nothing else for it.
 func TestStartStand(t *testing.T) {
 	stored := opapi.SimSettings{
 		Operators: 30, Capacity: 7, HandlingMedianUS: (time.Minute).Microseconds(),
@@ -151,82 +127,53 @@ func TestStartStand(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		b    func(b *Behaviour)
-		// stand prepares the router; nil leaves the stand block out.
-		stand   func(api *fakeAPI) bool
-		mode    standMode
-		reports int
-		want    opapi.SimSettings
-		log     string
+		// b is the behaviour of the config; standBehaviour when nil.
+		b func() Behaviour
+		// stand is the stand block of the settings; nil leaves it out.
+		stand *fakeStand
+		mode  standMode
+		want  opapi.SimSettings
+		log   string
 	}{
 		{name: "no stand block", mode: standOff, log: "offers no stand settings"},
-		{name: "environment out of bounds", b: func(b *Behaviour) { b.Operators = 5 },
-			stand: func(api *fakeAPI) bool { standAPI(api, newFakeStand()); return true },
-			mode:  standInvalid, log: "sim.operators: 5 is not between 10 and 500"},
-		{name: "settings off", stand: func(api *fakeAPI) bool {
-			api.settingsFn = func() (opapi.Settings, error) { return newFakeStand().settings(), nil }
-			return true
-		}, mode: standOff, reports: 1, log: "does not offer stand settings"},
-		{name: "first report", stand: func(api *fakeAPI) bool { standAPI(api, newFakeStand()); return true },
-			mode: standLive, reports: 1, want: envSim(standBehaviour())},
-		{name: "stored values win", stand: func(api *fakeAPI) bool {
-			fs := newFakeStand()
-			fs.set(stored)
-			standAPI(api, fs)
-			return true
-		}, mode: standLive, reports: 1, want: stored},
-		{name: "capacity 0 reports the router default", b: func(b *Behaviour) { b.Capacity = 0 },
-			stand: func(api *fakeAPI) bool { standAPI(api, newFakeStand()); return true },
-			mode:  standLive, reports: 1, want: envSim(standBehaviour())},
-		{name: "router finds the values invalid", stand: func(api *fakeAPI) bool {
-			standAPI(api, newFakeStand())
-			api.simDefaults = func(opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-				return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeInvalidRequest,
-					opapi.FieldError{Field: opapi.FieldSimCapacity, Reason: "test reason"})
-			}
-			return true
-		}, mode: standInvalid, reports: 1, log: "sim.capacity: test reason"},
-		{name: "internal error", stand: func(api *fakeAPI) bool {
-			standAPI(api, newFakeStand())
-			api.simDefaults = func(opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-				return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeInternal)
-			}
-			return true
-		}, mode: standOff, reports: 1, log: "refused the report"},
+		{name: "no stand block runs with the defaults of the code", b: DefaultBehaviour, mode: standOff,
+			log: "offers no stand settings"},
+		{name: "stand block without a sim part", stand: newFakeStand(), mode: standOff, log: "offers no stand settings"},
+		{name: "the stored set wins over the defaults", b: DefaultBehaviour, stand: storedStand(stored),
+			mode: standLive, want: stored},
+		{name: "the stored set wins over the config", stand: storedStand(stored), mode: standLive, want: stored},
+		{name: "the stored set equal to the config", stand: storedStand(envSim(standBehaviour())), mode: standLive,
+			want: envSim(standBehaviour())},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := standBehaviour()
 			if tt.b != nil {
-				tt.b(&b)
+				b = tt.b()
 			}
 			api := &fakeAPI{clock: newFakeClock(), settings: testSettings()}
 			if tt.stand != nil {
-				tt.stand(api)
+				standAPI(api, tt.stand)
 			}
 			svc, logs := standService(t, b, api, newFakeClock(), nil)
 			settings, err := api.Settings(t.Context())
 			if err != nil {
 				t.Fatal(err)
 			}
-			st, err := svc.startStand(t.Context(), settings)
-			if err != nil {
-				t.Fatalf("startStand() = %v", err)
-			}
+			st := svc.startStand(settings)
 			if st.mode != tt.mode {
 				t.Errorf("mode %d, want %d", st.mode, tt.mode)
 			}
-			if len(api.reports) != tt.reports {
-				t.Errorf("%d reports, want %d", len(api.reports), tt.reports)
+			if tt.mode == standLive && (st.sim != tt.want || st.version != 1) {
+				t.Errorf("runs with %+v at version %d, want %+v at 1", st.sim, st.version, tt.want)
 			}
-			if tt.reports > 0 && api.reports[0] != envSim(standBehaviour()) && tt.b == nil {
-				t.Errorf("reported %+v, want the environment %+v", api.reports[0], envSim(standBehaviour()))
+			if tt.log != "" {
+				if n := strings.Count(logs.String(), tt.log); n != 1 || !strings.Contains(logs.String(), `"level":"WARN"`) {
+					t.Errorf("log has %d warnings %q, want 1: %s", n, tt.log, logs.String())
+				}
 			}
-			if tt.mode == standLive && st.sim != tt.want {
-				t.Errorf("runs with %+v, want %+v", st.sim, tt.want)
-			}
-			if tt.log != "" && !strings.Contains(logs.String(), tt.log) {
-				t.Errorf("log has no %q: %s", tt.log, logs.String())
+			if n := len(api.callsOf("")); n != 0 {
+				t.Errorf("%d API calls at the start of the stand settings, want none", n)
 			}
 			got := svc.startBehaviour(st)
 			want := b
@@ -238,6 +185,9 @@ func TestStartStand(t *testing.T) {
 			if !behaviourEqual(got, want) {
 				t.Errorf("start behaviour %+v, want %+v", got, want)
 			}
+			if tt.b != nil && tt.mode == standOff && simOf(got, 0) != opapi.DefaultSimSettings() {
+				t.Errorf("off: runs with %+v, want the defaults of the code", simOf(got, 0))
+			}
 		})
 	}
 }
@@ -247,62 +197,17 @@ func behaviourEqual(a, b Behaviour) bool {
 		a.ResolveMedian == b.ResolveMedian && a.MissedOfferShare == b.MissedOfferShare
 }
 
-// TestStartStandUnavailable: a report without an answer is retried like the
-// settings at start, until StartWait.
-func TestStartStandUnavailable(t *testing.T) {
-	for _, recover := range []bool{true, false} {
-		clock := newFakeClock()
-		api := &fakeAPI{clock: clock}
-		fs := newFakeStand()
-		standAPI(api, fs)
-		fails := 0
-		api.simDefaults = func(req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-			if !recover || fails < 2 {
-				fails++
-				if fails%2 == 0 {
-					return opapi.SimDefaultsResponse{}, errNoAnswer
-				}
-				return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeUnavailable)
-			}
-			return fs.report(req)
-		}
-		svc, _ := standService(t, standBehaviour(), api, clock, nil)
-		type result struct {
-			st  *stand
-			err error
-		}
-		done := make(chan result, 1)
-		go func() {
-			st, err := svc.startStand(t.Context(), fs.settings())
-			done <- result{st, err}
-		}()
-		// StartWait is 3 seconds and the pause 1 second: two pauses either
-		// way.
-		for range 2 {
-			clock.waitWaiters(1)
-			clock.Advance(startPause)
-		}
-		r := <-done
-		switch {
-		case recover && (r.err != nil || r.st.mode != standLive):
-			t.Errorf("after two failures: %v, %+v, want the live mode", r.err, r.st)
-		case !recover && r.err == nil:
-			t.Errorf("no error after StartWait without an answer")
-		}
-	}
-}
-
 // pollHarness is an engine with a service whose stand is live at version 1
 // with the values in effect.
 func pollHarness(t *testing.T) (*harness, *Service, *stand, *fakeStand, *lockedBuffer) {
 	t.Helper()
 	h := changeHarness(t, Spread{{Lang: "en", Count: 2}, {Lang: "ja", Count: 1}}, 10)
-	fs := newFakeStand()
+	fs := storedStand(envSim(h.e.b))
 	standAPI(h.api, fs)
 	svc, logs := standService(t, h.e.b, h.api, h.clock, h.m)
-	st, err := svc.startStand(t.Context(), fs.settings())
-	if err != nil || st.mode != standLive || st.version != 1 {
-		t.Fatalf("start: %v, %+v", err, st)
+	st := svc.startStand(fs.settings())
+	if st.mode != standLive || st.version != 1 {
+		t.Fatalf("start: %+v", st)
 	}
 	return h, svc, st, fs, logs
 }
@@ -411,39 +316,57 @@ func TestPollFailed(t *testing.T) {
 	}
 }
 
-// TestPollStandCameOn: in the off mode the poll reports when the stand
-// block appears and applies the stored values.
+// TestPollStandCameOn: in the off mode the simulator runs with its config
+// and keeps polling; when a stand block with a sim part appears, it applies
+// the stored values. Nothing is reported to the router.
 func TestPollStandCameOn(t *testing.T) {
 	h := changeHarness(t, Spread{{Lang: "en", Count: 2}, {Lang: "ja", Count: 1}}, 10)
 	h.api.setSettings(testSettings(), nil)
-	svc, _ := standService(t, h.e.b, h.api, h.clock, h.m)
-	st, err := svc.startStand(t.Context(), testSettings())
-	if err != nil || st.mode != standOff {
-		t.Fatalf("start: %v, %+v", err, st)
+	svc, logs := standService(t, h.e.b, h.api, h.clock, h.m)
+	st := svc.startStand(testSettings())
+	if st.mode != standOff {
+		t.Fatalf("start: %+v", st)
 	}
-	if err := h.poll(svc, st); err != nil || len(h.api.reports) != 0 {
-		t.Fatalf("poll without a stand block: %v, %d reports", err, len(h.api.reports))
+	applied := h.e.inEffect()
+	before := len(h.api.callsOf(""))
+	for range 3 {
+		if err := h.poll(svc, st); err != nil {
+			t.Fatal(err)
+		}
 	}
-	fs := newFakeStand()
+	// A stand block without a sim part is still off.
+	h.api.setSettings(newFakeStand().settings(), nil)
+	if err := h.poll(svc, st); err != nil {
+		t.Fatal(err)
+	}
+	if st.mode != standOff || h.e.inEffect() != applied || len(h.api.callsOf(""))-before != 0 {
+		t.Fatalf("mode %d, in effect %+v, %d calls while off", st.mode, h.e.inEffect(), len(h.api.callsOf(""))-before)
+	}
+	if n := strings.Count(logs.String(), "offers no stand settings"); n != 1 {
+		t.Errorf("the off state was logged %d times, want once: %s", n, logs.String())
+	}
 	stored := envSim(h.e.b)
 	stored.Operators = 12
-	fs.set(stored)
+	fs := storedStand(stored)
 	standAPI(h.api, fs)
 	if err := h.poll(svc, st); err != nil {
 		t.Fatal(err)
 	}
-	if st.mode != standLive || len(h.api.reports) != 1 {
-		t.Fatalf("mode %d, %d reports after the stand came on", st.mode, len(h.api.reports))
+	if st.mode != standLive || st.version != 1 {
+		t.Fatalf("mode %d version %d after the stand came on", st.mode, st.version)
 	}
 	h.checkState(12)
 	if got := testutil.ToFloat64(h.m.settingsVersion); got != 1 {
 		t.Errorf("version %v, want 1", got)
 	}
+	if !strings.Contains(logs.String(), "stand settings came on") {
+		t.Errorf("no log line when the stand came on: %s", logs.String())
+	}
 }
 
-// TestPollStandGoneAndWiped: a stand block that goes away keeps the applied
-// values; a store without a sim part gets a new report.
-func TestPollStandGoneAndWiped(t *testing.T) {
+// TestPollStandGone: a stand block that goes away, or loses its sim part,
+// keeps the applied values, with one warning; the next stored set applies.
+func TestPollStandGone(t *testing.T) {
 	h, svc, st, fs, logs := pollHarness(t)
 	next := st.sim
 	next.Operators = 15
@@ -452,45 +375,25 @@ func TestPollStandGoneAndWiped(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.checkState(15)
-	h.api.settingsFn = func() (opapi.Settings, error) { return testSettings(), nil }
-	for range 2 {
-		if err := h.poll(svc, st); err != nil {
-			t.Fatal(err)
+	for _, gone := range []opapi.Settings{testSettings(), newFakeStand().settings()} {
+		h.api.settingsFn = func() (opapi.Settings, error) { return gone, nil }
+		for range 2 {
+			if err := h.poll(svc, st); err != nil {
+				t.Fatal(err)
+			}
 		}
+		h.checkState(15)
 	}
-	h.checkState(15)
 	if n := strings.Count(logs.String(), "no stand settings now"); n != 1 {
 		t.Errorf("logged %d times, want once: %s", n, logs.String())
 	}
-	fs.wipe()
+	next.Operators = 11
+	fs.set(next)
 	standAPI(h.api, fs)
 	if err := h.poll(svc, st); err != nil {
 		t.Fatal(err)
 	}
-	if len(h.api.reports) != 2 {
-		t.Errorf("%d reports, want a second one for the empty store", len(h.api.reports))
-	}
-	h.checkState(10)
-}
-
-// TestPollReportInvalid: when the router finds the reported values invalid
-// on a later report, the poll stops.
-func TestPollReportInvalid(t *testing.T) {
-	h := changeHarness(t, Spread{{Lang: "en", Count: 1}}, 10)
-	svc, _ := standService(t, h.e.b, h.api, h.clock, h.m)
-	st := &stand{mode: standOff, env: envSim(h.e.b)}
-	h.api.setSettings(newFakeStand().settings(), nil)
-	h.api.simDefaults = func(opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-		return opapi.SimDefaultsResponse{}, settingsError(opapi.CodeInvalidRequest)
-	}
-	svc.pollEvery = time.Second
-	done := make(chan error, 1)
-	go func() { done <- svc.pollStand(context.Background(), h.e, st) }()
-	h.clock.waitWaiters(1)
-	h.clock.Advance(time.Second)
-	if err := <-done; err != nil || st.mode != standInvalid {
-		t.Errorf("pollStand() = %v, mode %d, want the end of the poll in the invalid mode", err, st.mode)
-	}
+	h.checkState(11)
 }
 
 // TestPollDoesNotHideOutage: polls that work do not reset the outage clock

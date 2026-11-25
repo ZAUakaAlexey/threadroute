@@ -151,88 +151,135 @@ func TestCheckChange(t *testing.T) {
 	}
 }
 
-func TestPlanSimDefaults(t *testing.T) {
+func TestPlanSeed(t *testing.T) {
 	sim := testSim()
-	changed := sim
-	changed.Operators = 50
 	teams := defaultTeams()
+	other := teams
+	other.FormLoad = 40
+	put := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
 
-	t.Run("first report becomes the current sim part", func(t *testing.T) {
-		st := standRow{version: 2, current: opapi.StandSettings{Teams: teams}}
-		next, fields, ok := planSimDefaults(st, sim)
-		if !ok || next.version != 3 || next.current.Sim == nil || *next.current.Sim != sim || *next.simDefaults != sim {
+	t.Run("nothing stored gets the whole set as version 1", func(t *testing.T) {
+		st := standRow{current: opapi.StandSettings{Teams: teams}}
+		next, fields, ok := planSeed(st)
+		if !ok || next.version != 1 || !next.current.Equal(opapi.DefaultStandSettings()) || next.lastPutAt != nil {
 			t.Fatalf("next = %+v, changed %v", next, ok)
 		}
-		if len(fields) != 5 || fields[0].Field != opapi.FieldSimOperators || fields[0].Old != nil || fields[0].New != 200 {
+		names := make([]string, len(fields))
+		for i, f := range fields {
+			names[i] = f.Field
+			if f.Old != nil {
+				t.Errorf("field %s has an old value %v, want none", f.Field, *f.Old)
+			}
+		}
+		if !slices.Equal(names, opapi.SettingsFields) {
+			t.Errorf("fields = %v, want every field", names)
+		}
+		if fields[0].New != 20 || fields[len(fields)-1].New != 0.03 {
+			t.Errorf("fields = %+v", fields)
+		}
+		state := next.state([]opapi.SettingsChange{{ChangedAtUS: 1, Version: 1, By: opapi.ByDefaults, Fields: fields}})
+		if err := state.Validate(); err != nil {
+			t.Errorf("state after the seed is not valid: %v", err)
+		}
+	})
+	t.Run("a stored set without a sim part gets the sim defaults", func(t *testing.T) {
+		st := standRow{version: 4, current: opapi.StandSettings{Teams: other}, lastPutAt: &put}
+		next, fields, ok := planSeed(st)
+		if !ok || next.version != 5 || next.current.Teams != other || next.current.Sim == nil ||
+			*next.current.Sim != opapi.DefaultSimSettings() || next.lastPutAt != &put {
+			t.Fatalf("next = %+v, changed %v", next, ok)
+		}
+		if len(fields) != 5 || fields[0].Field != opapi.FieldSimOperators || fields[0].Old != nil {
 			t.Errorf("fields = %+v", fields)
 		}
 		if st.current.Sim != nil {
 			t.Error("the plan changed its input")
 		}
-		if next.state(teams, nil).Validate() != nil {
-			t.Errorf("state after the first report is not valid: %v", next.state(teams, nil).Validate())
-		}
 	})
-	t.Run("the same report again", func(t *testing.T) {
-		st := standRow{version: 3, current: opapi.StandSettings{Teams: teams, Sim: &sim}, simDefaults: &sim}
-		next, fields, ok := planSimDefaults(st, sim)
-		if ok || fields != nil || next.version != 3 {
-			t.Errorf("changed %v, fields %v, version %d", ok, fields, next.version)
-		}
-	})
-	t.Run("other values change only the defaults", func(t *testing.T) {
-		current := sim
-		current.Capacity = 9
-		st := standRow{version: 7, current: opapi.StandSettings{Teams: teams, Sim: &current}, simDefaults: &sim}
-		next, fields, ok := planSimDefaults(st, changed)
-		if !ok || fields != nil || next.version != 7 || *next.simDefaults != changed || *next.current.Sim != current {
+	t.Run("a stored set with both parts stays", func(t *testing.T) {
+		changed := sim
+		changed.Capacity = 9
+		st := standRow{version: 7, current: opapi.StandSettings{Teams: other, Sim: &changed}}
+		next, fields, ok := planSeed(st)
+		if ok || fields != nil || next.version != 7 || !next.current.Equal(st.current) {
 			t.Errorf("next = %+v, fields %v, changed %v", next, fields, ok)
 		}
 	})
 }
 
+func TestStateDefaults(t *testing.T) {
+	sim := testSim()
+	sim.Operators = 50
+	withSim := standRow{version: 3, current: opapi.StandSettings{Teams: defaultTeams(), Sim: &sim}}.state(nil)
+	if !withSim.Defaults.Equal(opapi.DefaultStandSettings()) {
+		t.Errorf("defaults = %+v, want the defaults of the code", withSim.Defaults)
+	}
+	noSim := standRow{current: opapi.StandSettings{Teams: defaultTeams()}}.state(nil)
+	if noSim.Defaults.Sim != nil || noSim.Defaults.Teams != opapi.DefaultTeamSettings() {
+		t.Errorf("defaults without a sim part = %+v", noSim.Defaults)
+	}
+	if err := noSim.Validate(); err != nil {
+		t.Errorf("state at version 0 is not valid: %v", err)
+	}
+}
+
 func TestDecodeStored(t *testing.T) {
 	env := defaultTeams()
 	sim := testSim()
-	good := standRow{version: 4, current: opapi.StandSettings{Teams: env, Sim: &sim}, simDefaults: &sim}
-	cur, def, err := good.encode()
+	good := standRow{version: 4, current: opapi.StandSettings{Teams: env, Sim: &sim}}
+	cur, err := good.encode()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Run("round trip", func(t *testing.T) {
-		got, err := decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur, DefaultsSim: def}, env)
+		got, err := decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur})
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.version != 4 || !got.current.Equal(good.current) || *got.simDefaults != sim {
+		if got.version != 4 || !got.current.Equal(good.current) {
 			t.Errorf("decoded %+v", got)
 		}
 	})
-	t.Run("version 0 is the environment", func(t *testing.T) {
-		got, err := decodeStored(pgdb.StandSetting{}, env)
+	t.Run("old sim defaults are not read", func(t *testing.T) {
+		got, err := decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur, DefaultsSim: []byte(`[`)})
+		if err != nil || !got.current.Equal(good.current) {
+			t.Errorf("decoded %+v, %v", got, err)
+		}
+	})
+	t.Run("a stored set without a sim part", func(t *testing.T) {
+		c, err := standRow{version: 2, current: opapi.StandSettings{Teams: env}}.encode()
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.version != 0 || got.current.Teams != env || got.current.Sim != nil || got.simDefaults != nil {
+		got, err := decodeStored(pgdb.StandSetting{Version: 2, CurrentSet: c})
+		if err != nil || got.version != 2 || got.current.Sim != nil {
+			t.Errorf("decoded %+v, %v", got, err)
+		}
+	})
+	t.Run("version 0 is the team defaults", func(t *testing.T) {
+		got, err := decodeStored(pgdb.StandSetting{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.version != 0 || got.current.Teams != opapi.DefaultTeamSettings() || got.current.Sim != nil {
 			t.Errorf("decoded %+v", got)
 		}
-		c, d, err := got.encode()
-		if err != nil || c != nil || d != nil {
-			t.Errorf("encode at version 0 = %s, %s, %v; want NULL columns", c, d, err)
+		c, err := got.encode()
+		if err != nil || c != nil {
+			t.Errorf("encode at version 0 = %s, %v; want NULL", c, err)
 		}
 	})
 	bad := opapi.StandSettings{Teams: env}
 	bad.Teams.MaxShare = 0.01
-	badJSON, _, _ := standRow{version: 1, current: bad}.encode()
+	badJSON, _ := standRow{version: 1, current: bad}.encode()
 	for name, row := range map[string]pgdb.StandSetting{
-		"not JSON":             {Version: 1, CurrentSet: []byte(`{`)},
-		"a missing field":      {Version: 1, CurrentSet: []byte(`{"teams":{"form_load":30}}`)},
-		"outside the bounds":   {Version: 1, CurrentSet: badJSON},
-		"sim only in current":  {Version: 4, CurrentSet: cur},
-		"sim defaults not set": {Version: 1, CurrentSet: []byte(`{"teams":{}}`), DefaultsSim: []byte(`[`)},
+		"not JSON":           {Version: 1, CurrentSet: []byte(`{`)},
+		"a missing field":    {Version: 1, CurrentSet: []byte(`{"teams":{"form_load":30}}`)},
+		"outside the bounds": {Version: 1, CurrentSet: badJSON},
+		"sim at version 0":   {Version: 0, CurrentSet: cur},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if _, err := decodeStored(row, env); !errors.Is(err, errBadStored) {
+			if _, err := decodeStored(row); !errors.Is(err, errBadStored) {
 				t.Errorf("error = %v, want errBadStored", err)
 			}
 		})

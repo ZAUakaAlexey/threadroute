@@ -8,7 +8,8 @@
 // # Start-up order
 //
 // New reads the stored stand settings (decision 0014) before anything
-// routes, so a set changed from the console survives a restart.
+// routes, so a set changed from the console survives a restart. On a
+// database without a stored set it stores the defaults of the code first.
 //
 // Run waits for the conversations topic (conv creates it), ensures the
 // routing topic, and starts the outbox publisher, the refresh, prune and
@@ -149,8 +150,9 @@ func New(ctx context.Context, o Options) (*Service, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new router service: %w", err)
 	}
-	// The stored stand settings (decision 0014) win over the team values of
-	// the environment, so they are read before anything routes.
+	// The stored stand settings (decision 0014) are the only source of the
+	// team numbers, so they are read, or seeded with the defaults, before
+	// anything routes.
 	if err := core.LoadSettings(ctx); err != nil {
 		return nil, fmt.Errorf("new router service: %w", err)
 	}

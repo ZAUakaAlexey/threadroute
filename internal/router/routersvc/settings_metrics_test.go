@@ -18,17 +18,17 @@ func (f *fakeStandSource) StandSnapshot() router.StandSnapshot { return f.snap }
 func TestSettingsCollector(t *testing.T) {
 	teams := opapi.TeamSettings{FormLoad: 20, ReleaseLoad: 8, ReleaseAfterUS: 900_000_000, MinSize: 2, MaxSize: 20, MaxShare: 0.5}
 	src := &fakeStandSource{snap: router.StandSnapshot{Enabled: true, Version: 3, Current: opapi.StandSettings{Teams: teams},
-		ConsoleChanges: 2, SimulatorChanges: 1}}
+		ConsoleChanges: 2, DefaultsChanges: 1}}
 	reg := prometheus.NewRegistry()
 	if err := reg.Register(newSettingsCollector(src)); err != nil {
 		t.Fatal(err)
 	}
 	const head = `
-# HELP threadroute_router_settings_changes_total Stand settings changes applied by this process, by source (console or simulator).
+# HELP threadroute_router_settings_changes_total Stand settings changes applied by this process, by source (console, or defaults for the defaults stored at start).
 # TYPE threadroute_router_settings_changes_total counter
 threadroute_router_settings_changes_total{source="console"} 2
-threadroute_router_settings_changes_total{source="simulator"} 1
-# HELP threadroute_router_settings_version Version of the stand settings in use, 0 while nothing is stored or when the router does not offer them.
+threadroute_router_settings_changes_total{source="defaults"} 1
+# HELP threadroute_router_settings_version Version of the stand settings in use, 0 when the router does not offer them.
 # TYPE threadroute_router_settings_version gauge
 threadroute_router_settings_version 3
 `
@@ -45,8 +45,8 @@ threadroute_router_settings_value{name="teams.release_load"} 8
 		t.Error(err)
 	}
 
-	// Once a simulator reported, its values appear too, and a scrape reads
-	// the snapshot of that moment.
+	// With a sim part its values appear too, and a scrape reads the
+	// snapshot of that moment.
 	sim := opapi.SimSettings{Operators: 200, Capacity: 4, HandlingMedianUS: 45_000_000, ResolveMedianUS: 180_000_000}
 	src.snap.Current.Sim = &sim
 	src.snap.Version = 4

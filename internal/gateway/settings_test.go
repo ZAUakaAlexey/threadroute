@@ -235,7 +235,7 @@ func TestChangeSettingsOutcomes(t *testing.T) {
 		{name: "sim part missing", req: func(st *opapi.StandState) gwapi.ChangeSettings {
 			return change("r", st, func(s *opapi.StandSettings) { s.Sim = nil })
 		}, want: gwapi.Result{Outcome: gwapi.OutcomeRejected, Code: gwapi.CodeInvalidRequest}, fields: []string{opapi.FieldSim}},
-		{name: "sim part before a simulator report", stand: func() *opapi.StandState { return firstStartStand(testTeams) },
+		{name: "sim part while the stored set has none", stand: func() *opapi.StandState { return firstStartStand(testTeams) },
 			req: func(st *opapi.StandState) gwapi.ChangeSettings {
 				return change("r", st, func(s *opapi.StandSettings) { sim := testSim; s.Sim = &sim })
 			}, want: gwapi.Result{Outcome: gwapi.OutcomeRejected, Code: gwapi.CodeInvalidRequest}, fields: []string{opapi.FieldSim}},

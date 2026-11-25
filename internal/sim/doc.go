@@ -7,10 +7,10 @@
 //
 //  1. Read the settings of the router (speed factor, accept timeout,
 //     default capacity) from the operator API. The simulator waits for the
-//     router up to Config.StartWait and does not start without them. Then
-//     report the sim values of the environment (see "Stand settings"); the
-//     stored values decide the operator count, the capacity, the times and
-//     the missed share.
+//     router up to Config.StartWait and does not start without them. The
+//     same answer holds the stand settings (see "Stand settings"): their
+//     sim part decides the operator count, the capacity, the times and the
+//     missed share.
 //  2. Wait for the routing topic, which the router creates.
 //  3. Create or update every operator: IDs sim-op-0001, sim-op-0002 and so
 //     on to the count. The language of each number depends only on the
@@ -58,21 +58,17 @@
 // # Stand settings
 //
 // The router keeps the sim part of the stand settings (decision 0014, point
-// 2A). After step 1 the simulator reports the values of its environment
-// (opapi.PatternPutSimDefaults; a capacity of 0 is reported as the router
-// default):
+// 2A), and the simulator only reads it. No environment variable sets these
+// numbers; the router stores the defaults of the code at its first start.
+// The settings of step 1 decide how the simulator starts:
 //
-//   - Done or already done: the simulator runs with the stored current sim
-//     part, which differs from the environment once the console changed
-//     it, also across restarts.
-//   - The router offers no stand settings (no stand block, or
-//     CodeSettingsOff): it runs from its environment as before. It still
-//     reads the settings every poll interval; when a stand block appears,
-//     it reports and runs with the stored values from then on.
-//   - Its environment is outside the bounds of opapi: a warning with the
-//     fields, and it runs from its environment without live changes and
-//     without the poll.
-//   - No answer or a 503: retried up to Config.StartWait like the settings.
+//   - The stand block has a sim part: the simulator runs with it, also
+//     across restarts.
+//   - The router offers no stand settings (no stand block, or one without
+//     a sim part): a warning, and the simulator runs with the sim values of
+//     Config.Behaviour, which Load fills with the defaults of the code. It
+//     still reads the settings every poll interval; when a sim part
+//     appears, it applies it from then on.
 //
 // Then it reads the settings every opapi.SettingsPollInterval. When the
 // version changed and the sim part differs from the applied one, it applies

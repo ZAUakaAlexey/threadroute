@@ -22,13 +22,17 @@ func testOperatorEventsInTopic(t *testing.T, h *harness) {
 	sc.rcfg.AcceptTimeout = longAcceptTimeout
 	// A long refresh, so no refresh comes between the steps of the test
 	// (it would change the operator sequence numbers it checks). At the end
-	// the test clock moves past it, and the loop, which checks every 50
-	// milliseconds, publishes the snapshots again.
-	sc.refresh = 10 * time.Minute
-	// The team is not released by time (the move of the clock at the end
-	// would do it), so the refresh is the only change of the operators
-	// there.
-	sc.rcfg.TeamReleaseAfter = 24 * time.Hour
+	// the test clock moves past it, and the loop publishes the snapshots
+	// again.
+	sc.refresh = 3 * time.Minute
+	// The team is not released by time, so the refresh is the only change
+	// of the operators there. The release time is the highest that the
+	// stand settings allow (2 hours of model time). The move of the clock
+	// at the end is the refresh plus a second of machine time, about 60
+	// minutes of model time at the speed factor of 20, which leaves about
+	// 60 minutes of model time (3 minutes of machine time) for the rest of
+	// the test after the team load fell to 0.
+	sc.rcfg.TeamReleaseAfter = opapi.MaxTeamReleaseAfter
 	// Small teams, so three conversations of one company form one.
 	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1
 	// The test is about operator events, not the team cap. When the team

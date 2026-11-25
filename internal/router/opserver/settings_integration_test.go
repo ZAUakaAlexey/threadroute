@@ -4,6 +4,7 @@ package opserver
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -89,47 +90,47 @@ func TestIntegrationSettingsHTTP(t *testing.T) {
 		code   opapi.ErrorCode
 		check  func(opapi.SettingsErrorResponse, opapi.SettingsChangeResponse) bool
 	}{
-		{name: "1 body shape", body: strings.Replace(body(30, 0, ""), `"form_load":30`, `"form_load":30.0`, 1),
+		{name: "1 body shape", body: strings.Replace(body(30, 1, sim), `"form_load":30`, `"form_load":30.0`, 1),
 			status: 400, code: opapi.CodeInvalidRequest,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool { return len(e.Fields) == 0 }},
-		{name: "3 fields before 4", body: body(1, 7, ""), status: 400, code: opapi.CodeInvalidRequest,
+		{name: "3 fields before 4", body: body(1, 7, sim), status: 400, code: opapi.CodeInvalidRequest,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool {
 				return len(e.Fields) == 1 && e.Fields[0].Field == opapi.FieldTeamFormLoad
 			}},
-		{name: "4 conflict before 5", body: body(30, 7, sim), status: 409, code: opapi.CodeSettingsConflict,
+		{name: "4 conflict before 5", body: body(30, 7, ""), status: 409, code: opapi.CodeSettingsConflict,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool {
-				return e.Settings.Stand.Version == 0
+				return e.Settings.Stand.Version == 1
 			}},
-		{name: "5 sim part before 6", body: body(20, 0, sim), status: 400, code: opapi.CodeInvalidRequest,
+		{name: "5 sim part before 6", body: body(20, 1, ""), status: 400, code: opapi.CodeInvalidRequest,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool {
 				return len(e.Fields) == 1 && e.Fields[0].Field == opapi.FieldSim
 			}},
-		{name: "6 same set", body: body(20, 0, ""), status: 200,
+		{name: "6 same set", body: body(20, 1, sim), status: 200,
 			check: func(_ opapi.SettingsErrorResponse, r opapi.SettingsChangeResponse) bool {
-				return r.Result == opapi.ResultAlreadyDone && r.Settings.Stand.Version == 0
+				return r.Result == opapi.ResultAlreadyDone && r.Settings.Stand.Version == 1
 			}},
-		{name: "8 applied", body: body(30, 0, ""), status: 200,
+		{name: "8 applied", body: body(30, 1, sim), status: 200,
 			check: func(_ opapi.SettingsErrorResponse, r opapi.SettingsChangeResponse) bool {
 				st := r.Settings.Stand
-				return r.Result == opapi.ResultDone && st.Version == 1 && len(st.Changes) == 1 && st.Changes[0].By == "test-user-0001"
+				return r.Result == opapi.ResultDone && st.Version == 2 && len(st.Changes) == 2 && st.Changes[0].By == "test-user-0001"
 			}},
-		{name: "6 same set before 7", body: body(30, 1, ""), status: 200,
+		{name: "6 same set before 7", body: body(30, 2, sim), status: 200,
 			check: func(_ opapi.SettingsErrorResponse, r opapi.SettingsChangeResponse) bool {
 				return r.Result == opapi.ResultAlreadyDone
 			}},
-		{name: "4 repeat of the applied request", body: body(30, 0, ""), status: 409, code: opapi.CodeSettingsConflict,
+		{name: "4 repeat of the applied request", body: body(30, 1, sim), status: 409, code: opapi.CodeSettingsConflict,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool {
-				return e.Settings.Stand.Current.Teams.FormLoad == 30 && len(e.Settings.Stand.Changes) == 1
+				return e.Settings.Stand.Current.Teams.FormLoad == 30 && len(e.Settings.Stand.Changes) == 2
 			}},
-		{name: "7 too soon", body: body(40, 1, ""), before: func() { clock.advance(2500 * time.Millisecond) },
+		{name: "7 too soon", body: body(40, 2, sim), before: func() { clock.advance(2500 * time.Millisecond) },
 			status: 429, code: opapi.CodeSettingsTooSoon,
 			check: func(e opapi.SettingsErrorResponse, _ opapi.SettingsChangeResponse) bool {
 				return e.RetryAfterMS == 7500
 			}},
-		{name: "8 applied after the interval", body: body(40, 1, ""), before: func() { clock.advance(7500 * time.Millisecond) },
+		{name: "8 applied after the interval", body: body(40, 2, sim), before: func() { clock.advance(7500 * time.Millisecond) },
 			status: 200,
 			check: func(_ opapi.SettingsErrorResponse, r opapi.SettingsChangeResponse) bool {
-				return r.Result == opapi.ResultDone && r.Settings.Stand.Version == 2
+				return r.Result == opapi.ResultDone && r.Settings.Stand.Version == 3
 			}},
 	}
 	for _, s := range steps {
@@ -145,21 +146,22 @@ func TestIntegrationSettingsHTTP(t *testing.T) {
 		}
 	}
 
-	// GET without and with the change log, and the simulator report.
+	// GET without and with the change log. The oldest entry is the seed of
+	// the defaults.
 	rec := serve(h, http.MethodGet, opapi.SettingsPath(), "")
 	plain := decode[opapi.Settings](t, rec)
-	if plain.Stand == nil || plain.Stand.Version != 2 || plain.Stand.Changes != nil || rec.Body.Len() > opapi.MaxBodyBytes {
+	if plain.Stand == nil || plain.Stand.Version != 3 || plain.Stand.Changes != nil || rec.Body.Len() > opapi.MaxBodyBytes {
 		t.Errorf("GET: %s", rec.Body)
-	}
-	rec = serve(h, http.MethodPut, opapi.SimDefaultsPath(), `{"sim":`+sim+`}`)
-	if r := decode[opapi.SimDefaultsResponse](t, rec); rec.Code != 200 || r.Result != opapi.ResultDone ||
-		r.Settings.Stand.Version != 3 || r.Settings.Stand.Changes != nil || r.Settings.Validate() != nil {
-		t.Errorf("PUT sim defaults: %d %s", rec.Code, rec.Body)
 	}
 	rec = serve(h, http.MethodGet, opapi.SettingsWithChangesPath(), "")
 	full := decode[opapi.Settings](t, rec)
-	if err := full.Validate(); err != nil || len(full.Stand.Changes) != 3 || full.Stand.Changes[0].By != opapi.BySimulator {
+	if err := errors.Join(full.Validate(), full.ValidateStand()); err != nil || len(full.Stand.Changes) != 3 ||
+		full.Stand.Changes[2].By != opapi.ByDefaults || !full.Stand.Defaults.Equal(opapi.DefaultStandSettings()) {
 		t.Errorf("GET with changes: %s, %v", rec.Body, err)
+	}
+	// The report of the simulator is gone.
+	if rec := serve(h, http.MethodPut, "/v1/settings/sim-defaults", `{"sim":`+sim+`}`); rec.Code != http.StatusNotFound {
+		t.Errorf("PUT sim defaults: status %d, want 404", rec.Code)
 	}
 	// The answer reads like the JSON of the contract: integers stay
 	// integers.
@@ -185,9 +187,6 @@ func TestIntegrationSettingsHTTP(t *testing.T) {
 		decode[opapi.SettingsErrorResponse](t, rec).Code != opapi.CodeSettingsOff {
 		t.Errorf("off, bad fields: %d %s", rec.Code, rec.Body)
 	}
-	if rec := serve(off, http.MethodPut, opapi.SimDefaultsPath(), `{"sim":`+sim+`}`); rec.Code != http.StatusNotImplemented {
-		t.Errorf("off, sim defaults: status %d, want 501", rec.Code)
-	}
 	if rec := serve(off, http.MethodGet, opapi.SettingsWithChangesPath(), ""); decode[opapi.Settings](t, rec).Stand != nil {
 		t.Errorf("off, GET: %s", rec.Body)
 	}
@@ -196,7 +195,7 @@ func TestIntegrationSettingsHTTP(t *testing.T) {
 	// others.
 	srv := httptest.NewServer(h)
 	defer srv.Close()
-	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL+opapi.SimDefaultsPath(), strings.NewReader(`{"sim":`+sim+`}`))
+	req, err := http.NewRequestWithContext(t.Context(), http.MethodPut, srv.URL+opapi.SettingsPath(), strings.NewReader(body(40, 3, sim)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +205,6 @@ func TestIntegrationSettingsHTTP(t *testing.T) {
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		t.Errorf("PUT sim defaults through a server: %d", resp.StatusCode)
+		t.Errorf("PUT settings through a server: %d", resp.StatusCode)
 	}
 }

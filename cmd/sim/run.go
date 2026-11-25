@@ -27,14 +27,12 @@ func run(ctx context.Context, cfg sim.Config, logger *slog.Logger, reg *promethe
 		"metrics_addr", cfg.MetricsAddr,
 		"start_wait", cfg.StartWait.String(),
 		"outage_limit", cfg.OutageLimit.String(),
-		"operators", b.Operators,
+		// The operator count, the capacity, the medians and the missed
+		// offer share are stand settings (decision 0014): the simulator
+		// logs them when it has read the router settings.
 		"languages", b.Languages.String(),
-		"capacity", b.Capacity,
 		"shift", []string{b.ShiftOnline.String(), b.ShiftOffline.String()},
 		"accept_delay", []string{b.AcceptDelayMin.String(), b.AcceptDelayMax.String()},
-		"missed_offer_share", b.MissedOfferShare,
-		"handling_median", b.HandlingMedian.String(),
-		"resolve_median", b.ResolveMedian.String(),
 		"seed", b.Seed,
 	)
 

@@ -36,6 +36,10 @@ type Config struct {
 	// AssignmentTarget and FirstResponseTarget are the two SLA targets.
 	AssignmentTarget    time.Duration
 	FirstResponseTarget time.Duration
+	// The team fields below are the numbers of the stand settings (decision
+	// 0014). A Service that loads the stand settings replaces them with the
+	// stored set; the binary fills them with opapi.DefaultTeamSettings.
+	//
 	// TeamFormLoad is the active load of a company that forms a team.
 	TeamFormLoad int
 	// TeamReleaseLoad and TeamReleaseAfter release a team whose active load
@@ -50,21 +54,18 @@ type Config struct {
 	TeamMaxShare float64
 }
 
-// DefaultConfig returns the starting values of decisions 0009 and 0010.
+// DefaultConfig returns the starting values of decisions 0009 and 0010. The
+// team part is the defaults of the stand settings (opapi.DefaultTeamSettings,
+// decision 0014).
 func DefaultConfig() Config {
-	return Config{
+	c := Config{
 		SpeedFactor:         defaults.RouterSpeedFactor,
 		Capacity:            defaults.OperatorCapacity,
 		AcceptTimeout:       defaults.AcceptTimeout,
 		AssignmentTarget:    defaults.AssignmentTarget,
 		FirstResponseTarget: defaults.FirstResponseTarget,
-		TeamFormLoad:        defaults.TeamFormLoad,
-		TeamReleaseLoad:     defaults.TeamReleaseLoad,
-		TeamReleaseAfter:    defaults.TeamReleaseAfter,
-		TeamMinSize:         defaults.TeamMinSize,
-		TeamMaxSize:         defaults.TeamMaxSize,
-		TeamMaxShare:        defaults.TeamMaxShare,
 	}
+	return c.withTeams(opapi.DefaultTeamSettings())
 }
 
 // maxSpeedFactor bounds the factor, so a machine duration of a timer is

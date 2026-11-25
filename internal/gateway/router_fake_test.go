@@ -226,8 +226,9 @@ var (
 	testSim   = opapi.SimSettings{Operators: 200, Capacity: 4, HandlingMedianUS: 45_000_000, ResolveMedianUS: 180_000_000, MissedOfferShare: 0.03}
 )
 
-// testStand returns a stand at version 3: a simulator report, then two
-// changes by user 9.
+// testStand returns a stand at version 3: an old simulator report (a row
+// that the first version of decision 0014 wrote), then two changes by user
+// 9.
 func testStand() *opapi.StandState {
 	sim := testSim
 	defaults := opapi.StandSettings{Teams: testTeams, Sim: &sim}
@@ -247,8 +248,8 @@ func testStand() *opapi.StandState {
 	}
 }
 
-// firstStartStand returns a stand at version 0: nothing stored, no
-// simulator report.
+// firstStartStand returns a stand at version 0: nothing stored and no sim
+// part, as a router from before the seed of the defaults answers.
 func firstStartStand(teams opapi.TeamSettings) *opapi.StandState {
 	return &opapi.StandState{Version: 0, Current: opapi.StandSettings{Teams: teams}, Defaults: opapi.StandSettings{Teams: teams}}
 }

@@ -64,22 +64,9 @@ const (
 	// FirstResponseTarget is the SLA target until the first reply of the
 	// operator.
 	FirstResponseTarget = 120 * time.Second
-	// TeamFormLoad is the active load of a company at which it gets a
-	// dedicated team.
-	TeamFormLoad = 20
-	// TeamReleaseLoad releases a team when the active load stays below it
-	// for TeamReleaseAfter.
-	TeamReleaseLoad = 8
-	// TeamReleaseAfter is how long the load must stay below
-	// TeamReleaseLoad.
-	TeamReleaseAfter = 15 * time.Minute
-	// TeamMinSize and TeamMaxSize bound the size of a team.
-	TeamMinSize = 2
-	TeamMaxSize = 20
-	// TeamMaxShare is the share of the online operators that all teams
-	// together may hold (decision 0009, "A cap on the operators that teams
-	// hold"). 1 turns the cap off.
-	TeamMaxShare = 0.5
+	// The team numbers of decision 0009 are stand settings (decision 0014).
+	// Their defaults are in internal/opapi, next to their bounds.
+
 	// RouterSpeedFactor multiplies the machine clock of the router timers.
 	// 1 for live traffic (decision 0009, "Clock").
 	RouterSpeedFactor = 1.0
@@ -96,16 +83,16 @@ const (
 )
 
 // Simulated operators in sim (decision 0010). Durations are model time, like
-// the router ones: sim divides them by the speed factor of the router.
+// the router ones: sim divides them by the speed factor of the router. The
+// operator count, the capacity, the two medians and the missed offer share
+// are stand settings (decision 0014); their defaults are in internal/opapi.
 const (
-	// SimOperators is the number of simulated operators. It was sized after
-	// the first live run of stage 2, from the number of open conversations.
-	SimOperators = 200
 	// SimLanguages is the language spread of the operators, as
 	// "lang:count" pairs. It is a starting value: one measured hour at
 	// night (UTC) had 98 percent English posts, and the spread will be
 	// tuned after a full-day measurement of the stream. The counts add up
-	// to SimOperators. Every operator also serves the general queue (und).
+	// to the default operator count (opapi.DefaultSimOperators). Every
+	// operator also serves the general queue (und).
 	SimLanguages = "en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3"
 	// SimShiftOnline and SimShiftOffline are the two parts of a shift: an
 	// operator is online this long, then offline this long.
@@ -115,14 +102,6 @@ const (
 	// an operator accepts an offer.
 	SimAcceptDelayMin = time.Second
 	SimAcceptDelayMax = 8 * time.Second
-	// SimMissedOfferShare is the share of offers that an operator does not
-	// answer at all, so the accept timeout runs out.
-	SimMissedOfferShare = 0.03
-	// SimHandlingMedian is the median time from the accept to the reply
-	// marker.
-	SimHandlingMedian = 45 * time.Second
-	// SimResolveMedian is the median time from the reply to the resolve.
-	SimResolveMedian = 3 * time.Minute
 )
 
 // Gateway (decisions 0011 and 0012). Durations are machine time: they are

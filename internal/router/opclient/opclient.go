@@ -6,9 +6,9 @@
 //     with errors.As, or with Code). A code for which ErrorCode.Rejected is
 //     true means the state moved on: repeating the call gives the same
 //     answer. CodeUnavailable means retry later.
-//   - *opapi.SettingsError instead of *opapi.Error for PutSettings and
-//     PutSimDefaults, with the details of the code (fields, the current
-//     settings of a conflict, the wait). A router from before decision 0014
+//   - *opapi.SettingsError instead of *opapi.Error for PutSettings, with
+//     the details of the code (fields, the current settings of a conflict,
+//     the wait). A router from before decision 0014
 //     gives CodeSettingsOff there.
 //   - any other error when no answer came: the router is not reachable,
 //     the call timed out, or the answer was not valid.
@@ -185,28 +185,6 @@ func (c *Client) PutSettings(ctx context.Context, req opapi.SettingsChangeReques
 	return resp, nil
 }
 
-// PutSimDefaults reports the values of the simulator environment. A
-// successful answer always has Settings.Stand.Current.Sim. An error
-// answer is an *opapi.SettingsError: CodeInvalidRequest (with Fields when
-// the values break the bounds), CodeSettingsOff (also for a router from
-// before decision 0014), or CodeUnavailable or CodeInternal.
-func (c *Client) PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-	path := opapi.SimDefaultsPath()
-	var resp opapi.SimDefaultsResponse
-	if err := c.doSettings(ctx, path, opapi.MaxBodyBytes, req, &resp); err != nil {
-		return opapi.SimDefaultsResponse{}, err
-	}
-	err := checkStandAnswer(resp.Result, resp.Settings)
-	if err == nil && resp.Settings.Stand.Current.Sim == nil {
-		// After a report the stored set always has a sim part.
-		err = errors.New("answer settings have no sim part")
-	}
-	if err != nil {
-		return opapi.SimDefaultsResponse{}, fmt.Errorf("opclient: PUT %s: %w", path, err)
-	}
-	return resp, nil
-}
-
 // settingsWire decodes the stand block apart from the base settings, so
 // that a block of the wrong shape does not fail the whole answer. Its Stand
 // hides the Stand of the embedded Settings.
@@ -281,8 +259,7 @@ func (c *Client) noteStand(path string, err error) {
 	}
 }
 
-// checkStandAnswer checks a successful answer of PutSettings or
-// PutSimDefaults: a known result, valid base settings and a valid stand
+// checkStandAnswer checks a successful answer of PutSettings: a known result, valid base settings and a valid stand
 // block, which such an answer always has.
 func checkStandAnswer(r opapi.Result, s opapi.Settings) error {
 	if err := checkResult(r); err != nil {

@@ -18,7 +18,6 @@ import (
 // implements it.
 type API interface {
 	Settings(ctx context.Context) (opapi.Settings, error)
-	PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error)
 	PutOperator(ctx context.Context, operatorID string, req opapi.OperatorRequest) (opapi.OperatorResponse, error)
 	Online(ctx context.Context, operatorID string) (opapi.Result, error)
 	Offline(ctx context.Context, operatorID string) (opapi.Result, error)

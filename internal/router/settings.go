@@ -31,10 +31,16 @@ import (
 // lower share stops growing; a team above a lower max size shrinks by the
 // normal size check; a raised number takes effect at the next check.
 //
+// The stored set is the only source of the numbers (decision 0014, "the
+// settings live only in the store"). LoadSettings stores the defaults of
+// the code (opapi.DefaultStandSettings) as version 1 when nothing is stored
+// yet, and adds the sim defaults to a stored set without a sim part. The
+// defaults in every answer are the defaults of the code.
+//
 // The Service offers stand settings only after LoadSettings, and only when
-// the team values of its environment are within the bounds of opapi. A
-// Service that does not offer them runs with its environment values as
-// before decision 0014 and never touches the settings tables.
+// the stored row is valid. A Service that does not offer them runs with the
+// team values of the Config given to New (the binary fills them with the
+// defaults of the code) and never touches the settings tables again.
 
 // rules is one consistent set of the routing numbers in use.
 type rules struct {
@@ -42,8 +48,8 @@ type rules struct {
 	cfg Config
 	// version is the version of current; 0 while nothing is stored.
 	version int64
-	// current is the current stand settings. The sim part is absent until
-	// a simulator reported. Treat it as read-only.
+	// current is the current stand settings. The sim part is absent only
+	// while nothing is stored. Treat it as read-only.
 	current opapi.StandSettings
 }
 
@@ -56,9 +62,9 @@ func (s *Service) config() Config { return s.rules.Load().cfg }
 const (
 	// SourceConsole is a change by PUT /v1/settings.
 	SourceConsole = "console"
-	// SourceSimulator is the first report of a simulator that became the
-	// current sim part.
-	SourceSimulator = "simulator"
+	// SourceDefaults is the change of LoadSettings that stored the defaults
+	// of the code (opapi.ByDefaults).
+	SourceDefaults = "defaults"
 )
 
 // StandSnapshot is the stand settings in use by this Service, for the
@@ -67,12 +73,12 @@ type StandSnapshot struct {
 	// Enabled reports whether the Service offers stand settings.
 	Enabled bool
 	// Version and Current are the set in use. When Enabled is false,
-	// Version is 0 and Current holds the environment values.
+	// Version is 0 and Current holds the team values of the Config.
 	Version int64
 	Current opapi.StandSettings
-	// ConsoleChanges and SimulatorChanges count the changes this Service
+	// ConsoleChanges and DefaultsChanges count the changes this Service
 	// applied, by source.
-	ConsoleChanges, SimulatorChanges int64
+	ConsoleChanges, DefaultsChanges int64
 }
 
 // StandSnapshot returns the stand settings in use. It is safe for
@@ -81,7 +87,7 @@ func (s *Service) StandSnapshot() StandSnapshot {
 	r := s.rules.Load()
 	return StandSnapshot{
 		Enabled: s.standOn.Load(), Version: r.version, Current: cloneSettings(r.current),
-		ConsoleChanges: s.consoleChanges.Load(), SimulatorChanges: s.simChanges.Load(),
+		ConsoleChanges: s.consoleChanges.Load(), DefaultsChanges: s.defaultsChanges.Load(),
 	}
 }
 
@@ -150,67 +156,63 @@ func cloneSettings(set opapi.StandSettings) opapi.StandSettings {
 }
 
 // standRow is the row of stand_settings, decoded. At version 0 nothing is
-// stored, and current holds the team values of the environment of this
-// router.
+// stored, and current holds the team defaults without a sim part.
+//
+// The column defaults_sim held the values of the old simulator report. It
+// is no longer read, and a save writes NULL into it.
 type standRow struct {
-	version     int64
-	current     opapi.StandSettings
-	simDefaults *opapi.SimSettings
-	lastPutAt   *time.Time
+	version   int64
+	current   opapi.StandSettings
+	lastPutAt *time.Time
 }
 
 // errBadStored marks a stored row that cannot be read or breaks the
 // bounds. Only a hand edit of the database can make one.
 var errBadStored = errors.New("stored stand settings are not valid")
 
-// decodeStored decodes a row of stand_settings. env is the team part of
-// the environment: the defaults of the teams part, and the current set at
-// version 0. The result is checked with the rules of opapi.StandState.
-func decodeStored(row pgdb.StandSetting, env opapi.TeamSettings) (standRow, error) {
-	st := standRow{version: row.Version, current: opapi.StandSettings{Teams: env}, lastPutAt: row.LastPutAt}
+// decodeStored decodes a row of stand_settings. The result is checked with
+// the rules of opapi.StandState.
+func decodeStored(row pgdb.StandSetting) (standRow, error) {
+	st := standRow{version: row.Version, current: opapi.StandSettings{Teams: opapi.DefaultTeamSettings()}, lastPutAt: row.LastPutAt}
 	if row.CurrentSet != nil {
 		// A fresh value, so a field missing in the JSON stays 0 and fails
-		// the bounds instead of taking the environment value.
+		// the bounds instead of taking a default.
 		var current opapi.StandSettings
 		if err := json.Unmarshal(row.CurrentSet, &current); err != nil {
 			return standRow{}, fmt.Errorf("%w: current set: %w", errBadStored, err)
 		}
 		st.current = current
 	}
-	if row.DefaultsSim != nil {
-		st.simDefaults = new(opapi.SimSettings)
-		if err := json.Unmarshal(row.DefaultsSim, st.simDefaults); err != nil {
-			return standRow{}, fmt.Errorf("%w: sim defaults: %w", errBadStored, err)
-		}
-	}
-	if err := st.state(env, nil).Validate(); err != nil {
+	if err := st.state(nil).Validate(); err != nil {
 		return standRow{}, fmt.Errorf("%w: %w", errBadStored, err)
 	}
 	return st, nil
 }
 
-// encode returns the columns current_set and defaults_sim. A nil slice is
-// NULL.
-func (st standRow) encode() (current, simDefaults []byte, err error) {
-	if st.version > 0 {
-		if current, err = json.Marshal(st.current); err != nil {
-			return nil, nil, fmt.Errorf("encode current set: %w", err)
-		}
+// encode returns the column current_set. A nil slice is NULL.
+func (st standRow) encode() ([]byte, error) {
+	if st.version == 0 {
+		return nil, nil
 	}
-	if st.simDefaults != nil {
-		if simDefaults, err = json.Marshal(st.simDefaults); err != nil {
-			return nil, nil, fmt.Errorf("encode sim defaults: %w", err)
-		}
+	current, err := json.Marshal(st.current)
+	if err != nil {
+		return nil, fmt.Errorf("encode current set: %w", err)
 	}
-	return current, simDefaults, nil
+	return current, nil
 }
 
-// state returns the stand settings block of the answers.
-func (st standRow) state(env opapi.TeamSettings, changes []opapi.SettingsChange) opapi.StandState {
+// state returns the stand settings block of the answers. The defaults are
+// the defaults of the code, with the sim part exactly when the current set
+// has one (the rule of opapi.StandState.Validate).
+func (st standRow) state(changes []opapi.SettingsChange) opapi.StandState {
+	defaults := opapi.DefaultStandSettings()
+	if st.current.Sim == nil {
+		defaults.Sim = nil
+	}
 	return opapi.StandState{
 		Version:  st.version,
 		Current:  cloneSettings(st.current),
-		Defaults: cloneSettings(opapi.StandSettings{Teams: env, Sim: st.simDefaults}),
+		Defaults: defaults,
 		Changes:  changes,
 	}
 }
@@ -239,7 +241,7 @@ func checkChange(st standRow, req opapi.SettingsChangeRequest, now time.Time) (c
 	switch has, want := req.Settings.Sim != nil, st.current.Sim != nil; {
 	case has && !want:
 		return stepSimPart, opapi.FieldError{
-			Field: opapi.FieldSim, Reason: "must be absent: no simulator has reported its values yet",
+			Field: opapi.FieldSim, Reason: "must be absent: the stored set has no sim part",
 		}, 0
 	case !has && want:
 		return stepSimPart, opapi.FieldError{Field: opapi.FieldSim, Reason: "is not set"}, 0
@@ -269,24 +271,30 @@ func retryAfterMS(elapsed time.Duration) (wait int64, ok bool) {
 	return min(max(ms, 1), opapi.SettingsChangeInterval.Milliseconds()), false
 }
 
-// planSimDefaults applies a simulator report to the stored set: the
-// values always become the sim defaults, and also the current sim part
-// when the current set has none. That second case is a change: the version
-// goes up by one and fields lists it for the log. changed reports whether
-// anything differs from st.
-func planSimDefaults(st standRow, sim opapi.SimSettings) (next standRow, fields []opapi.FieldChange, changed bool) {
-	next = st
-	next.current = cloneSettings(st.current)
-	defaults := sim
-	next.simDefaults = &defaults
-	if st.current.Sim == nil {
-		current := sim
-		next.current.Sim = &current
+// planSeed stores the defaults of the code in a stored set that lacks
+// them: the whole set as version 1 when nothing is stored, or the sim
+// defaults with version plus one when the stored set has no sim part.
+// fields lists the change for the log, with Old absent for every field
+// that had no stored value. changed is false when the stored set already
+// has both parts. The seed does not set lastPutAt, so it does not start
+// opapi.SettingsChangeInterval.
+func planSeed(st standRow) (next standRow, fields []opapi.FieldChange, changed bool) {
+	switch {
+	case st.version == 0:
+		next = standRow{version: 1, current: opapi.DefaultStandSettings(), lastPutAt: st.lastPutAt}
+		for _, v := range SettingsValues(next.current) {
+			fields = append(fields, opapi.FieldChange{Field: v.Field, New: v.Value})
+		}
+		return next, fields, true
+	case st.current.Sim == nil:
+		next = st
+		next.current = cloneSettings(st.current)
+		sim := opapi.DefaultSimSettings()
+		next.current.Sim = &sim
 		next.version++
-		fields = opapi.Diff(st.current, next.current)
+		return next, opapi.Diff(st.current, next.current), true
 	}
-	changed = fields != nil || st.simDefaults == nil || *st.simDefaults != sim
-	return next, fields, changed
+	return st, nil, false
 }
 
 // settingsErr returns the error answer of a stand settings call.
@@ -310,18 +318,42 @@ func invalidFields(fes []opapi.FieldError) *opapi.SettingsError {
 }
 
 // LoadSettings reads the stored stand settings at start and applies them.
-// Call it once, before the Service serves the operator API. When the team
-// values of the environment are outside the bounds of opapi, or the stored
-// row is not valid, the Service does not offer stand settings and keeps
-// its environment values; both are logged, neither is an error. Only a
-// database error is.
+// Call it once, before the Service serves the operator API. When nothing is
+// stored, it stores the defaults of the code as version 1; when the stored
+// set has no sim part, it adds the sim defaults (planSeed). Both are logged
+// with the label opapi.ByDefaults. The check and the write run in one
+// transaction on the locked row, so routers that start together seed once.
+//
+// When the stored row is not valid, the Service does not offer stand
+// settings and keeps the team values of its Config; that is logged, not an
+// error. Only a database error is.
 func (s *Service) LoadSettings(ctx context.Context) error {
-	if fes := s.envTeams.FieldErrors(); len(fes) > 0 {
-		s.logger.WarnContext(ctx, "stand settings are off: team values of the environment are outside the bounds",
-			"error", opapi.JoinFieldErrors(fes))
+	var (
+		st     standRow
+		seeded bool
+		fields []opapi.FieldChange
+	)
+	err := s.inTx(ctx, func(q *pgdb.Queries) error {
+		seeded, fields = false, nil
+		cur, err := s.lockStored(ctx, q)
+		if err != nil {
+			return err
+		}
+		next, f, changed := planSeed(cur)
+		if !changed {
+			st = cur
+			return nil
+		}
+		now := s.now()
+		if err := saveStored(ctx, q, next, now); err != nil {
+			return err
+		}
+		if err := logChange(ctx, q, next.version, now, opapi.ByDefaults, f); err != nil {
+			return err
+		}
+		st, seeded, fields = next, true, f
 		return nil
-	}
-	st, err := s.readStored(ctx, pgdb.New(s.db))
+	})
 	if errors.Is(err, errBadStored) {
 		s.logger.ErrorContext(ctx, "stand settings are off: the stored row is not valid", "error", err)
 		return nil
@@ -330,8 +362,13 @@ func (s *Service) LoadSettings(ctx context.Context) error {
 		return fmt.Errorf("load stand settings: %w", err)
 	}
 	s.standOn.Store(true)
+	if seeded {
+		s.defaultsChanges.Add(1)
+		s.logger.InfoContext(ctx, "stand settings changed", "source", SourceDefaults, "version", st.version,
+			"fields", fieldNames(fields))
+	}
 	s.apply(ctx, st)
-	s.logger.InfoContext(ctx, "stand settings loaded", "version", st.version)
+	s.logger.InfoContext(ctx, "stand settings loaded", "version", st.version, "teams", st.current.Teams)
 	return nil
 }
 
@@ -358,12 +395,12 @@ func (s *Service) SyncSettings(ctx context.Context) error {
 func (s *Service) readStored(ctx context.Context, q *pgdb.Queries) (standRow, error) {
 	row, err := q.GetStandSettings(ctx)
 	if isNoRows(err) {
-		return standRow{current: opapi.StandSettings{Teams: s.envTeams}}, nil
+		return standRow{current: opapi.StandSettings{Teams: opapi.DefaultTeamSettings()}}, nil
 	}
 	if err != nil {
 		return standRow{}, fmt.Errorf("read stand settings: %w", err)
 	}
-	return decodeStored(row, s.envTeams)
+	return decodeStored(row)
 }
 
 // lockStored inserts the row when it is missing, locks it and decodes it.
@@ -375,17 +412,18 @@ func (s *Service) lockStored(ctx context.Context, q *pgdb.Queries) (standRow, er
 	if err != nil {
 		return standRow{}, fmt.Errorf("lock stand settings: %w", err)
 	}
-	return decodeStored(row, s.envTeams)
+	return decodeStored(row)
 }
 
-// saveStored writes the locked row.
+// saveStored writes the locked row. defaults_sim is written as NULL: the
+// defaults are in the code.
 func saveStored(ctx context.Context, q *pgdb.Queries, st standRow, now time.Time) error {
-	current, simDefaults, err := st.encode()
+	current, err := st.encode()
 	if err != nil {
 		return err
 	}
 	err = q.SaveStandSettings(ctx, pgdb.SaveStandSettingsParams{
-		Version: st.version, CurrentSet: current, DefaultsSim: simDefaults, LastPutAt: st.lastPutAt, UpdatedAt: now,
+		Version: st.version, CurrentSet: current, DefaultsSim: nil, LastPutAt: st.lastPutAt, UpdatedAt: now,
 	})
 	if err != nil {
 		return fmt.Errorf("save stand settings: %w", err)
@@ -440,7 +478,7 @@ func (s *Service) answer(ctx context.Context, q *pgdb.Queries, st standRow, with
 		}
 	}
 	out := s.config().Settings()
-	stand := st.state(s.envTeams, changes)
+	stand := st.state(changes)
 	out.Stand = &stand
 	return out, nil
 }
@@ -551,58 +589,6 @@ func (s *Service) PutSettings(ctx context.Context, req opapi.SettingsChangeReque
 		s.apply(ctx, *applied)
 		s.logger.InfoContext(ctx, "stand settings changed", "source", SourceConsole, "version", applied.version,
 			"fields", fieldNames(fields))
-	}
-	return resp, nil
-}
-
-// PutSimDefaults stores the values of a simulator environment
-// (opapi.PatternPutSimDefaults). It is not limited by
-// opapi.SettingsChangeInterval and does not start it. Errors are as for
-// PutSettings.
-func (s *Service) PutSimDefaults(ctx context.Context, req opapi.SimDefaultsRequest) (opapi.SimDefaultsResponse, error) {
-	if !s.standOn.Load() {
-		return opapi.SimDefaultsResponse{}, settingsOff()
-	}
-	if fes := req.FieldErrors(); len(fes) > 0 {
-		return opapi.SimDefaultsResponse{}, invalidFields(fes)
-	}
-	var (
-		resp    opapi.SimDefaultsResponse
-		applied *standRow
-	)
-	err := s.inTx(ctx, func(q *pgdb.Queries) error {
-		resp, applied = opapi.SimDefaultsResponse{}, nil
-		st, err := s.lockStored(ctx, q)
-		if err != nil {
-			return err
-		}
-		next, fields, changed := planSimDefaults(st, req.Sim)
-		if !changed {
-			cur, err := s.answer(ctx, q, st, false)
-			resp = opapi.SimDefaultsResponse{Result: opapi.ResultAlreadyDone, Settings: cur}
-			return err
-		}
-		now := s.now()
-		if err := saveStored(ctx, q, next, now); err != nil {
-			return err
-		}
-		if fields != nil {
-			if err := logChange(ctx, q, next.version, now, opapi.BySimulator, fields); err != nil {
-				return err
-			}
-			applied = &next
-		}
-		cur, err := s.answer(ctx, q, next, false)
-		resp = opapi.SimDefaultsResponse{Result: opapi.ResultDone, Settings: cur}
-		return err
-	})
-	if err != nil {
-		return opapi.SimDefaultsResponse{}, err
-	}
-	if applied != nil {
-		s.simChanges.Add(1)
-		s.apply(ctx, *applied)
-		s.logger.InfoContext(ctx, "stand settings changed", "source", SourceSimulator, "version", applied.version)
 	}
 	return resp, nil
 }

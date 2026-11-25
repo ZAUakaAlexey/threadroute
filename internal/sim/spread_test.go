@@ -117,8 +117,8 @@ func TestLangOrderDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := def.layout(defaults.SimOperators); got.String() != "en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3" {
-		t.Errorf("%d operators: %s, want the spread", defaults.SimOperators, got)
+	if got := def.layout(opapi.DefaultSimOperators); got.String() != "en:176,ja:6,de:4,fr:4,es:4,pt:3,ko:3" {
+		t.Errorf("%d operators: %s, want the spread", opapi.DefaultSimOperators, got)
 	}
 	if got, want := def.langOrder(7), []string{"en", "ja", "de", "fr", "es", "pt", "ko"}; !slices.Equal(got, want) {
 		t.Errorf("first 7: %v, want %v", got, want)

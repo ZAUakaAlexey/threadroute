@@ -73,6 +73,7 @@ func testCatchUp(t *testing.T, h *harness) {
 	}
 	r := sc.run(svc, reg)
 	waitFor(t, 60*time.Second, "ready", svc.Ready)
+	sc.requireStandOn(r)
 	if code := healthCode(t, health); code != http.StatusOK {
 		t.Errorf("healthz after the catch-up = %d", code)
 	}

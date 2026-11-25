@@ -35,12 +35,6 @@ const (
 	EnvAcceptTimeout       = Prefix + "ROUTER_ACCEPT_TIMEOUT"
 	EnvAssignmentTarget    = Prefix + "ROUTER_ASSIGNMENT_TARGET"
 	EnvFirstResponseTarget = Prefix + "ROUTER_FIRST_RESPONSE_TARGET"
-	EnvTeamFormLoad        = Prefix + "ROUTER_TEAM_FORM_LOAD"
-	EnvTeamReleaseLoad     = Prefix + "ROUTER_TEAM_RELEASE_LOAD"
-	EnvTeamReleaseAfter    = Prefix + "ROUTER_TEAM_RELEASE_AFTER"
-	EnvTeamMinSize         = Prefix + "ROUTER_TEAM_MIN_SIZE"
-	EnvTeamMaxSize         = Prefix + "ROUTER_TEAM_MAX_SIZE"
-	EnvTeamMaxShare        = Prefix + "ROUTER_TEAM_MAX_SHARE"
 
 	EnvAssignWorkers   = Prefix + "ROUTER_ASSIGN_WORKERS"
 	EnvAssignInterval  = Prefix + "ROUTER_ASSIGN_INTERVAL"
@@ -56,8 +50,32 @@ const (
 	EnvOperatorRefresh = Prefix + "ROUTER_OPERATOR_REFRESH"
 )
 
+// RemovedVars are the variables of the team numbers that the router read
+// before decision 0014 moved them into the stand settings. Load does not
+// read them; WarnRemoved logs a warning for each one that is still set.
+var RemovedVars = []string{
+	Prefix + "ROUTER_TEAM_FORM_LOAD",
+	Prefix + "ROUTER_TEAM_RELEASE_LOAD",
+	Prefix + "ROUTER_TEAM_RELEASE_AFTER",
+	Prefix + "ROUTER_TEAM_MIN_SIZE",
+	Prefix + "ROUTER_TEAM_MAX_SIZE",
+	Prefix + "ROUTER_TEAM_MAX_SHARE",
+}
+
+// WarnRemoved logs one warning for each variable of RemovedVars that is
+// set to a value that is not empty. The value is not read.
+func WarnRemoved(lookup LookupFunc, logger *slog.Logger) {
+	for _, key := range RemovedVars {
+		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
+			logger.Warn("environment variable is no longer read: the value now lives in the stand settings; "+
+				"change it in the console or with PUT /v1/settings of the operator API", "variable", key)
+		}
+	}
+}
+
 // Defaults that are not routing rules. The routing rules come from
-// router.DefaultConfig, which takes them from internal/defaults.
+// router.DefaultConfig, which takes them from internal/defaults and the team
+// numbers from the stand settings defaults of internal/opapi.
 const (
 	DefaultKafkaBrokers = "localhost:9092"
 	DefaultLogLevel     = slog.LevelInfo
@@ -129,7 +147,9 @@ type Config struct {
 	GroupID string
 	// Postgres is the database connection. Its DSN must never be logged.
 	Postgres pg.Config
-	// Router holds the routing rules of decisions 0009 and 0010.
+	// Router holds the routing rules of decisions 0009 and 0010. Its team
+	// numbers are the defaults of the code; the stored stand settings
+	// replace them at start (decision 0014).
 	Router router.Config
 	// MetricsAddr is the listen address of the metrics, pprof and health
 	// endpoint.
@@ -195,12 +215,12 @@ func Load(lookup LookupFunc) (Config, error) {
 			AcceptTimeout:       r.duration(EnvAcceptTimeout, d.AcceptTimeout),
 			AssignmentTarget:    r.duration(EnvAssignmentTarget, d.AssignmentTarget),
 			FirstResponseTarget: r.duration(EnvFirstResponseTarget, d.FirstResponseTarget),
-			TeamFormLoad:        r.intBetween(EnvTeamFormLoad, d.TeamFormLoad, 2, math.MaxInt32),
-			TeamReleaseLoad:     r.intBetween(EnvTeamReleaseLoad, d.TeamReleaseLoad, 1, math.MaxInt32),
-			TeamReleaseAfter:    r.duration(EnvTeamReleaseAfter, d.TeamReleaseAfter),
-			TeamMinSize:         r.intBetween(EnvTeamMinSize, d.TeamMinSize, 1, math.MaxInt32),
-			TeamMaxSize:         r.intBetween(EnvTeamMaxSize, d.TeamMaxSize, 1, math.MaxInt32),
-			TeamMaxShare:        r.teamMaxShare(EnvTeamMaxShare, d.TeamMaxShare),
+			TeamFormLoad:        d.TeamFormLoad,
+			TeamReleaseLoad:     d.TeamReleaseLoad,
+			TeamReleaseAfter:    d.TeamReleaseAfter,
+			TeamMinSize:         d.TeamMinSize,
+			TeamMaxSize:         d.TeamMaxSize,
+			TeamMaxShare:        d.TeamMaxShare,
 		},
 		AssignWorkers:   r.intBetween(EnvAssignWorkers, DefaultAssignWorkers, 1, maxAssignWorkers),
 		AssignInterval:  r.duration(EnvAssignInterval, DefaultAssignInterval),
@@ -215,15 +235,6 @@ func Load(lookup LookupFunc) (Config, error) {
 		OutageLimit:     r.duration(EnvOutageLimit, DefaultOutageLimit),
 		OperatorRefresh: r.duration(EnvOperatorRefresh, DefaultOperatorRefresh),
 		LogLevel:        r.logLevel(EnvLogLevel, DefaultLogLevel),
-	}
-	// The cross-field rules of router.Config.Validate, checked here so the
-	// error names a variable.
-	rc := cfg.Router
-	if rc.TeamFormLoad > 0 && rc.TeamReleaseLoad > 0 && rc.TeamFormLoad <= rc.TeamReleaseLoad {
-		r.fail(EnvTeamFormLoad, fmt.Errorf("%d is not above %s (%d)", rc.TeamFormLoad, EnvTeamReleaseLoad, rc.TeamReleaseLoad))
-	}
-	if rc.TeamMinSize > 0 && rc.TeamMaxSize > 0 && rc.TeamMaxSize < rc.TeamMinSize {
-		r.fail(EnvTeamMaxSize, fmt.Errorf("%d is less than %s (%d)", rc.TeamMaxSize, EnvTeamMinSize, rc.TeamMinSize))
 	}
 	if err := errors.Join(r.errs...); err != nil {
 		return Config{}, fmt.Errorf("invalid configuration: %w", err)
@@ -404,28 +415,6 @@ func (r *reader) speedFactor(key string, def float64) float64 {
 	}
 	probe := router.DefaultConfig()
 	probe.SpeedFactor = f
-	if err := probe.Validate(); err != nil {
-		r.fail(key, err)
-		return 0
-	}
-	return f
-}
-
-// teamMaxShare reads the share of the online operators that all teams may
-// hold (decision 0009, "A cap on the operators that teams hold"): a number
-// above 0 and at most 1. 1 turns the cap off.
-func (r *reader) teamMaxShare(key string, def float64) float64 {
-	v, ok := r.get(key)
-	if !ok {
-		return def
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || math.IsNaN(f) || math.IsInf(f, 0) {
-		r.fail(key, fmt.Errorf("%q is not a number", v))
-		return 0
-	}
-	probe := router.DefaultConfig()
-	probe.TeamMaxShare = f
 	if err := probe.Validate(); err != nil {
 		r.fail(key, err)
 		return 0

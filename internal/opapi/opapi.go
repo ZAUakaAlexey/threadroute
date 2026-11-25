@@ -37,9 +37,8 @@
 // The calls of SettingsPatterns read and change the stand settings of
 // decision 0014. stand.go describes them. A router from before decision
 // 0014 does not serve them: it answers PatternPutSettings with HTTP 405
-// and PatternPutSimDefaults with HTTP 404, both without an ErrorResponse,
-// and its PatternSettings answer has no "stand". A caller treats those
-// three like CodeSettingsOff. A PatternSettings answer whose "stand" is not
+// without an ErrorResponse, and its PatternSettings answer has no "stand".
+// A caller treats both like CodeSettingsOff. A PatternSettings answer whose "stand" is not
 // valid (Settings.ValidateStand) counts as one without "stand"; its base
 // settings stay usable when Settings.Validate passes.
 //
@@ -146,23 +145,6 @@ const (
 	// longer current); the Settings of that answer show whether the set
 	// is the one the caller wanted.
 	PatternPutSettings = "PUT /v1/settings"
-
-	// PatternPutSimDefaults reports the values of the simulator
-	// environment. The simulator calls it at each of its starts, after it
-	// read PatternSettings. Body: SimDefaultsRequest. Answer:
-	// SimDefaultsResponse (HTTP 200).
-	//
-	// The router stores the values as Defaults.Sim. When the stored set
-	// has no sim part yet, it also stores them as Current.Sim: that is a
-	// change, with version plus one and a log entry by BySimulator. When
-	// it has one, Current does not change. The call is safe to repeat:
-	// the same values give ResultAlreadyDone. It is not subject to
-	// SettingsChangeInterval and does not start it.
-	//
-	// Errors, each a SettingsErrorResponse: HTTP 400 CodeInvalidRequest
-	// (with Fields when the values break the bounds; nothing is stored),
-	// HTTP 501 CodeSettingsOff, and CodeUnavailable or CodeInternal.
-	PatternPutSimDefaults = "PUT /v1/settings/sim-defaults"
 )
 
 // Patterns lists every route pattern that every router serves.
@@ -176,7 +158,7 @@ var Patterns = []string{
 // Patterns, also when it does not offer stand settings (it answers
 // CodeSettingsOff then). They are not in Patterns, so a router can be
 // built from this package before it has their handlers.
-var SettingsPatterns = []string{PatternPutSettings, PatternPutSimDefaults}
+var SettingsPatterns = []string{PatternPutSettings}
 
 // QueryChanges is the query parameter of PatternSettings that asks for the
 // change log.
@@ -214,9 +196,6 @@ func SettingsPath() string { return "/v1/settings" }
 // SettingsWithChangesPath returns the path and the query of PatternSettings
 // with the change log.
 func SettingsWithChangesPath() string { return SettingsPath() + "?" + QueryChanges + "=1" }
-
-// SimDefaultsPath returns the path of PatternPutSimDefaults.
-func SimDefaultsPath() string { return SettingsPath() + "/sim-defaults" }
 
 func offerPath(operatorID, offerID string) string {
 	return OperatorPath(operatorID) + "/offers/" + url.PathEscape(offerID)
@@ -488,8 +467,8 @@ const (
 	// SettingsChangeInterval ago. Retry after RetryAfterMS. 429.
 	CodeSettingsTooSoon ErrorCode = "settings_too_soon"
 	// CodeSettingsOff: this router does not offer stand settings, for
-	// example because its environment values are outside the bounds.
-	// Retrying does not help. 501.
+	// example because its stored row is not valid (only a hand edit of the
+	// database can make one). Retrying does not help. 501.
 	CodeSettingsOff ErrorCode = "settings_off"
 )
 

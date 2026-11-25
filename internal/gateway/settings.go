@@ -256,7 +256,7 @@ func (g *Gateway) changeSettings(ctx context.Context, c *client, m gwapi.ChangeS
 		}
 	}
 	by := c.ident.by()
-	if err := opapi.CheckBy(by); err != nil || by == opapi.BySimulator {
+	if err := opapi.CheckBy(by); err != nil || opapi.ReservedBy(by) {
 		g.logger.Error("no valid by label for a connection that may change settings", "local", c.ident.Local)
 		return settingsRejected(m.RequestID, gwapi.CodeInternal, codeTexts[gwapi.CodeInternal])
 	}
@@ -309,7 +309,7 @@ func simPartError(current, next opapi.StandSettings) (opapi.FieldError, bool) {
 	case current.Sim != nil && next.Sim == nil:
 		return opapi.FieldError{Field: opapi.FieldSim, Reason: "is missing: the current set has a sim part"}, true
 	case current.Sim == nil && next.Sim != nil:
-		return opapi.FieldError{Field: opapi.FieldSim, Reason: "must be absent: no simulator has reported yet"}, true
+		return opapi.FieldError{Field: opapi.FieldSim, Reason: "must be absent: the current set has no sim part"}, true
 	}
 	return opapi.FieldError{}, false
 }

@@ -15,11 +15,12 @@ import (
 )
 
 // TestIntegrationStandSettings runs the simulator against a real router
-// with stand settings (decision 0014): the first report becomes version 1,
-// a change from the console is applied on the run, and after a restart the
-// stored values win over the environment.
+// with stand settings (decision 0014): the router seeds the defaults of the
+// code, the simulator starts with the stored set (not with its config), a
+// change from the console is applied on the run, and after a restart the
+// stored values still win. The simulator never writes the settings.
 func TestIntegrationStandSettings(t *testing.T) {
-	env := startRouter(t)
+	env := startRouterWith(t, nil)
 	client, err := opclient.New(env.apiURL)
 	if err != nil {
 		t.Fatal(err)
@@ -35,45 +36,72 @@ func TestIntegrationStandSettings(t *testing.T) {
 	online := func(capacity int) int64 {
 		return env.count(`SELECT count(*) FROM operators WHERE presence = 'online' AND id LIKE 'sim-op-%' AND capacity = $1`, capacity)
 	}
-	sim := env.startSimWith(b)
-	itWait(t, 30*time.Second, "10 operators online with capacity 2", func() bool { return online(2) == 10 })
-	set, err := client.Settings(t.Context())
+	set, err := client.SettingsWithChanges(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if set.Stand == nil || set.Stand.Version != 1 || set.Stand.Current.Sim == nil ||
-		*set.Stand.Current.Sim != simOf(b, set.CapacityDefault) {
-		t.Fatalf("stand after the first report: %+v", set.Stand)
+	def := opapi.DefaultStandSettings()
+	if set.Stand == nil || set.Stand.Version != 1 || !set.Stand.Current.Equal(def) || !set.Stand.Defaults.Equal(def) ||
+		len(set.Stand.Changes) != 1 || set.Stand.Changes[0].By != opapi.ByDefaults {
+		t.Fatalf("stand after the seed: %+v", set.Stand)
 	}
 
 	next := set.Stand.Current
 	nextSim := *next.Sim
-	nextSim.Operators, nextSim.Capacity = 13, 3
-	next.Sim = &nextSim
-	resp, err := client.PutSettings(t.Context(), opapi.SettingsChangeRequest{Settings: next, BaseVersion: 1, By: "it-test"})
-	if err != nil || resp.Result != opapi.ResultDone {
-		t.Fatalf("PutSettings() = %+v, %v", resp.Result, err)
+	// change stores a sim part with the operator count and the capacity.
+	change := func(base int64, operators, capacity int) {
+		t.Helper()
+		v := nextSim
+		v.Operators, v.Capacity = operators, capacity
+		next.Sim = &v
+		// The router takes one change in 10 seconds.
+		var resp opapi.SettingsChangeResponse
+		var err error
+		itWait(t, 30*time.Second, "a change that is not too soon", func() bool {
+			resp, err = client.PutSettings(t.Context(), opapi.SettingsChangeRequest{Settings: next, BaseVersion: base, By: "it-test"})
+			se, ok := errors.AsType[*opapi.SettingsError](err)
+			return !ok || se.Code != opapi.CodeSettingsTooSoon
+		})
+		if err != nil || resp.Result != opapi.ResultDone {
+			t.Fatalf("PutSettings(%d operators) = %+v, %v", operators, resp.Result, err)
+		}
+		nextSim = v
 	}
+	// The stored set differs from the config of the simulator (10
+	// operators, capacity 2) and from the defaults.
+	change(1, 12, 2)
+	sim := env.startSimWith(b)
+	itWait(t, 30*time.Second, "12 operators online with capacity 2", func() bool { return online(2) == 12 })
+	if got := testutil.ToFloat64(sim.svc.m.settingsVersion); got != 2 {
+		t.Errorf("version metric %v, want 2", got)
+	}
+
+	change(2, 13, 3)
 	itWait(t, 30*time.Second, "13 operators online with capacity 3", func() bool { return online(3) == 13 })
-	itWait(t, 10*time.Second, "version metric 2", func() bool { return testutil.ToFloat64(sim.svc.m.settingsVersion) == 2 })
+	itWait(t, 10*time.Second, "version metric 3", func() bool { return testutil.ToFloat64(sim.svc.m.settingsVersion) == 3 })
 	if got := testutil.ToFloat64(sim.svc.m.settingsChanges); got != 1 {
 		t.Errorf("changes metric %v, want 1", got)
 	}
 
-	// A restart reports the environment again; the stored set wins.
+	// A restart reads the stored set again.
 	sim.stop(t)
 	itWait(t, 30*time.Second, "every operator offline after the stop", func() bool {
 		return env.count(`SELECT count(*) FROM operators WHERE presence = 'online'`) == 0
 	})
 	sim2 := env.startSimWith(b)
 	itWait(t, 30*time.Second, "13 operators online with capacity 3 after the restart", func() bool { return online(3) == 13 })
-	set, err = client.Settings(t.Context())
+	set, err = client.SettingsWithChanges(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if set.Stand == nil || set.Stand.Version != 2 || *set.Stand.Current.Sim != nextSim ||
-		*set.Stand.Defaults.Sim != simOf(b, set.CapacityDefault) {
+	if set.Stand == nil || set.Stand.Version != 3 || *set.Stand.Current.Sim != nextSim ||
+		*set.Stand.Defaults.Sim != opapi.DefaultSimSettings() || len(set.Stand.Changes) != 3 {
 		t.Errorf("stand after the restart: %+v", set.Stand)
+	}
+	for _, c := range set.Stand.Changes {
+		if c.By == opapi.BySimulator {
+			t.Errorf("the simulator wrote a change: %+v", c)
+		}
 	}
 
 	// The languages stored in the router never change: a lower count, a
@@ -102,25 +130,8 @@ func TestIntegrationStandSettings(t *testing.T) {
 		}
 	}
 	checkLangs("after the first restart", 13)
-	change := func(base int64, operators int) {
-		t.Helper()
-		v := nextSim
-		v.Operators = operators
-		next.Sim = &v
-		// The router takes one change in 10 seconds.
-		var resp opapi.SettingsChangeResponse
-		var err error
-		itWait(t, 30*time.Second, "a change that is not too soon", func() bool {
-			resp, err = client.PutSettings(t.Context(), opapi.SettingsChangeRequest{Settings: next, BaseVersion: base, By: "it-test"})
-			se, ok := errors.AsType[*opapi.SettingsError](err)
-			return !ok || se.Code != opapi.CodeSettingsTooSoon
-		})
-		if err != nil || resp.Result != opapi.ResultDone {
-			t.Fatalf("PutSettings(%d operators) = %+v, %v", operators, resp.Result, err)
-		}
-	}
 	// The router allows counts from 10 on.
-	change(2, 11)
+	change(3, 11, 3)
 	itWait(t, 30*time.Second, "11 operators online", func() bool {
 		return online(3) == 11 && env.count(`SELECT count(*) FROM operators WHERE presence = 'online'`) == 11
 	})
@@ -142,7 +153,7 @@ func TestIntegrationStandSettings(t *testing.T) {
 	}
 	checkLangs("after the restart at 11", 13)
 
-	change(3, 16)
+	change(4, 16, 3)
 	itWait(t, 30*time.Second, "16 operators online", func() bool { return online(3) == 16 })
 	checkLangs("after 16", 16)
 	if got := testutil.ToFloat64(sim3.svc.m.operatorsAside); got != 0 {

@@ -1,10 +1,13 @@
 package routersvc
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg"
 )
 
@@ -62,8 +65,6 @@ func TestLoadValues(t *testing.T) {
 		EnvSpeedFactor:         "50",
 		EnvOperatorCapacity:    "6",
 		EnvAcceptTimeout:       "5s",
-		EnvTeamFormLoad:        "10",
-		EnvTeamReleaseLoad:     "3",
 		EnvAssignWorkers:       "8",
 		EnvPublishBatch:        "200",
 		EnvOutboxKeep:          "30m",
@@ -79,8 +80,7 @@ func TestLoadValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(cfg.KafkaBrokers) != 2 || cfg.APIAddr != "0.0.0.0:9500" || cfg.Router.SpeedFactor != 50 ||
-		cfg.Router.Capacity != 6 || cfg.Router.AcceptTimeout != 5*time.Second || cfg.Router.TeamFormLoad != 10 ||
-		cfg.Router.TeamReleaseLoad != 3 || cfg.AssignWorkers != 8 || cfg.PublishBatch != 200 ||
+		cfg.Router.Capacity != 6 || cfg.Router.AcceptTimeout != 5*time.Second || cfg.AssignWorkers != 8 || cfg.PublishBatch != 200 ||
 		cfg.OutboxKeep != 30*time.Minute || cfg.Postgres.MaxConns != 16 || cfg.Postgres.ConnectWait != 10*time.Second ||
 		cfg.ExpireInterval != 500*time.Millisecond || cfg.Router.FirstResponseTarget != 90*time.Second ||
 		cfg.OperatorRefresh != 2*time.Hour {
@@ -91,21 +91,75 @@ func TestLoadValues(t *testing.T) {
 	}
 }
 
-func TestLoadTeamMaxShare(t *testing.T) {
-	for _, tt := range []struct {
-		v    string
-		want float64
-	}{
-		{"", 0.5}, {"1", 1}, {"0.2", 0.2}, {" 0.75 ", 0.75}, {"1e-1", 0.1},
-	} {
-		cfg, err := Load(lookupFrom(map[string]string{EnvTeamMaxShare: tt.v}))
+// TestLoadIgnoresRemovedVars: the team numbers are stand settings
+// (decision 0014). Their old variables are not read, so even a value that
+// does not parse keeps the defaults of the code and is no error.
+func TestLoadIgnoresRemovedVars(t *testing.T) {
+	for _, v := range []string{"10", "abc", "-1", "0.01"} {
+		env := map[string]string{}
+		for _, key := range RemovedVars {
+			env[key] = v
+		}
+		cfg, err := Load(lookupFrom(env))
 		if err != nil {
-			t.Errorf("Load(%s=%q) error = %v", EnvTeamMaxShare, tt.v, err)
-			continue
+			t.Fatalf("Load() with removed variables set to %q: %v", v, err)
 		}
-		if cfg.Router.TeamMaxShare != tt.want {
-			t.Errorf("Load(%s=%q) share = %v, want %v", EnvTeamMaxShare, tt.v, cfg.Router.TeamMaxShare, tt.want)
+		got := opapi.TeamSettings{
+			FormLoad: cfg.Router.TeamFormLoad, ReleaseLoad: cfg.Router.TeamReleaseLoad,
+			ReleaseAfterUS: cfg.Router.TeamReleaseAfter.Microseconds(), MinSize: cfg.Router.TeamMinSize,
+			MaxSize: cfg.Router.TeamMaxSize, MaxShare: cfg.Router.TeamMaxShare,
 		}
+		if got != opapi.DefaultTeamSettings() {
+			t.Errorf("team numbers with removed variables set to %q = %+v, want the defaults", v, got)
+		}
+	}
+	// THREADROUTE_ROUTER_TEAM_INTERVAL is not a stand setting and stays.
+	cfg, err := Load(lookupFrom(map[string]string{EnvTeamInterval: "30s"}))
+	if err != nil || cfg.TeamInterval != 30*time.Second {
+		t.Errorf("team interval = %s, %v; want 30s", cfg.TeamInterval, err)
+	}
+}
+
+func TestWarnRemoved(t *testing.T) {
+	want := []string{
+		"THREADROUTE_ROUTER_TEAM_FORM_LOAD", "THREADROUTE_ROUTER_TEAM_RELEASE_LOAD", "THREADROUTE_ROUTER_TEAM_RELEASE_AFTER",
+		"THREADROUTE_ROUTER_TEAM_MIN_SIZE", "THREADROUTE_ROUTER_TEAM_MAX_SIZE", "THREADROUTE_ROUTER_TEAM_MAX_SHARE",
+	}
+	if strings.Join(RemovedVars, ",") != strings.Join(want, ",") {
+		t.Fatalf("RemovedVars = %v, want %v", RemovedVars, want)
+	}
+	tests := []struct {
+		name string
+		env  map[string]string
+		want []string
+	}{
+		{"none set", nil, nil},
+		{"empty and blank values", map[string]string{want[0]: "", want[1]: "  "}, nil},
+		{"one set", map[string]string{want[0]: "30"}, []string{want[0]}},
+		{"two set", map[string]string{want[2]: "10m", want[5]: "abc"}, []string{want[2], want[5]}},
+		{"other variables", map[string]string{EnvTeamInterval: "10s", EnvSpeedFactor: "2"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			WarnRemoved(lookupFrom(tt.env), slog.New(slog.NewTextHandler(&buf, nil)))
+			lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+			if buf.Len() == 0 {
+				lines = nil
+			}
+			if len(lines) != len(tt.want) {
+				t.Fatalf("%d log lines, want %d:\n%s", len(lines), len(tt.want), buf.String())
+			}
+			for i, line := range lines {
+				if !strings.Contains(line, "level=WARN") || !strings.Contains(line, "variable="+tt.want[i]) ||
+					!strings.Contains(line, "stand settings") || !strings.Contains(line, "PUT /v1/settings") {
+					t.Errorf("line %q does not warn about %s", line, tt.want[i])
+				}
+				if strings.Contains(line, "abc") || strings.Contains(line, "10m") {
+					t.Errorf("line %q holds the value", line)
+				}
+			}
+		})
 	}
 }
 
@@ -126,20 +180,12 @@ func TestLoadErrors(t *testing.T) {
 		{"duration word", map[string]string{EnvAcceptTimeout: "soon"}, []string{EnvAcceptTimeout}},
 		{"duration negative", map[string]string{EnvSLAInterval: "-1s"}, []string{EnvSLAInterval}},
 		{"duration nanoseconds", map[string]string{EnvAssignmentTarget: "1500ns"}, []string{EnvAssignmentTarget}},
-		{"thresholds", map[string]string{EnvTeamFormLoad: "8", EnvTeamReleaseLoad: "8"}, []string{EnvTeamFormLoad}},
-		{"sizes", map[string]string{EnvTeamMinSize: "5", EnvTeamMaxSize: "4"}, []string{EnvTeamMaxSize}},
 		{"workers", map[string]string{EnvAssignWorkers: "0"}, []string{EnvAssignWorkers}},
 		{"batch", map[string]string{EnvPublishBatch: "x"}, []string{EnvPublishBatch}},
 		{"log level", map[string]string{EnvLogLevel: "loud"}, []string{EnvLogLevel}},
 		{"max conns", map[string]string{pg.EnvMaxConns: "0"}, []string{pg.EnvMaxConns}},
 		{"refresh not positive", map[string]string{EnvOperatorRefresh: "-1h"}, []string{EnvOperatorRefresh}},
 		{"several", map[string]string{EnvOutageLimit: "0s", EnvPruneInterval: "x"}, []string{EnvOutageLimit, EnvPruneInterval}},
-		{"share zero", map[string]string{EnvTeamMaxShare: "0"}, []string{EnvTeamMaxShare}},
-		{"share negative", map[string]string{EnvTeamMaxShare: "-0.5"}, []string{EnvTeamMaxShare}},
-		{"share above 1", map[string]string{EnvTeamMaxShare: "1.01"}, []string{EnvTeamMaxShare}},
-		{"share not a number", map[string]string{EnvTeamMaxShare: "half"}, []string{EnvTeamMaxShare}},
-		{"share NaN", map[string]string{EnvTeamMaxShare: "NaN"}, []string{EnvTeamMaxShare}},
-		{"share Inf", map[string]string{EnvTeamMaxShare: "Inf"}, []string{EnvTeamMaxShare}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -11,11 +11,17 @@ import (
 // # Stand settings (decision 0014)
 //
 // The stand settings are the numbers that a person may change from the
-// console while the stand runs. The router stores them with a version
-// number and a change log, uses the teams part itself, and keeps the sim
-// part for the simulator, which reads it with PatternSettings. Every
-// change goes through PatternPutSettings; the simulator reports the values
-// of its own environment with PatternPutSimDefaults.
+// console while the stand runs. They are state of the stand, not
+// configuration: no environment variable sets them. The router stores them
+// with a version number and a change log, uses the teams part itself, and
+// keeps the sim part for the simulator, which only reads it with
+// PatternSettings. Every change goes through PatternPutSettings.
+//
+// The default of every value is in this file, next to its bound
+// (DefaultStandSettings). At a start on a database without a stored set,
+// the router stores the defaults as version 1 and logs that change with the
+// label ByDefaults. "Reset to defaults" in the console is an ordinary change
+// to these values.
 //
 // # Numbers in JSON
 //
@@ -77,13 +83,83 @@ const (
 	MaxSimMissedOfferShare = 0.5
 )
 
+// Defaults of the stand settings, the table of decision 0014. This is the
+// only place that gives them: the router, the simulator and the answers of
+// the operator API take them from here. Durations are model time. Every
+// default is within the bounds above, which a test checks.
+const (
+	// DefaultTeamFormLoad is the default load that forms a team.
+	DefaultTeamFormLoad = 20
+	// DefaultTeamReleaseLoad is the default load that releases a team.
+	DefaultTeamReleaseLoad = 8
+	// DefaultTeamReleaseAfter is the default release time.
+	DefaultTeamReleaseAfter = 15 * time.Minute
+	// DefaultTeamMinSize and DefaultTeamMaxSize are the default team size
+	// bounds.
+	DefaultTeamMinSize = 2
+	DefaultTeamMaxSize = 20
+	// DefaultTeamMaxShare is the default share of the online operators that
+	// all teams together may hold (decision 0009, "A cap on the operators
+	// that teams hold").
+	DefaultTeamMaxShare = 0.5
+
+	// DefaultSimOperators is the default number of simulated operators. It
+	// was sized after the first live run of stage 2, from the number of open
+	// conversations.
+	DefaultSimOperators = 200
+	// DefaultSimCapacity is the default capacity of a simulated operator.
+	// It is the router default capacity of decision 0009, which the stand
+	// ran with before decision 0014.
+	DefaultSimCapacity = 4
+	// DefaultSimHandlingMedian is the default median time from the accept
+	// to the reply.
+	DefaultSimHandlingMedian = 45 * time.Second
+	// DefaultSimResolveMedian is the default median time from the reply to
+	// the resolve.
+	DefaultSimResolveMedian = 3 * time.Minute
+	// DefaultSimMissedOfferShare is the default share of offers that a
+	// simulated operator does not answer at all.
+	DefaultSimMissedOfferShare = 0.03
+)
+
+// DefaultTeamSettings returns the defaults of the teams part.
+func DefaultTeamSettings() TeamSettings {
+	return TeamSettings{
+		FormLoad:       DefaultTeamFormLoad,
+		ReleaseLoad:    DefaultTeamReleaseLoad,
+		ReleaseAfterUS: DefaultTeamReleaseAfter.Microseconds(),
+		MinSize:        DefaultTeamMinSize,
+		MaxSize:        DefaultTeamMaxSize,
+		MaxShare:       DefaultTeamMaxShare,
+	}
+}
+
+// DefaultSimSettings returns the defaults of the sim part.
+func DefaultSimSettings() SimSettings {
+	return SimSettings{
+		Operators:        DefaultSimOperators,
+		Capacity:         DefaultSimCapacity,
+		HandlingMedianUS: DefaultSimHandlingMedian.Microseconds(),
+		ResolveMedianUS:  DefaultSimResolveMedian.Microseconds(),
+		MissedOfferShare: DefaultSimMissedOfferShare,
+	}
+}
+
+// DefaultStandSettings returns the defaults of the whole set, with both
+// parts. Each call returns a new sim part.
+func DefaultStandSettings() StandSettings {
+	sim := DefaultSimSettings()
+	return StandSettings{Teams: DefaultTeamSettings(), Sim: &sim}
+}
+
 // Limits of the stand settings calls.
 const (
 	// SettingsChangeInterval is the shortest time between two changes by
 	// PatternPutSettings, for the whole stand (decision 0014, point 6). It
 	// is machine time: it is about people, not about routing. It counts
-	// from the last change applied by PatternPutSettings. A change made by
-	// PatternPutSimDefaults is not limited and does not start the time.
+	// from the last change applied by PatternPutSettings. The change that
+	// stores the defaults (ByDefaults) is not limited and does not start
+	// the time.
 	SettingsChangeInterval = 10 * time.Second
 	// MaxSettingsChanges is the most entries of StandState.Changes.
 	MaxSettingsChanges = 20
@@ -94,10 +170,23 @@ const (
 	SettingsPollInterval = 5 * time.Second
 )
 
-// BySimulator is the "by" label of the change that the router logs when the
-// first report of a simulator becomes the current sim part. It is reserved:
-// PatternPutSettings refuses it.
-const BySimulator = "simulator"
+// Reserved "by" labels of the change log. PatternPutSettings refuses both
+// (see ReservedBy).
+const (
+	// ByDefaults is the label of the change that the router logs when it
+	// stores the defaults: at a start on a database without a stored set,
+	// or when the stored set has no sim part.
+	ByDefaults = "defaults"
+	// BySimulator was the label of the change that the router logged when
+	// the first report of a simulator became the current sim part. The
+	// simulator no longer reports, so no new change carries it, but old
+	// rows of the change log may.
+	BySimulator = "simulator"
+)
+
+// ReservedBy reports whether a "by" label is reserved for the router, so
+// that a change request may not carry it.
+func ReservedBy(by string) bool { return by == ByDefaults || by == BySimulator }
 
 // Field names of the stand settings: the path of each value inside a
 // StandSettings, as JSON names joined with ".". FieldError.Field and
@@ -141,8 +230,9 @@ var SettingsFields = []string{
 // simulator uses. A change always carries the whole set.
 type StandSettings struct {
 	Teams TeamSettings `json:"teams"`
-	// Sim is absent until a simulator has reported its values with
-	// PatternPutSimDefaults.
+	// Sim is the sim part. A router stores it with the defaults at its
+	// start, so it is absent only at version 0 (nothing stored) and in the
+	// answers of a router from before that rule.
 	Sim *SimSettings `json:"sim,omitempty"`
 }
 
@@ -171,10 +261,8 @@ type TeamSettings struct {
 type SimSettings struct {
 	// Operators is the number of simulated operators.
 	Operators int `json:"operators"`
-	// Capacity is the capacity of each simulated operator. Unlike the
-	// environment of the simulator, it has no "0 takes the router
-	// default": a simulator whose environment has 0 reports
-	// Settings.CapacityDefault.
+	// Capacity is the capacity of each simulated operator. It has no "0
+	// takes the router default".
 	Capacity int `json:"capacity"`
 	// HandlingMedianUS is the median time from the accept to the reply, in
 	// model time, in whole microseconds.
@@ -481,8 +569,9 @@ type FieldChange struct {
 	// Field is a name from SettingsFields.
 	Field string `json:"field"`
 	// Old is the value before the change. It is absent when the set had no
-	// value for the field: the sim part that the first simulator report
-	// added.
+	// value for the field: every field of the change that stored the
+	// defaults on an empty database, and the sim fields when the defaults
+	// of the sim part were added to a stored set without one.
 	Old *float64 `json:"old,omitempty"`
 	// New is the value after the change.
 	New float64 `json:"new"`
@@ -495,8 +584,9 @@ type SettingsChange struct {
 	ChangedAtUS int64 `json:"changed_at_us"`
 	// Version is the version of the set after the change.
 	Version int64 `json:"version"`
-	// By says who made the change: BySimulator, or the label the gateway
-	// sent in SettingsChangeRequest.By. It may hold a user ID of the site,
+	// By says who made the change: ByDefaults, the label the gateway sent
+	// in SettingsChangeRequest.By, or BySimulator in an old row. It may
+	// hold a user ID of the site,
 	// so gwapi sends it only to a connection that may change settings;
 	// for any other connection it is absent.
 	By string `json:"by,omitempty"`
@@ -507,16 +597,16 @@ type SettingsChange struct {
 
 // StandState is the stand settings block of Settings.
 type StandState struct {
-	// Version is the version of the current set. 0 means that nothing is
-	// stored yet: Current holds the values of the router environment and
-	// has no sim part. Each change adds 1.
+	// Version is the version of the current set. Each change adds 1. A
+	// router stores the defaults as version 1 at its first start, so 0
+	// (nothing stored, Current holds the team defaults and has no sim part)
+	// only comes from a router from before that rule.
 	Version int64 `json:"version"`
 	// Current is the set in use.
 	Current StandSettings `json:"current"`
-	// Defaults are the values of the environments: the teams part from the
-	// router, the sim part from the last report of a simulator. Defaults
-	// are not versioned: a report that changes only them does not change
-	// Version. "Reset to defaults" is a change to this set like any other.
+	// Defaults are the defaults of the code (DefaultStandSettings), with
+	// the sim part exactly when Current has one. They are not versioned.
+	// "Reset to defaults" is a change to this set like any other.
 	Defaults StandSettings `json:"defaults"`
 	// Changes are the newest entries of the change log, at most
 	// MaxSettingsChanges, newest first. Only the answers that
@@ -648,7 +738,7 @@ type SettingsChangeRequest struct {
 	// while nothing is stored.
 	BaseVersion int64 `json:"base_version"`
 	// By says who asks, for the change log (see CheckBy). The gateway
-	// chooses it. BySimulator is reserved.
+	// chooses it. ByDefaults and BySimulator are reserved (ReservedBy).
 	By string `json:"by"`
 }
 
@@ -664,8 +754,8 @@ func (r SettingsChangeRequest) FieldErrors() []FieldError {
 	switch err := CheckBy(r.By); {
 	case err != nil:
 		out = append(out, FieldError{FieldBy, err.Error()})
-	case r.By == BySimulator:
-		out = append(out, FieldError{FieldBy, fmt.Sprintf("%q is reserved", BySimulator)})
+	case ReservedBy(r.By):
+		out = append(out, FieldError{FieldBy, fmt.Sprintf("%q is reserved", r.By)})
 	}
 	return out
 }
@@ -684,34 +774,8 @@ type SettingsChangeResponse struct {
 	Settings Settings `json:"settings"`
 }
 
-// SimDefaultsRequest is the body of PatternPutSimDefaults.
-type SimDefaultsRequest struct {
-	// Sim holds the values of the simulator environment.
-	Sim SimSettings `json:"sim"`
-}
-
-// FieldErrors reports every invalid field, with the names of
-// SettingsFields ("sim.operators").
-func (r SimDefaultsRequest) FieldErrors() []FieldError { return r.Sim.FieldErrors() }
-
-// Validate reports every invalid field.
-func (r SimDefaultsRequest) Validate() error { return JoinFieldErrors(r.FieldErrors()) }
-
-// SimDefaultsResponse is the answer of PatternPutSimDefaults when the call
-// succeeded (HTTP 200).
-type SimDefaultsResponse struct {
-	// Result is ResultDone when the defaults or the current set changed,
-	// and ResultAlreadyDone when both already held these values.
-	Result Result `json:"result"`
-	// Settings are the settings after the call, without
-	// StandState.Changes. The simulator runs with
-	// Settings.Stand.Current.Sim, which differs from its environment when
-	// the console changed it.
-	Settings Settings `json:"settings"`
-}
-
-// SettingsError is an error answer of PatternPutSettings or
-// PatternPutSimDefaults as a Go error, for the caller side, like Error.
+// SettingsError is an error answer of PatternPutSettings as a Go error, for
+// the caller side, like Error.
 // Use errors.As to read the code and the details.
 type SettingsError struct {
 	// Status is the HTTP status of the answer.
@@ -728,8 +792,7 @@ func (e *SettingsError) Error() string {
 }
 
 // SettingsErrorResponse is the body of every error answer of
-// PatternPutSettings and PatternPutSimDefaults: an ErrorResponse with the
-// details of its code. A client that knows only ErrorResponse can read it
+// PatternPutSettings: an ErrorResponse with the details of its code. A client that knows only ErrorResponse can read it
 // too.
 type SettingsErrorResponse struct {
 	ErrorResponse

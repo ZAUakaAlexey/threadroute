@@ -36,11 +36,8 @@ func run(ctx context.Context, cfg routersvc.Config, logger *slog.Logger, reg *pr
 		"accept_timeout", rc.AcceptTimeout.String(),
 		"assignment_target", rc.AssignmentTarget.String(),
 		"first_response_target", rc.FirstResponseTarget.String(),
-		"team_form_load", rc.TeamFormLoad,
-		"team_release_load", rc.TeamReleaseLoad,
-		"team_release_after", rc.TeamReleaseAfter.String(),
-		"team_size", []int{rc.TeamMinSize, rc.TeamMaxSize},
-		"team_max_share", rc.TeamMaxShare,
+		// The team numbers are stand settings (decision 0014): the router
+		// logs them when it has read the stored set.
 		"assign_workers", cfg.AssignWorkers,
 		"outage_limit", cfg.OutageLimit.String(),
 		"operator_refresh", cfg.OperatorRefresh.String(),

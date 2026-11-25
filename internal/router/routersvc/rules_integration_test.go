@@ -87,7 +87,10 @@ func testRoutingRules(t *testing.T, h *harness) {
 func testTeamOverflow(t *testing.T, h *harness) {
 	sc := h.newScenario(t)
 	sc.rcfg.AcceptTimeout = longAcceptTimeout
-	sc.rcfg.TeamReleaseAfter = 24 * time.Hour
+	// The team is not released while the test runs: the conversations stay
+	// open, and the release time is the highest that the stand settings
+	// allow (2 hours of model time, 6 minutes of machine time).
+	sc.rcfg.TeamReleaseAfter = opapi.MaxTeamReleaseAfter
 	// Three active conversations form a team of one. The cap of one half
 	// of two online operators leaves room for it.
 	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1

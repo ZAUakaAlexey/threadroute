@@ -30,18 +30,35 @@ const (
 	EnvMetricsAddr = Prefix + "SIM_METRICS_ADDR"
 	EnvOutageLimit = Prefix + "SIM_OUTAGE_LIMIT"
 
-	EnvOperators        = Prefix + "SIM_OPERATORS"
-	EnvLanguages        = Prefix + "SIM_LANGUAGES"
-	EnvCapacity         = Prefix + "SIM_CAPACITY"
-	EnvShiftOnline      = Prefix + "SIM_SHIFT_ONLINE"
-	EnvShiftOffline     = Prefix + "SIM_SHIFT_OFFLINE"
-	EnvAcceptDelayMin   = Prefix + "SIM_ACCEPT_DELAY_MIN"
-	EnvAcceptDelayMax   = Prefix + "SIM_ACCEPT_DELAY_MAX"
-	EnvMissedOfferShare = Prefix + "SIM_MISSED_OFFER_SHARE"
-	EnvHandlingMedian   = Prefix + "SIM_HANDLING_MEDIAN"
-	EnvResolveMedian    = Prefix + "SIM_RESOLVE_MEDIAN"
-	EnvSeed             = Prefix + "SIM_SEED"
+	EnvLanguages      = Prefix + "SIM_LANGUAGES"
+	EnvShiftOnline    = Prefix + "SIM_SHIFT_ONLINE"
+	EnvShiftOffline   = Prefix + "SIM_SHIFT_OFFLINE"
+	EnvAcceptDelayMin = Prefix + "SIM_ACCEPT_DELAY_MIN"
+	EnvAcceptDelayMax = Prefix + "SIM_ACCEPT_DELAY_MAX"
+	EnvSeed           = Prefix + "SIM_SEED"
 )
+
+// RemovedVars are the variables of the sim numbers that the simulator read
+// before decision 0014 moved them into the stand settings. Load does not
+// read them; WarnRemoved logs a warning for each one that is still set.
+var RemovedVars = []string{
+	Prefix + "SIM_OPERATORS",
+	Prefix + "SIM_CAPACITY",
+	Prefix + "SIM_HANDLING_MEDIAN",
+	Prefix + "SIM_RESOLVE_MEDIAN",
+	Prefix + "SIM_MISSED_OFFER_SHARE",
+}
+
+// WarnRemoved logs one warning for each variable of RemovedVars that is
+// set to a value that is not empty. The value is not read.
+func WarnRemoved(lookup LookupFunc, logger *slog.Logger) {
+	for _, key := range RemovedVars {
+		if v, ok := lookup(key); ok && strings.TrimSpace(v) != "" {
+			logger.Warn("environment variable is no longer read: the value now lives in the stand settings; "+
+				"change it in the console or with PUT /v1/settings of the router operator API", "variable", key)
+		}
+	}
+}
 
 // Defaults that are not behaviour rules. The behaviour defaults come from
 // internal/defaults through DefaultBehaviour.
@@ -68,6 +85,12 @@ const (
 // Behaviour is how the simulated operators act (decision 0010). Every
 // duration is model time: the simulator divides it by the speed factor of
 // the router.
+//
+// Operators, Capacity, MissedOfferShare, HandlingMedian and ResolveMedian
+// are the sim part of the stand settings (decision 0014). Load fills them
+// with the defaults of the code (opapi.DefaultSimSettings). The simulator
+// runs with them only while the router offers no stand settings; otherwise
+// the stored sim part replaces them.
 type Behaviour struct {
 	// Operators is the number of operators, 1 to MaxOperators.
 	Operators int
@@ -75,7 +98,7 @@ type Behaviour struct {
 	// language of each operator number.
 	Languages Spread
 	// Capacity is the capacity of each operator. 0 takes the router
-	// default.
+	// default; Load never sets 0.
 	Capacity int
 	// ShiftOnline and ShiftOffline are the two parts of a shift.
 	ShiftOnline  time.Duration
@@ -99,16 +122,18 @@ func DefaultBehaviour() Behaviour {
 	// The constant parses, which a test checks. If it did not, Languages
 	// would be nil and Validate would report it.
 	spread, _ := ParseSpread(defaults.SimLanguages)
+	sim := opapi.DefaultSimSettings()
 	return Behaviour{
-		Operators:        defaults.SimOperators,
+		Operators:        sim.Operators,
 		Languages:        spread,
+		Capacity:         sim.Capacity,
 		ShiftOnline:      defaults.SimShiftOnline,
 		ShiftOffline:     defaults.SimShiftOffline,
 		AcceptDelayMin:   defaults.SimAcceptDelayMin,
 		AcceptDelayMax:   defaults.SimAcceptDelayMax,
-		MissedOfferShare: defaults.SimMissedOfferShare,
-		HandlingMedian:   defaults.SimHandlingMedian,
-		ResolveMedian:    defaults.SimResolveMedian,
+		MissedOfferShare: sim.MissedOfferShare,
+		HandlingMedian:   sim.HandlingMedian(),
+		ResolveMedian:    sim.ResolveMedian(),
 		Seed:             DefaultSeed,
 	}
 }
@@ -213,16 +238,16 @@ func Load(lookup LookupFunc) (Config, error) {
 		OutageLimit:  r.duration(EnvOutageLimit, DefaultOutageLimit, false),
 		LogLevel:     r.logLevel(EnvLogLevel, DefaultLogLevel),
 		Behaviour: Behaviour{
-			Operators:        r.intBetween(EnvOperators, d.Operators, 1, MaxOperators),
+			Operators:        d.Operators,
 			Languages:        r.spread(EnvLanguages, d.Languages),
-			Capacity:         r.intBetween(EnvCapacity, d.Capacity, 0, opapi.MaxCapacity),
+			Capacity:         d.Capacity,
 			ShiftOnline:      r.duration(EnvShiftOnline, d.ShiftOnline, false),
 			ShiftOffline:     r.duration(EnvShiftOffline, d.ShiftOffline, false),
 			AcceptDelayMin:   r.duration(EnvAcceptDelayMin, d.AcceptDelayMin, true),
 			AcceptDelayMax:   r.duration(EnvAcceptDelayMax, d.AcceptDelayMax, false),
-			MissedOfferShare: r.share(EnvMissedOfferShare, d.MissedOfferShare),
-			HandlingMedian:   r.duration(EnvHandlingMedian, d.HandlingMedian, false),
-			ResolveMedian:    r.duration(EnvResolveMedian, d.ResolveMedian, false),
+			MissedOfferShare: d.MissedOfferShare,
+			HandlingMedian:   d.HandlingMedian,
+			ResolveMedian:    d.ResolveMedian,
 			Seed:             r.seed(EnvSeed, d.Seed),
 		},
 	}
@@ -335,23 +360,6 @@ func (r *reader) logLevel(key string, def slog.Level) slog.Level {
 	return l
 }
 
-func (r *reader) intBetween(key string, def, least, most int) int {
-	v, ok := r.get(key)
-	if !ok {
-		return def
-	}
-	n, err := strconv.Atoi(v)
-	if err != nil {
-		r.fail(key, fmt.Errorf("%q is not a whole number", v))
-		return 0
-	}
-	if n < least || n > most {
-		r.fail(key, fmt.Errorf("%d is not between %d and %d", n, least, most))
-		return 0
-	}
-	return n
-}
-
 // duration reads a duration. zeroOK allows 0.
 func (r *reader) duration(key string, def time.Duration, zeroOK bool) time.Duration {
 	v, ok := r.get(key)
@@ -368,19 +376,6 @@ func (r *reader) duration(key string, def time.Duration, zeroOK bool) time.Durat
 		return 0
 	}
 	return d
-}
-
-func (r *reader) share(key string, def float64) float64 {
-	v, ok := r.get(key)
-	if !ok {
-		return def
-	}
-	f, err := strconv.ParseFloat(v, 64)
-	if err != nil || math.IsNaN(f) || f < 0 || f > 1 {
-		r.fail(key, fmt.Errorf("%q is not a number between 0 and 1", v))
-		return 0
-	}
-	return f
 }
 
 func (r *reader) seed(key string, def uint64) uint64 {

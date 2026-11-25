@@ -24,8 +24,8 @@ func TestPatternsRegister(t *testing.T) {
 	for _, p := range allPatterns() {
 		mux.HandleFunc(p, func(http.ResponseWriter, *http.Request) {})
 	}
-	if len(Patterns) != 8 || len(SettingsPatterns) != 2 {
-		t.Errorf("len(Patterns) = %d, len(SettingsPatterns) = %d, want 8 and 2", len(Patterns), len(SettingsPatterns))
+	if len(Patterns) != 8 || len(SettingsPatterns) != 1 {
+		t.Errorf("len(Patterns) = %d, len(SettingsPatterns) = %d, want 8 and 1", len(Patterns), len(SettingsPatterns))
 	}
 }
 
@@ -60,7 +60,6 @@ func TestPathsMatchPatterns(t *testing.T) {
 		{http.MethodGet, SettingsPath(), PatternSettings, "", ""},
 		{http.MethodGet, SettingsWithChangesPath(), PatternSettings, "", ""},
 		{http.MethodPut, SettingsPath(), PatternPutSettings, "", ""},
-		{http.MethodPut, SimDefaultsPath(), PatternPutSimDefaults, "", ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.method+" "+tt.path, func(t *testing.T) {

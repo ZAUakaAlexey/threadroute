@@ -30,6 +30,8 @@ func runMain() int {
 		return 2
 	}
 	logger := obs.NewLogger(os.Stderr, cfg.LogLevel)
+	// The team numbers are stand settings now (decision 0014).
+	routersvc.WarnRemoved(os.LookupEnv, logger)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

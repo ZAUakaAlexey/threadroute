@@ -4,6 +4,7 @@ package sim
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -14,14 +15,17 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/twmb/franz-go/pkg/kgo"
 
 	"github.com/ZAUakaAlexey/threadroute/internal/bus"
 	"github.com/ZAUakaAlexey/threadroute/internal/bus/kafkatest"
 	"github.com/ZAUakaAlexey/threadroute/internal/event"
+	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg"
 	"github.com/ZAUakaAlexey/threadroute/internal/pg/pgtest"
 	"github.com/ZAUakaAlexey/threadroute/internal/router"
+	"github.com/ZAUakaAlexey/threadroute/internal/router/opclient"
 	"github.com/ZAUakaAlexey/threadroute/internal/router/routersvc"
 )
 
@@ -34,11 +38,13 @@ const (
 )
 
 // itBehaviour has short shifts, so operators go offline while they hold
-// conversations, and short handling times, so the test ends soon.
+// conversations, and short handling times, so the test ends soon. Its sim
+// part is within the bounds of the stand settings (at least 10 operators),
+// because startRouter stores it as the stand settings.
 func itBehaviour() Behaviour {
 	b := DefaultBehaviour()
-	b.Operators = 6
-	b.Languages = Spread{{Lang: "en", Count: 4}, {Lang: "ja", Count: 2}}
+	b.Operators = 10
+	b.Languages = Spread{{Lang: "en", Count: 7}, {Lang: "ja", Count: 3}}
 	b.Capacity = itCapacity
 	b.ShiftOnline = 60 * time.Second
 	b.ShiftOffline = 15 * time.Second
@@ -61,13 +67,41 @@ type itEnv struct {
 	cl      *kgo.Client
 }
 
+// startRouter starts the router with the sim part of itBehaviour stored as
+// its stand settings, so the simulator runs with these numbers from the
+// stored set, as on a real stand.
 func startRouter(t *testing.T) *itEnv {
 	t.Helper()
+	sim := simOf(itBehaviour(), 0)
+	return startRouterWith(t, &opapi.StandSettings{Teams: opapi.DefaultTeamSettings(), Sim: &sim})
+}
+
+// startRouterWith starts the router on a new database. A stored set is
+// written before the router starts, the way to start a stand with other
+// values; it must be within the bounds of opapi. nil lets the router seed
+// the defaults of the code. The router must offer the stand settings.
+func startRouterWith(t *testing.T, stored *opapi.StandSettings) *itEnv {
+	t.Helper()
+	if stored != nil {
+		if err := stored.Validate(); err != nil || stored.Sim == nil {
+			t.Fatalf("the stored set of the test is outside the bounds of the stand settings or has no sim part: %v", err)
+		}
+	}
 	brokers := []string{kafkatest.Start(t)}
 	dsn := pgtest.Start(t)
 	pool := pgtest.Open(t, dsn)
 	if err := pg.Migrate(t.Context(), pool, nil); err != nil {
 		t.Fatal(err)
+	}
+	if stored != nil {
+		b, err := json.Marshal(stored)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(t.Context(), `INSERT INTO stand_settings (version, current_set, updated_at)
+			VALUES (1, $1, now())`, b); err != nil {
+			t.Fatal(err)
+		}
 	}
 	cl, err := kgo.NewClient(kgo.SeedBrokers(brokers...), kgo.DefaultProduceTopic(bus.TopicConversations))
 	if err != nil {
@@ -127,7 +161,27 @@ func startRouter(t *testing.T) *itEnv {
 		}
 	})
 	itWait(t, 60*time.Second, "router ready", svc.Ready)
-	return &itEnv{t: t, brokers: brokers, pool: pool, apiURL: "http://" + svc.APIAddr(), cl: cl}
+	env := &itEnv{t: t, brokers: brokers, pool: pool, apiURL: "http://" + svc.APIAddr(), cl: cl}
+	env.requireStandOn(stored)
+	return env
+}
+
+// requireStandOn checks that the router offers the stand settings with a
+// sim part, and the stored set when the test wrote one, so no test runs
+// with them off unnoticed.
+func (env *itEnv) requireStandOn(stored *opapi.StandSettings) {
+	env.t.Helper()
+	api, err := opclient.New(env.apiURL)
+	if err != nil {
+		env.t.Fatal(err)
+	}
+	s, err := api.Settings(env.t.Context())
+	if err != nil || s.Stand == nil || s.Stand.Version < 1 || s.Stand.Current.Sim == nil {
+		env.t.Fatalf("stand settings of the router after the start: %+v, %v", s.Stand, err)
+	}
+	if stored != nil && !s.Stand.Current.Equal(*stored) {
+		env.t.Fatalf("stand settings of the router %+v, want the stored set %+v", s.Stand.Current, *stored)
+	}
 }
 
 // runningSim is a simulator that runs in the background.
@@ -164,6 +218,10 @@ func (env *itEnv) startSimWith(b Behaviour) *runningSim {
 	go func() { r.done <- svc.Run(ctx) }()
 	env.t.Cleanup(func() { r.stop(env.t) })
 	itWait(env.t, 60*time.Second, "sim ready", svc.Ready)
+	// The simulator runs with the stored sim part, not with its config.
+	if v := testutil.ToFloat64(svc.m.settingsVersion); v < 1 {
+		env.t.Fatalf("sim settings version %v after the start, want the stand settings on", v)
+	}
 	return r
 }
 
