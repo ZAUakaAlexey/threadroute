@@ -211,7 +211,7 @@ Asks for a change of the stand settings (decision 0014). Send it only when `welc
 |---|---|---|
 | `request_id` | string | as for every request |
 | `base_version` | integer, 0 or more | the `version` of the settings block the set was built from |
-| `settings` | set | the **whole** new set, in the form of `settings.current` (see "Stand settings"). `sim` must be present when `settings.current.sim` is, and absent when it is absent. "Reset to defaults" sends `settings.defaults` |
+| `settings` | set | the **whole** new set, in the form of `settings.current` (see "Stand settings"). `sim` must be present when `settings.current.sim` is, and absent when it is absent. A current router always sends `sim`; only an older router may leave it out. "Reset to defaults" sends `settings.defaults` |
 
 The gateway checks the right, the bounds and the version before it asks the router. Values outside the bounds do not break the message: the answer is a `result` that lists the fields, and the connection stays open. A wrong JSON form does break it (`4400`): a fraction or an exponent in a count, or a string instead of a number.
 
@@ -290,7 +290,7 @@ The stand settings are the numbers that a person may change while the stand runs
   },
   "changes": [
     {"changed_at_us": 1767323040000001, "version": 3, "by": "guest", "fields": [{"field": "teams.form_load", "old": 20, "new": 30}]},
-    {"changed_at_us": 1767319500000001, "version": 1, "by": "simulator", "fields": [{"field": "sim.operators", "new": 200}, {"...": "..."}]}
+    {"changed_at_us": 1767319500000001, "version": 1, "by": "defaults", "fields": [{"field": "teams.form_load", "new": 20}, {"...": "..."}, {"field": "sim.missed_offer_share", "new": 0.03}]}
   ],
   "may_change": true
 }
@@ -298,14 +298,14 @@ The stand settings are the numbers that a person may change while the stand runs
 
 | Field | Meaning |
 |---|---|
-| `version` | the version of `current`. 0 means that nothing is stored yet: `current` holds the starting values of the router, without `sim`. Every change adds 1 |
+| `version` | the version of `current`. Every change adds 1. A router stores the defaults as version 1 at its first start, so a current router never sends 0. 0 (with `current` holding the team values of that router, without `sim`) can only come from an older router before anything was stored |
 | `current` | the set in use |
-| `defaults` | the starting values of the services, for "reset to defaults". They have no version: a simulator that starts with other values changes them without a new version |
+| `defaults` | the defaults of the code, for "reset to defaults". They have no version and do not change while the router runs. `sim` is present in `defaults` exactly when it is present in `current` |
 | `bounds` | the rule of every value. Never hard-code a number in the console |
 | `changes` | the newest changes, at most 20, newest first, never `null` |
 | `may_change` | this connection may send `change_settings` |
 
-**The set.** Two parts. `sim` is absent in `current` and in `defaults` until a simulator has reported its values; it is then present in both.
+**The set.** Two parts. `sim` is present in `current` and in `defaults` from the first start of the router. It is absent in both only in the answer of an older router.
 
 | Field name | Part | Meaning | Unit | Bounds |
 |---|---|---|---|---|
@@ -324,9 +324,9 @@ Every field is always present in its part, also when it is 0. Integers are writt
 
 **Bounds.** Each bound has `min` and `max` (both included) and `integer`. Durations in bounds are whole microseconds of model time, like the values. `below` names a field that the value must be below; `not_above` names a field that the value must not be above. Both name fields of the same set.
 
-**Changes.** Each entry has `changed_at_us` (the machine clock of the router), `version` (the version after the change), `by` and `fields`: the changed values, each with `field`, `old` and `new`. `old` is absent when the set had no value before: the first report of a simulator, whose `by` is `simulator`. Use `changed_at_us` to mark the changes on the trend strip.
+**Changes.** Each entry has `changed_at_us` (the machine clock of the router), `version` (the version after the change), `by` and `fields`: the changed values, each with `field`, `old` and `new`. `old` is absent when the set had no value before: in the change that stored the defaults (`by` is `defaults`), for every field on an empty database, or for the `sim` fields when the router added the defaults of the sim part. Old entries may still have `by` = `simulator` with no `old`. Use `changed_at_us` to mark the changes on the trend strip.
 
-**`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level. The gateway writes it, never the console: `user:` and the site user ID for a site user (for example `user:42`), and `local` for the local role. The router writes `simulator` for the first report of a simulator. Show it as it is.
+**`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level. The gateway writes it, never the console: `user:` and the site user ID for a site user (for example `user:42`), and `local` for the local role. The router writes `defaults` for the change that stores the defaults. A direct call of the operator API (`PUT /v1/settings`, not through the gateway) writes the label its caller chose. `simulator` may appear in old entries. `defaults` and `simulator` are reserved: a change request with one of them is refused. Show it as it is.
 
 **How fast a change acts.** A team number that goes down does not force teams to shrink (decision 0014, point 4): teams above it stop growing and shrink as members leave. The console says "acts gradually" for those numbers.
 
@@ -437,8 +437,8 @@ An offer or an assignment of this connection's operator. It is removed when the 
 | `state` | `"offered"` or `"assigned"` | |
 | `offer_id` | string | the offer, and after accept the assignment. Actions take it |
 | `accept_by_us` | time | offered only: the accept deadline (countdown) |
-| `accepted_at_us` | time | assigned only |
-| `queued_at_us` | time | the waiting time runs from here |
+| `accepted_at_us` | time | assigned only: the accept. The time in work runs from here |
+| `queued_at_us` | time | the waiting time runs from here; after the accept it ends at `accepted_at_us` |
 | `first_response_due_us` | time, optional | when the "time to first response" target is missed; absent when met or missed already |
 | `first_response_missed` | boolean | |
 | `replied` | boolean | the operator marked a reply in this session |
@@ -610,7 +610,7 @@ The server sends deadlines and start times, never a message per second (decision
 
 - `server_now_us = Date.now() * 1000 + offset`, with `offset` from `welcome.server_time_us` (and optionally updated from `state.server_time_us`).
 - Accept countdown: `(accept_by_us - server_now_us)`, in machine time. Show it as model time by multiplying with `speed_factor`, like every other duration on the screens.
-- Waiting time: `(server_now_us - queued_at_us) * speed_factor`.
+- Waiting time: `(server_now_us - queued_at_us) * speed_factor` while the conversation waits or is offered. After the accept the operator screen shows two values instead: "Waited", the fixed time `(accepted_at_us - queued_at_us) * speed_factor`, and "In work", the running time `(server_now_us - accepted_at_us) * speed_factor`.
 - Time left to the first response target: `(first_response_due_us - server_now_us) * speed_factor`.
 - While `status.stale` is true, or the connection is lost, stop the timers.
 
@@ -694,13 +694,13 @@ The examples of decision 0014 are in `internal/gwapi/testdata/settings/`, with t
 | File | Message | Level, view, right | Purpose |
 |---|---|---|---|
 | `client_change_settings.json` | `change_settings` | | change the share of operators in teams, with both parts |
-| `client_change_settings_teams_only.json` | `change_settings` | | a change before any simulator reported: no `sim` |
+| `client_change_settings_teams_only.json` | `change_settings` | | a change for an older router whose set has no sim part: no `sim` |
 | `server_welcome_supervisor_settings_demo.json` | `welcome` | demo, supervisor, no right | settings without `by`, and the trend history |
 | `server_welcome_supervisor_settings_full_may_change.json` | `welcome` | full, supervisor, right | settings with `by` |
 | `server_welcome_operator_settings_demo.json` | `welcome` | demo, operator, no right | settings and no trend |
 | `server_settings_update_demo.json` | `settings` | demo, supervisor, no right | a new current set |
 | `server_settings_update_may_change_demo.json` | `settings` | demo, supervisor, right | the same set for a demo connection whose role may change settings |
-| `server_settings_first_start_demo.json` | `settings` | demo, operator, no right | version 0, no `sim` yet |
+| `server_settings_first_start_demo.json` | `settings` | demo, operator, no right | the block of an older router before anything was stored: version 0, no `sim` |
 | `server_trend_demo.json` | `trend` | demo, supervisor | one new point |
 | `server_result_settings_invalid.json` | `result` | demo, supervisor, right | invalid values with `fields` |
 | `server_result_settings_conflict.json` | `result` | demo, supervisor, right | someone changed the set first |
