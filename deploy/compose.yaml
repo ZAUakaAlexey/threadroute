@@ -28,6 +28,12 @@
 
 name: threadroute
 
+# Every Go service sets GOMEMLIMIT, the soft memory limit of the Go
+# runtime, to about 80 percent of its container limit (200MiB for 256m,
+# 400MiB for 512m), so the garbage collector works harder before the
+# kernel limit is reached. The value cannot live in this anchor, because
+# each service has its own environment block and the merge is shallow.
+# Change the two together.
 x-go-service: &go-service
   build:
     context: ..
@@ -202,6 +208,7 @@ services:
         CMD: ingest
     image: threadroute-ingest:dev
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_SOURCE_PRIMARY_HOST: ${THREADROUTE_SOURCE_PRIMARY_HOST:-jetstream.us-east.bsky.network}
       THREADROUTE_SOURCE_FAILOVER_HOST: ${THREADROUTE_SOURCE_FAILOVER_HOST:-jetstream.us-west.bsky.network}
@@ -221,6 +228,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
   normalize:
@@ -238,6 +246,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       THREADROUTE_REDIS_ADDR: redis:6379
@@ -261,6 +270,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
   conv:
@@ -277,6 +287,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       THREADROUTE_REDIS_ADDR: redis:6379
@@ -306,6 +317,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
   router:
@@ -322,6 +334,7 @@ services:
       postgres:
         condition: service_healthy
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       # The password is part of the DSN; the DSN is never logged.
@@ -361,6 +374,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
   sim:
@@ -381,6 +395,7 @@ services:
       router:
         condition: service_started
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       THREADROUTE_SIM_ROUTER_URL: http://router:9470
@@ -404,6 +419,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
   # Live view for browsers (decision 0011). It reads conversations and
@@ -427,6 +443,7 @@ services:
       router:
         condition: service_started
     environment:
+      GOMEMLIMIT: 400MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       THREADROUTE_REDIS_ADDR: redis:6379
@@ -481,7 +498,10 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256m
+          # Its state is the whole floor, and its start reads both topics
+          # from the beginning: about 180 to 210 MiB on a day of data.
+          # GOMEMLIMIT above is 400MiB (about 80 percent).
+          memory: 512m
 
   # The console in web/, built into static files and served by nginx, which
   # also forwards /v1/ws and /v1/public/snapshot to the gateway. The browser
@@ -533,6 +553,7 @@ services:
         CMD: record
     image: threadroute-record:dev
     environment:
+      GOMEMLIMIT: 200MiB
       THREADROUTE_KAFKA_BROKERS: kafka:9092
       THREADROUTE_LOG_LEVEL: ${THREADROUTE_LOG_LEVEL:-info}
       THREADROUTE_RECORD_GROUP_ID: ${THREADROUTE_RECORD_GROUP_ID:-threadroute-record}
@@ -559,6 +580,7 @@ services:
     deploy:
       resources:
         limits:
+          # GOMEMLIMIT above is 200MiB (about 80 percent).
           memory: 256m
 
 volumes:
