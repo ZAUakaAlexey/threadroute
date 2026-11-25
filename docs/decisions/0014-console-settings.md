@@ -55,7 +55,7 @@ Recommendation: **B**. The values survive a restart, and the log gives exact tim
 
 ### 2. How the simulator learns its settings
 
-- **A. The router keeps the simulator part too.** It checks the bounds and does not use the values. The simulator asks `GET /v1/settings` every few seconds and applies a set with a new version number. One store, one version, one write. At its start the simulator reports the values of its own environment. They become the defaults of its part, and the current values when the store has none yet.
+- **A. The router keeps the simulator part too.** It checks the bounds and does not use the values. The simulator asks `GET /v1/settings` every few seconds and applies a set with a new version number. One store, one version, one write. At its start the simulator reports the values of its own environment. They become the defaults of its part, and the current values when the store has none yet. (The report was removed on 2026-11-25, see "The settings live only in the store" below.)
 - **B. The simulator gets its own HTTP API,** and the gateway writes to two services. A change can then succeed in one and fail in the other.
 - **C. A Kafka topic,** as in 1C.
 
@@ -144,7 +144,7 @@ Point 7A replaces "the first message after the connection opens" (point 5C of de
 
 ## Details that follow
 
-- **The environment gives the defaults, the store gives the current values.** The team values of the router environment and the values the simulator reports are the defaults. While nothing is stored, the environment values are in effect. The first report of the simulator already stores the whole set, so in practice this happens at the first start. From then on the stored set wins, also over a new environment value at a restart: a new value in the environment only becomes the new default. "Reset to defaults" in the console brings the environment values back.
+- **Replaced on 2026-11-25, see "The settings live only in the store" below.** The environment gives the defaults, the store gives the current values. The team values of the router environment and the values the simulator reports are the defaults. While nothing is stored, the environment values are in effect. The first report of the simulator already stores the whole set, so in practice this happens at the first start. From then on the stored set wins, also over a new environment value at a restart: a new value in the environment only becomes the new default. "Reset to defaults" in the console brings the environment values back.
 - **A router whose environment values are outside the bounds** runs with them as before and does not offer the settings to the console.
 - **The change log keeps the changed fields** with the old and the new value, the time and a short label of who changed them. The label is shown only to connections that may change settings.
 - **Everyone sees the current values** in the settings panel of the supervisor screen. The trends are on the same screen. The help texts of both screens use the current values.
@@ -162,3 +162,33 @@ Point 7A replaces "the first message after the connection opens" (point 5C of de
 - The router and the simulator export the current values as metrics, and the router counts the changes.
 - Nothing of this is deployed to the measurement server before the current window ends.
 - A live change is mixed with the time of day. The numbers for the README come from the replay of a recorded day (stage 5), not from the console.
+
+## Change on 2026-11-25: the settings live only in the store
+
+The first version had two sources for every changeable number: an environment variable and the stored set. From the first start on the stored set won, so a person who changed a `TEAM_` or `SIM_` value in `.env` and restarted the stand saw no change, no error and no log line.
+
+The eleven numbers of "Settings of the first version" are now state of the stand, not configuration.
+
+- **One source.** The current values are in the router's PostgreSQL and nowhere else. The six team variables of the router and the five variables of the simulator for these numbers are removed. Every other variable (ports, intervals, the speed factor) stays in the environment.
+- **Defaults in the code.** The default of every number is in the shared `opapi` package, next to its bounds.
+- **Seed.** At a start on a database without a stored set, the router stores the defaults as version 1. The change log gets an entry with the label "defaults". A database that already has a stored set keeps it. If its simulator part is missing, the router adds the defaults of that part.
+- **Changes.** From the console, or with `PUT /v1/settings` of the operator API. Both are in the change log, and both follow the same checks.
+- **"Reset to defaults"** brings back the defaults of the code.
+- **The simulator only reads.** It no longer reports values at its start, and the call for that report is removed. It reads the set from `GET /v1/settings` at start and then every few seconds, as before.
+- **A removed variable that is still set** is not read. The service logs a warning at start that names the variable and says where the value lives now.
+- **A stored row that is not valid** (only a hand edit can make one) turns the settings off, as before. The router and the simulator then run with the defaults of the code.
+
+What goes away with the second source: the question which source wins, the state "settings are off because the environment is outside the bounds", and the state "no simulator has reported yet".
+
+The cost:
+
+- A stand that should start with other values needs one call to the operator API after its first start, or the console.
+- A wiped database volume brings the defaults back. A line in `.env` survived that.
+- The values of a measurement run are no longer visible in `.env`. They are in the change log, and a measurement script must save the answer of `GET /v1/settings` at its start.
+
+The project owner chose this on 2026-11-25. Options that were not chosen:
+
+- **Keep the first version.** No work, but a changed variable has no effect and nothing says so.
+- **A changed environment value wins at the next start.** Both sources stay, with a comparison at every start and a rule for values that do not fit together.
+- **The environment gives the defaults, the store keeps only what a person changed.** Clear to say, but a variable has no effect for a field that was changed in the console.
+- **The environment only seeds an empty database.** This is the first version under another name.
