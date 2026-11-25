@@ -26,10 +26,22 @@ import (
 // newer version, so a second router converges within one team interval.
 // A snapshot is only ever replaced by one with a higher version.
 //
-// No team rule changed for this: the rules of decision 0009 read the new
-// numbers from the next check on (decision 0014, point 4A). A team above a
-// lower share stops growing; a team above a lower max size shrinks by the
-// normal size check; a raised number takes effect at the next check.
+// The rules of decision 0009 read the new numbers from the next check on
+// (decision 0014, point 4A). A team above a lower max size shrinks by the
+// normal size check, and a raised number takes effect at the next check.
+// A change that lowers the share also stores a trim request on the row, in
+// the transaction of the change; the next team check trims the teams to
+// the new cap and clears the request (trim.go, decision 0009, "A trim
+// after the cap was lowered"). Nothing else asks for a trim: not the seed,
+// not a change that raises or keeps the share.
+//
+// # Lock order
+//
+// A change and the seed lock the one row of stand_settings and take no
+// other lock while they hold it. The trim takes the team lock first and
+// then this row, before any company or operator (internal/pg,
+// 00006_team_trim.sql). So nothing holds the row and waits for the team
+// lock, and no cycle is possible.
 //
 // The stored set is the only source of the numbers (decision 0014, "the
 // settings live only in the store"). LoadSettings stores the defaults of
@@ -157,13 +169,14 @@ func cloneSettings(set opapi.StandSettings) opapi.StandSettings {
 
 // standRow is the row of stand_settings, decoded. At version 0 nothing is
 // stored, and current holds the team defaults without a sim part.
-//
-// The column defaults_sim held the values of the old simulator report. It
-// is no longer read, and a save writes NULL into it.
+// trimVersion is the version of the change that asked for a trim, or nil
+// when no trim is pending. saveStored does not write it: RequestTeamTrim
+// and ClearTeamTrim do.
 type standRow struct {
-	version   int64
-	current   opapi.StandSettings
-	lastPutAt *time.Time
+	version     int64
+	current     opapi.StandSettings
+	lastPutAt   *time.Time
+	trimVersion *int64
 }
 
 // errBadStored marks a stored row that cannot be read or breaks the
@@ -173,7 +186,10 @@ var errBadStored = errors.New("stored stand settings are not valid")
 // decodeStored decodes a row of stand_settings. The result is checked with
 // the rules of opapi.StandState.
 func decodeStored(row pgdb.StandSetting) (standRow, error) {
-	st := standRow{version: row.Version, current: opapi.StandSettings{Teams: opapi.DefaultTeamSettings()}, lastPutAt: row.LastPutAt}
+	st := standRow{
+		version: row.Version, current: opapi.StandSettings{Teams: opapi.DefaultTeamSettings()},
+		lastPutAt: row.LastPutAt, trimVersion: row.TrimVersion,
+	}
 	if row.CurrentSet != nil {
 		// A fresh value, so a field missing in the JSON stays 0 and fails
 		// the bounds instead of taking a default.
@@ -376,19 +392,27 @@ func (s *Service) LoadSettings(ctx context.Context) error {
 // calls it, so every router converges within one team interval. A stored
 // row that is not valid is logged and skipped.
 func (s *Service) SyncSettings(ctx context.Context) error {
+	_, err := s.syncSettings(ctx)
+	return err
+}
+
+// syncSettings is SyncSettings. pending reports whether the row it read
+// holds a trim request. A Service that does not offer stand settings reads
+// nothing and never has a pending trim.
+func (s *Service) syncSettings(ctx context.Context) (pending bool, err error) {
 	if !s.standOn.Load() {
-		return nil
+		return false, nil
 	}
 	st, err := s.readStored(ctx, pgdb.New(s.db))
 	if errors.Is(err, errBadStored) {
 		s.logger.WarnContext(ctx, "stand settings: the stored row is not valid, keeping the current set", "error", err)
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("sync stand settings: %w", err)
+		return false, fmt.Errorf("sync stand settings: %w", err)
 	}
 	s.apply(ctx, st)
-	return nil
+	return st.trimVersion != nil, nil
 }
 
 // readStored reads the stored row without a lock. No row is version 0.
@@ -415,15 +439,14 @@ func (s *Service) lockStored(ctx context.Context, q *pgdb.Queries) (standRow, er
 	return decodeStored(row)
 }
 
-// saveStored writes the locked row. defaults_sim is written as NULL: the
-// defaults are in the code.
+// saveStored writes the locked row. It leaves the trim request as it is.
 func saveStored(ctx context.Context, q *pgdb.Queries, st standRow, now time.Time) error {
 	current, err := st.encode()
 	if err != nil {
 		return err
 	}
 	err = q.SaveStandSettings(ctx, pgdb.SaveStandSettingsParams{
-		Version: st.version, CurrentSet: current, DefaultsSim: nil, LastPutAt: st.lastPutAt, UpdatedAt: now,
+		Version: st.version, CurrentSet: current, LastPutAt: st.lastPutAt, UpdatedAt: now,
 	})
 	if err != nil {
 		return fmt.Errorf("save stand settings: %w", err)
@@ -524,7 +547,10 @@ func (s *Service) ReadSettings(ctx context.Context, withChanges bool) (opapi.Set
 //
 // Steps 4 to 8 run in one transaction on the locked row, so the version
 // check and the interval hold for several routers. The time is read from
-// the clock after the lock is held.
+// the clock after the lock is held. A change that lowers teams.max_share
+// stores a trim request in the same transaction (trim.go). A request that
+// is already pending stays when a later change raises the share again: the
+// trim then runs with the stored numbers and finds less or nothing to do.
 func (s *Service) PutSettings(ctx context.Context, req opapi.SettingsChangeRequest) (opapi.SettingsChangeResponse, error) {
 	if !s.standOn.Load() {
 		return opapi.SettingsChangeResponse{}, settingsOff()
@@ -572,6 +598,12 @@ func (s *Service) PutSettings(ctx context.Context, req opapi.SettingsChangeReque
 		fields = opapi.Diff(st.current, next.current)
 		if err := saveStored(ctx, q, next, now); err != nil {
 			return err
+		}
+		if next.current.Teams.MaxShare < st.current.Teams.MaxShare {
+			if err := q.RequestTeamTrim(ctx, next.version); err != nil {
+				return fmt.Errorf("request team trim: %w", err)
+			}
+			next.trimVersion = ptr(next.version)
 		}
 		if err := logChange(ctx, q, next.version, now, req.By, fields); err != nil {
 			return err

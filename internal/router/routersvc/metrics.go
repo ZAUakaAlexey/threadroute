@@ -57,6 +57,9 @@ type metrics struct {
 	slaMarked    prometheus.Counter
 	teamChange   *prometheus.CounterVec
 	teamCapStops *prometheus.CounterVec
+	teamTrims    prometheus.Counter
+	trimOps      prometheus.Counter
+	trimReleases prometheus.Counter
 
 	published     *prometheus.CounterVec
 	slaMissed     *prometheus.CounterVec
@@ -112,12 +115,19 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 		expired:   counter("offers_expired_total", "Offers that the expiry loop of this process ended after the accept timeout."),
 		slaMarked: counter("sla_marked_total", "Missed SLA targets that the SLA loop of this process marked."),
 		teamChange: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_changes_total",
-			"Team changes made by the team loop of this process (formed, resized, released, moved).")),
+			"Team changes made by the team loop of this process (formed, resized, released, moved). "+
+				"Resized and released include the teams of a trim after a lowered share.")),
 			[]string{"change"}),
 		teamCapStops: prometheus.NewCounterVec(prometheus.CounterOpts(opts("team_cap_stops_total",
 			"Team checks of this process in which the team cap stopped a company: form (no new team, the cap left less "+
 				"than the minimum size) or grow (a new or existing team got fewer operators than its size). Once per company and check.")),
 			[]string{"case"}),
+		teamTrims: counter("team_trims_total",
+			"Trims after a lowered team share, run by the team loop of this process, that took at least one online operator out of a team."),
+		trimOps: counter("team_trim_operators_total",
+			"Online operators that a trim after a lowered team share took out of teams, in this process."),
+		trimReleases: counter("team_trim_releases_total",
+			"Teams that a trim after a lowered team share released, in this process. They also count in team_changes_total{change=\"released\"}."),
 
 		published: prometheus.NewCounterVec(prometheus.CounterOpts(opts("routing_published_total",
 			"Routing events acknowledged by Kafka, by type. A row sent again after a crash counts again.")),
@@ -156,6 +166,7 @@ func newMetrics(reg prometheus.Registerer) (*metrics, error) {
 	for _, c := range []prometheus.Collector{
 		m.applied, m.fetchErrors, m.catchUpActive, m.catchUpSeconds, m.catchUpQueued,
 		m.offers, m.generalQueue, m.overflow, m.expired, m.slaMarked, m.teamChange, m.teamCapStops,
+		m.teamTrims, m.trimOps, m.trimReleases,
 		m.published, m.slaMissed, m.publishErrors, m.pruned, m.lockHeld, m.refreshed, m.loopErrors,
 		m.conversations, m.queueWaiting, m.queueOldest, m.operators, m.capacity,
 		m.liveSlots, m.activeTeams, m.teamOnline, m.teamCap, m.outboxUnsent, m.outboxOldest,
@@ -219,6 +230,9 @@ func (m *metrics) observeTeams(r router.TeamResult) {
 	m.teamChange.WithLabelValues("moved").Add(float64(r.Moved))
 	m.teamCapStops.WithLabelValues(capForm).Add(float64(r.CapForm))
 	m.teamCapStops.WithLabelValues(capGrow).Add(float64(r.CapGrow))
+	m.teamTrims.Add(float64(r.Trims))
+	m.trimOps.Add(float64(r.TrimOperators))
+	m.trimReleases.Add(float64(r.TrimReleased))
 }
 
 // observeCounts sets the gauges from one snapshot. The vectors are reset

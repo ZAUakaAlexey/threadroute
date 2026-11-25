@@ -429,7 +429,9 @@ FOR UPDATE;
 -- name: TeamLock :exec
 -- TeamLock serializes the team operations of all routers for the rest of
 -- the transaction. They are rare, and one at a time they cannot deadlock
--- on each other's operators.
+-- on each other's operators. It is the first lock of its transaction. The
+-- trim after a lowered share locks the row of stand_settings right after
+-- it, before any company (see migrations/00006_team_trim.sql).
 SELECT pg_advisory_xact_lock(@key::bigint);
 
 -- name: EnsureCompany :exec
@@ -475,6 +477,21 @@ CROSS JOIN LATERAL (
 ) AS l
 ORDER BY l.n DESC, t.company_id;
 
+-- name: ActiveTeamCompanies :many
+-- ActiveTeamCompanies lists the companies with an active team in the order
+-- of TeamCompanies: the highest active load first, then the company ID.
+-- The trim after a lowered share goes through them in this order (decision
+-- 0009, "A trim after the cap was lowered"). Run it after TeamLock: a team
+-- forms and is released only under that lock.
+SELECT c.company_id, l.n AS active_load
+FROM companies AS c
+CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS n FROM conversations AS cv
+    WHERE cv.company_id = c.company_id AND cv.state IN ('waiting', 'offered', 'assigned')
+) AS l
+WHERE c.team_active
+ORDER BY l.n DESC, c.company_id;
+
 -- name: TeamCapCounts :one
 -- TeamCapCounts counts, on one snapshot, the online operators and the
 -- online operators that are dedicated to a team, for the team cap
@@ -495,9 +512,11 @@ GROUP BY lang
 ORDER BY count(*) DESC, lang;
 
 -- name: TeamMembers :many
--- TeamMembers lists the members of a team with their languages and load.
+-- TeamMembers lists the members of a team with their languages, load and
+-- presence.
 SELECT
     o.id,
+    (o.presence = 'online')::boolean AS online,
     COALESCE((SELECT array_agg(ol.lang ORDER BY ol.lang) FROM operator_languages AS ol
               WHERE ol.operator_id = o.id), '{}')::text[] AS languages,
     (SELECT count(*) FROM offers AS f

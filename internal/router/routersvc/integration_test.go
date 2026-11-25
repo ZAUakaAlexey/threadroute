@@ -46,6 +46,7 @@ func TestIntegration(t *testing.T) {
 	t.Run("RoutingRules", func(t *testing.T) { testRoutingRules(t, h) })
 	t.Run("TeamOverflow", func(t *testing.T) { testTeamOverflow(t, h) })
 	t.Run("StandSettings", func(t *testing.T) { testStandSettings(t, h) })
+	t.Run("TeamTrim", func(t *testing.T) { testTeamTrim(t, h) })
 }
 
 // testCatchUp: the topic holds a conversation that opened and closed and

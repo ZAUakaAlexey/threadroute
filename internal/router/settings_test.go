@@ -240,10 +240,14 @@ func TestDecodeStored(t *testing.T) {
 			t.Errorf("decoded %+v", got)
 		}
 	})
-	t.Run("old sim defaults are not read", func(t *testing.T) {
-		got, err := decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur, DefaultsSim: []byte(`[`)})
-		if err != nil || !got.current.Equal(good.current) {
+	t.Run("a trim request", func(t *testing.T) {
+		got, err := decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur, TrimVersion: ptr(int64(3))})
+		if err != nil || got.trimVersion == nil || *got.trimVersion != 3 {
 			t.Errorf("decoded %+v, %v", got, err)
+		}
+		got, err = decodeStored(pgdb.StandSetting{Version: 4, CurrentSet: cur})
+		if err != nil || got.trimVersion != nil {
+			t.Errorf("decoded without a request %+v, %v", got, err)
 		}
 	})
 	t.Run("a stored set without a sim part", func(t *testing.T) {

@@ -349,3 +349,92 @@ func TestIntegrationOperatorPriorityMigration(t *testing.T) {
 		t.Error("the priority column is missing after migrating up again")
 	}
 }
+
+// TestIntegrationTeamTrimMigration checks migration 00006 up and down on a
+// database that already holds stand settings: the trim request starts
+// empty and must name a stored version, the old column defaults_sim and
+// its check go away, and the down step brings them back empty.
+func TestIntegrationTeamTrimMigration(t *testing.T) {
+	pool := pgtest.Open(t, pgtest.Start(t))
+	ctx := t.Context()
+	files, err := pg.Migrations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := stdlib.OpenDBFromPool(pool)
+	t.Cleanup(func() { _ = db.Close() })
+	provider, err := goose.NewProvider(goose.DialectPostgres, db, files, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.UpTo(ctx, 5); err != nil {
+		t.Fatalf("migrate to 5: %v", err)
+	}
+	// A row as the first version of decision 0014 left it.
+	_, err = pool.Exec(ctx, `INSERT INTO stand_settings (version, current_set, defaults_sim, updated_at)
+		VALUES (3, '{"teams":{}}', '{"operators":200}', now())`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	columns := func() []string {
+		t.Helper()
+		rows, err := pool.Query(ctx, `SELECT column_name FROM information_schema.columns
+			WHERE table_name = 'stand_settings' ORDER BY column_name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		names, err := pgx.CollectRows(rows, pgx.RowTo[string])
+		if err != nil {
+			t.Fatal(err)
+		}
+		return names
+	}
+	exec := func(q string, args ...any) error {
+		_, err := pool.Exec(ctx, q, args...)
+		return err
+	}
+
+	if _, err := provider.UpTo(ctx, 6); err != nil {
+		t.Fatalf("migrate to 6: %v", err)
+	}
+	if got := columns(); slices.Contains(got, "defaults_sim") || !slices.Contains(got, "trim_version") {
+		t.Fatalf("columns after 6 = %v", got)
+	}
+	var trim *int64
+	var version int64
+	if err := pool.QueryRow(ctx, `SELECT version, trim_version FROM stand_settings`).Scan(&version, &trim); err != nil ||
+		version != 3 || trim != nil {
+		t.Fatalf("row after 6: version %d, trim %v, %v; want 3 and no request", version, trim, err)
+	}
+	for _, v := range []int64{1, 3} {
+		if err := exec(`UPDATE stand_settings SET trim_version = $1`, v); err != nil {
+			t.Errorf("trim version %d: %v", v, err)
+		}
+	}
+	for _, v := range []int64{0, 4} {
+		if err := exec(`UPDATE stand_settings SET trim_version = $1`, v); err == nil {
+			t.Errorf("trim version %d: no error, want a check violation", v)
+		}
+	}
+
+	if _, err := provider.DownTo(ctx, 5); err != nil {
+		t.Fatalf("down to 5: %v", err)
+	}
+	if got := columns(); !slices.Contains(got, "defaults_sim") || slices.Contains(got, "trim_version") {
+		t.Fatalf("columns after the down step = %v", got)
+	}
+	var sim []byte
+	if err := pool.QueryRow(ctx, `SELECT version, defaults_sim FROM stand_settings`).Scan(&version, &sim); err != nil ||
+		version != 3 || sim != nil {
+		t.Errorf("row after the down step: version %d, defaults_sim %s, %v; want 3 and NULL", version, sim, err)
+	}
+	if err := exec(`UPDATE stand_settings SET defaults_sim = '[]'`); err == nil {
+		t.Error("defaults_sim as an array after the down step: no error, want a check violation")
+	}
+	if err := pg.Migrate(ctx, pool, nil); err != nil {
+		t.Fatalf("Migrate() after the down step: %v", err)
+	}
+	if got := columns(); slices.Contains(got, "defaults_sim") || !slices.Contains(got, "trim_version") {
+		t.Errorf("columns after migrating up again = %v", got)
+	}
+}

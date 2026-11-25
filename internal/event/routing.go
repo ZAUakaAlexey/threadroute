@@ -66,7 +66,7 @@ const (
 	TypeTeamResized RoutingType = "team_resized"
 	// TypeTeamReleased: the team was released and its members went back
 	// to the shared pool. Members is the list of the released operators.
-	// ReleaseReason is set.
+	// ReleaseReason is set: low load, or a trim after a lowered share.
 	TypeTeamReleased RoutingType = "team_released"
 )
 
@@ -242,10 +242,16 @@ const (
 	// TeamAdmissionEnded: the admission of the company ended (decision
 	// 0008).
 	TeamAdmissionEnded TeamReleaseReason = "admission_ended"
+	// TeamCapLowered: a change of the stand settings lowered the share of
+	// the online operators that teams may hold, and the trim at the next
+	// team check had no room left for this team (decision 0009, "A trim
+	// after the cap was lowered"). A consumer built before this reason
+	// existed rejects the event as invalid.
+	TeamCapLowered TeamReleaseReason = "cap_lowered"
 )
 
 func (r TeamReleaseReason) valid() bool {
-	return r == TeamLowLoad || r == TeamAdmissionEnded
+	return r == TeamLowLoad || r == TeamAdmissionEnded || r == TeamCapLowered
 }
 
 // PriorityNormal is the priority of a conversation that has missed no SLA

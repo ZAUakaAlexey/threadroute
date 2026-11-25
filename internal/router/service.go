@@ -32,6 +32,13 @@
 // The lock order is meant to make both impossible, and the concurrency test
 // counts them.
 //
+// The row of stand_settings (00005_stand_settings.sql) has its place right
+// after the team advisory lock (00006_team_trim.sql). A change of the
+// stand settings and the seed lock only that row. The trim after a lowered
+// share (trim.go) takes the team lock, then that row, then companies, then
+// operators, and no conversation. Nothing holds the settings row while it
+// waits for the team lock.
+//
 // Operator events (decision 0011) take their sequence number at the
 // "operators" step: PutOperator, Online and Offline lock the one operator
 // row first, a team change locks its members after the company row, and

@@ -16,11 +16,13 @@ type langLoad struct {
 	N    int64
 }
 
-// opInfo is an operator as the team planner sees it.
+// opInfo is an operator as the team planner sees it. Pool candidates are
+// always online; team members can be offline.
 type opInfo struct {
-	ID    string
-	Langs []string
-	Live  int32
+	ID     string
+	Langs  []string
+	Live   int32
+	Online bool
 }
 
 func (o opInfo) has(lang string) bool { return slices.Contains(o.Langs, lang) }
@@ -144,6 +146,8 @@ func compareStrings(a, b string) int {
 
 // TeamResult says what CheckTeams did.
 type TeamResult struct {
+	// Formed, Resized and Released count team changes. Resized and
+	// Released include the teams that the trim made smaller or released.
 	Formed, Resized, Released int
 	// Moved is the number of waiting conversations that moved between the
 	// team queue and the shared queue.
@@ -154,6 +158,13 @@ type TeamResult struct {
 	// than their size because of the cap. Each is counted once per company
 	// and check.
 	CapForm, CapGrow int
+	// Trims is 1 when the check ran a trim after a lowered share (decision
+	// 0009, "A trim after the cap was lowered") that took at least one
+	// online operator out of a team, else 0. TrimOperators counts the
+	// online operators the trim took out of teams, and TrimReleased the
+	// teams it released. A trim that only cleared its request counts in
+	// none of them.
+	Trims, TrimOperators, TrimReleased int
 }
 
 // CheckTeams forms, resizes and releases dedicated teams by the rules of
@@ -179,10 +190,26 @@ type TeamResult struct {
 // The check first applies a newer stored version of the stand settings
 // (SyncSettings), then reads the snapshot of the team numbers once and
 // uses it for every company of this check (decision 0014).
+//
+// When the stored row holds a trim request (a change lowered the share),
+// the trim runs after that and before the companies are listed (trim.go).
+// Its transaction takes the team lock first and then the row of
+// stand_settings; no other transaction holds that row and waits for
+// another lock. The companies are listed after the trim committed, so a
+// company whose team the trim released is listed by its waiting
+// conversations in the team queue, and its check below moves them to the
+// shared queues. A trim error ends the check; the request stays for the
+// next one.
 func (s *Service) CheckTeams(ctx context.Context) (TeamResult, error) {
 	var res TeamResult
-	if err := s.SyncSettings(ctx); err != nil {
+	pending, err := s.syncSettings(ctx)
+	if err != nil {
 		return res, fmt.Errorf("check teams: %w", err)
+	}
+	if pending {
+		if res, err = s.trimTeams(ctx); err != nil {
+			return res, fmt.Errorf("check teams: %w", err)
+		}
 	}
 	cfg := s.config()
 	companies, err := pgdb.New(s.db).TeamCompanies(ctx, int64(cfg.TeamFormLoad))
@@ -221,15 +248,9 @@ func (s *Service) checkCompany(ctx context.Context, q *pgdb.Queries, cfg Config,
 		return fmt.Errorf("lock company: %w", err)
 	}
 	now := s.now(co.LowSince, co.TeamFormedAt)
-	loadRows, err := q.CompanyLangLoad(ctx, company)
+	loads, load, err := companyLoad(ctx, q, company)
 	if err != nil {
-		return fmt.Errorf("company load: %w", err)
-	}
-	loads := make([]langLoad, len(loadRows))
-	var load int64
-	for i, r := range loadRows {
-		loads[i] = langLoad{Lang: r.Lang, N: r.N}
-		load += r.N
+		return err
 	}
 	members, err := s.teamMembers(ctx, q, company)
 	if err != nil {
@@ -244,7 +265,7 @@ func (s *Service) checkCompany(ctx context.Context, q *pgdb.Queries, cfg Config,
 		}
 	case co.TeamActive && load < int64(cfg.TeamReleaseLoad) && co.LowSince != nil &&
 		cfg.model(now.Sub(*co.LowSince)) >= cfg.TeamReleaseAfter:
-		if err := s.releaseTeam(ctx, q, &co, &ob, members, load, now, res); err != nil {
+		if err := s.releaseTeam(ctx, q, &co, &ob, members, load, now, event.TeamLowLoad, res); err != nil {
 			return err
 		}
 	case co.TeamActive:
@@ -285,15 +306,39 @@ func (s *Service) checkCompany(ctx context.Context, q *pgdb.Queries, cfg Config,
 	}
 	res.Moved = len(moved)
 
+	if err := saveCompany(ctx, q, &co, now); err != nil {
+		return err
+	}
+	return ob.flush(ctx, q, now)
+}
+
+// saveCompany writes the changeable columns of a locked company row.
+func saveCompany(ctx context.Context, q *pgdb.Queries, co *pgdb.Company, now time.Time) error {
 	co.UpdatedAt = now
-	err = q.SaveCompany(ctx, pgdb.SaveCompanyParams{
+	err := q.SaveCompany(ctx, pgdb.SaveCompanyParams{
 		TeamSeq: co.TeamSeq, TeamActive: co.TeamActive, TeamFormedAt: co.TeamFormedAt,
 		LowSince: co.LowSince, UpdatedAt: co.UpdatedAt, CompanyID: co.CompanyID,
 	})
 	if err != nil {
 		return fmt.Errorf("save company: %w", err)
 	}
-	return ob.flush(ctx, q, now)
+	return nil
+}
+
+// companyLoad returns the active load of a company by language, most
+// needed first, and in total.
+func companyLoad(ctx context.Context, q *pgdb.Queries, company string) ([]langLoad, int64, error) {
+	rows, err := q.CompanyLangLoad(ctx, company)
+	if err != nil {
+		return nil, 0, fmt.Errorf("company load: %w", err)
+	}
+	loads := make([]langLoad, len(rows))
+	var load int64
+	for i, r := range rows {
+		loads[i] = langLoad{Lang: r.Lang, N: r.N}
+		load += r.N
+	}
+	return loads, load, nil
 }
 
 func (s *Service) teamMembers(ctx context.Context, q *pgdb.Queries, company string) ([]opInfo, error) {
@@ -303,7 +348,7 @@ func (s *Service) teamMembers(ctx context.Context, q *pgdb.Queries, company stri
 	}
 	out := make([]opInfo, len(rows))
 	for i, r := range rows {
-		out[i] = opInfo{ID: r.ID, Langs: r.Languages, Live: r.Live}
+		out[i] = opInfo{ID: r.ID, Langs: r.Languages, Live: r.Live, Online: r.Online}
 	}
 	return out, nil
 }
@@ -319,7 +364,7 @@ func (s *Service) poolCandidates(ctx context.Context, q *pgdb.Queries, loads []l
 	}
 	out := make([]opInfo, len(rows))
 	for i, r := range rows {
-		out[i] = opInfo{ID: r.ID, Langs: r.Languages, Live: r.Live}
+		out[i] = opInfo{ID: r.ID, Langs: r.Languages, Live: r.Live, Online: true}
 	}
 	return out, nil
 }
@@ -447,6 +492,14 @@ func (s *Service) resizeTeam(ctx context.Context, q *pgdb.Queries, cfg Config, c
 	if !changed {
 		return nil
 	}
+	return s.addResized(ctx, q, co, ob, load, now, res)
+}
+
+// addResized adds the team_resized event with the members after a change
+// and counts it.
+func (s *Service) addResized(ctx context.Context, q *pgdb.Queries, co *pgdb.Company, ob *outbox,
+	load int64, now time.Time, res *TeamResult,
+) error {
 	after, err := s.teamMembers(ctx, q, co.CompanyID)
 	if err != nil {
 		return err
@@ -459,8 +512,11 @@ func (s *Service) resizeTeam(ctx context.Context, q *pgdb.Queries, cfg Config, c
 	return ob.addTeam(co, event.Routing{Type: event.TypeTeamResized, At: now, Members: ids, ActiveLoad: uint64(load)})
 }
 
+// releaseTeam moves every member of the team, offline ones too, back to
+// the shared pool and marks the company without a team. The caller saves
+// the company row.
 func (s *Service) releaseTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Company, ob *outbox,
-	members []opInfo, load int64, now time.Time, res *TeamResult,
+	members []opInfo, load int64, now time.Time, reason event.TeamReleaseReason, res *TeamResult,
 ) error {
 	ids := make([]string, len(members))
 	for i, m := range members {
@@ -473,7 +529,8 @@ func (s *Service) releaseTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Com
 	co.TeamActive = false
 	co.LowSince = nil
 	res.Released++
-	s.logger.InfoContext(ctx, "team released", "company", co.CompanyID, "members", len(left), "active_load", load)
+	s.logger.InfoContext(ctx, "team released", "company", co.CompanyID, "members", len(left), "active_load", load,
+		"reason", reason)
 	if len(left) == 0 {
 		// A team event needs members. A team without members has nothing
 		// to tell the readers.
@@ -482,6 +539,6 @@ func (s *Service) releaseTeam(ctx context.Context, q *pgdb.Queries, co *pgdb.Com
 	slices.Sort(left)
 	return ob.addTeam(co, event.Routing{
 		Type: event.TypeTeamReleased, At: now, Members: left, ActiveLoad: uint64(load),
-		ReleaseReason: event.TeamLowLoad,
+		ReleaseReason: reason,
 	})
 }

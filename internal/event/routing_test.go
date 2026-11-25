@@ -144,6 +144,10 @@ func TestRoutingRoundTrip(t *testing.T) {
 	releasedEmpty.ActiveLoad = 0
 	releasedEmpty.ReleaseReason = TeamAdmissionEnded
 	add("released without load", releasedEmpty)
+	releasedByTrim := validRouting(TypeTeamReleased)
+	releasedByTrim.ActiveLoad = 40
+	releasedByTrim.ReleaseReason = TeamCapLowered
+	add("released by a trim after a lowered share", releasedByTrim)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -356,6 +360,7 @@ func TestRoutingValidate(t *testing.T) {
 		}, fields: []string{"languages, capacity, presence and dedicated_company_id"}},
 		{name: "released with unknown reason", typ: TypeTeamReleased, change: func(r *Routing) { r.ReleaseReason = "bored" }, fields: []string{"release_reason"}},
 		{name: "release reason on formed", typ: TypeTeamFormed, change: func(r *Routing) { r.ReleaseReason = TeamLowLoad }, fields: []string{"release_reason"}},
+		{name: "trim reason on resized", typ: TypeTeamResized, change: func(r *Routing) { r.ReleaseReason = TeamCapLowered }, fields: []string{"release_reason"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

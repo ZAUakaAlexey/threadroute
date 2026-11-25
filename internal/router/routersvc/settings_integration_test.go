@@ -4,7 +4,11 @@ package routersvc
 
 import (
 	"testing"
+	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
+
+	"github.com/ZAUakaAlexey/threadroute/internal/event"
 	"github.com/ZAUakaAlexey/threadroute/internal/opapi"
 )
 
@@ -55,6 +59,67 @@ func testStandSettings(t *testing.T, h *harness) {
 	}
 	if v := counterOf(t, again, "threadroute_router_settings_changes_total", "defaults"); v != 0 {
 		t.Errorf("settings_changes_total{source=defaults} after a restart = %v, want 0", v)
+	}
+}
+
+// testTeamTrim: a change that lowers the team share through the operator
+// API trims the teams at the next check of the team loop (decision 0009,
+// "A trim after the cap was lowered"), and the three trim counters count
+// it. Teams have one member and the cap is off, so two companies with 3
+// active conversations each form two teams on 4 online operators,
+// whichever check forms which. A share of 0.25 gives a cap of 1: one team
+// stays and the other is released, so the totals do not depend on the
+// timing of the loop.
+func testTeamTrim(t *testing.T, h *harness) {
+	sc := h.newScenario(t)
+	sc.rcfg.AcceptTimeout = longAcceptTimeout
+	sc.rcfg.TeamReleaseAfter = opapi.MaxTeamReleaseAfter
+	sc.rcfg.TeamFormLoad, sc.rcfg.TeamReleaseLoad, sc.rcfg.TeamMinSize, sc.rcfg.TeamMaxSize = 3, 1, 1, 1
+	sc.rcfg.TeamMaxShare = 1
+	r := sc.start()
+	ctx := t.Context()
+	for i := 1; i <= 4; i++ {
+		sc.operator(opID(i), 4, "en")
+	}
+	rd := sc.reader()
+	cos := []string{company(1), company(2)}
+	for i, co := range cos {
+		for j := range 3 {
+			sc.produce(newStream(co, customer(i*10+j)).opened())
+		}
+	}
+	for _, co := range cos {
+		rd.waitEvent(co, "team formed", isType(event.TypeTeamFormed))
+	}
+
+	s, err := r.api.Settings(ctx)
+	if err != nil || s.Stand == nil {
+		t.Fatalf("Settings() = %+v, %v", s.Stand, err)
+	}
+	set := s.Stand.Current
+	set.Teams.MaxShare = 0.25
+	put, err := r.api.PutSettings(ctx, opapi.SettingsChangeRequest{Settings: set, BaseVersion: s.Stand.Version, By: "test-user-0001"})
+	if err != nil || put.Result != opapi.ResultDone {
+		t.Fatalf("PutSettings() = %+v, %v", put, err)
+	}
+	waitFor(t, 30*time.Second, "a trim", func() bool { return testutil.ToFloat64(r.svc.m.teamTrims) == 1 })
+	released := rd.waitEvent(cos[1], "team released", isType(event.TypeTeamReleased))
+	if released.ReleaseReason != event.TeamCapLowered {
+		t.Errorf("team_released = %+v, want the reason %s", released, event.TeamCapLowered)
+	}
+	if got := testutil.ToFloat64(r.svc.m.trimOps); got != 1 {
+		t.Errorf("team_trim_operators_total = %v, want 1", got)
+	}
+	if got := testutil.ToFloat64(r.svc.m.trimReleases); got != 1 {
+		t.Errorf("team_trim_releases_total = %v, want 1", got)
+	}
+	// Later checks of the loop do not trim again.
+	time.Sleep(2 * time.Second)
+	if got := testutil.ToFloat64(r.svc.m.teamTrims); got != 1 {
+		t.Errorf("team_trims_total after more checks = %v, want 1", got)
+	}
+	if n := sc.count(`SELECT count(*) FROM stand_settings WHERE trim_version IS NOT NULL`); n != 0 {
+		t.Errorf("trim requests left = %d, want 0", n)
 	}
 }
 

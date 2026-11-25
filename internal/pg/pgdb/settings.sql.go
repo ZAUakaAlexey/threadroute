@@ -10,6 +10,17 @@ import (
 	"time"
 )
 
+const clearTeamTrim = `-- name: ClearTeamTrim :exec
+UPDATE stand_settings SET trim_version = NULL, updated_at = $1 WHERE id
+`
+
+// ClearTeamTrim clears the trim request of the locked row of the stand
+// settings. The trim calls it under the team lock, in its own transaction.
+func (q *Queries) ClearTeamTrim(ctx context.Context, updatedAt time.Time) error {
+	_, err := q.db.Exec(ctx, clearTeamTrim, updatedAt)
+	return err
+}
+
 const ensureStandSettings = `-- name: EnsureStandSettings :exec
 INSERT INTO stand_settings (id, version, updated_at)
 VALUES (true, 0, $1)
@@ -25,7 +36,7 @@ func (q *Queries) EnsureStandSettings(ctx context.Context, updatedAt time.Time) 
 }
 
 const getStandSettings = `-- name: GetStandSettings :one
-SELECT id, version, current_set, defaults_sim, last_put_at, updated_at FROM stand_settings WHERE id
+SELECT id, version, current_set, last_put_at, updated_at, trim_version FROM stand_settings WHERE id
 `
 
 // GetStandSettings reads the row of the stand settings without a lock. No
@@ -37,9 +48,9 @@ func (q *Queries) GetStandSettings(ctx context.Context) (StandSetting, error) {
 		&i.ID,
 		&i.Version,
 		&i.CurrentSet,
-		&i.DefaultsSim,
 		&i.LastPutAt,
 		&i.UpdatedAt,
+		&i.TrimVersion,
 	)
 	return i, err
 }
@@ -68,7 +79,7 @@ func (q *Queries) InsertStandSettingsChange(ctx context.Context, arg InsertStand
 }
 
 const lockStandSettings = `-- name: LockStandSettings :one
-SELECT id, version, current_set, defaults_sim, last_put_at, updated_at FROM stand_settings WHERE id FOR UPDATE
+SELECT id, version, current_set, last_put_at, updated_at, trim_version FROM stand_settings WHERE id FOR UPDATE
 `
 
 // LockStandSettings reads the row of the stand settings and locks it until
@@ -80,9 +91,9 @@ func (q *Queries) LockStandSettings(ctx context.Context) (StandSetting, error) {
 		&i.ID,
 		&i.Version,
 		&i.CurrentSet,
-		&i.DefaultsSim,
 		&i.LastPutAt,
 		&i.UpdatedAt,
+		&i.TrimVersion,
 	)
 	return i, err
 }
@@ -128,19 +139,30 @@ func (q *Queries) RecentStandSettingsChanges(ctx context.Context, arg RecentStan
 	return items, nil
 }
 
+const requestTeamTrim = `-- name: RequestTeamTrim :exec
+UPDATE stand_settings SET trim_version = $1::bigint WHERE id
+`
+
+// RequestTeamTrim stores a trim request on the locked row of the stand
+// settings (decision 0009, "A trim after the cap was lowered"). Only a
+// change that lowers the share calls it, in the transaction of the change.
+func (q *Queries) RequestTeamTrim(ctx context.Context, trimVersion int64) error {
+	_, err := q.db.Exec(ctx, requestTeamTrim, trimVersion)
+	return err
+}
+
 const saveStandSettings = `-- name: SaveStandSettings :exec
 UPDATE stand_settings
-SET version = $1, current_set = $2, defaults_sim = $3,
-    last_put_at = $4, updated_at = $5
+SET version = $1, current_set = $2,
+    last_put_at = $3, updated_at = $4
 WHERE id
 `
 
 type SaveStandSettingsParams struct {
-	Version     int64
-	CurrentSet  []byte
-	DefaultsSim []byte
-	LastPutAt   *time.Time
-	UpdatedAt   time.Time
+	Version    int64
+	CurrentSet []byte
+	LastPutAt  *time.Time
+	UpdatedAt  time.Time
 }
 
 // SaveStandSettings writes the locked row of the stand settings.
@@ -148,7 +170,6 @@ func (q *Queries) SaveStandSettings(ctx context.Context, arg SaveStandSettingsPa
 	_, err := q.db.Exec(ctx, saveStandSettings,
 		arg.Version,
 		arg.CurrentSet,
-		arg.DefaultsSim,
 		arg.LastPutAt,
 		arg.UpdatedAt,
 	)

@@ -40,7 +40,7 @@ func TestIntegrationStandSettings(t *testing.T) {
 		{name: "a second router converges at its next team check", fn: testStandConverge},
 		{name: "the change log keeps every entry and answers the newest", fn: testStandLog},
 		{name: "a stored row outside the bounds: off", fn: testStandOffStored},
-		{name: "lower share: no growth and no forced exit", fn: testStandLowerShare},
+		{name: "lower share: a trim at the next check, then no new team", fn: testStandLowerShare},
 		{name: "higher share: growth at the next check", fn: testStandHigherShare},
 		{name: "lower form load forms a team", fn: testStandLowerFormLoad},
 		{name: "higher form load forms no team and releases none", fn: testStandHigherFormLoad},
@@ -163,14 +163,14 @@ func (e *standEnv) rows() (settings, changes int) {
 
 // insertRow writes the row of stand_settings by hand, as an older router
 // left it, and the given log entries.
-func (e *standEnv) insertRow(version int64, set opapi.StandSettings, defaultsSim []byte, changes ...opapi.SettingsChange) {
+func (e *standEnv) insertRow(version int64, set opapi.StandSettings, changes ...opapi.SettingsChange) {
 	e.t.Helper()
 	b, err := json.Marshal(set)
 	if err != nil {
 		e.t.Fatal(err)
 	}
-	_, err = e.pool.Exec(e.t.Context(), `INSERT INTO stand_settings (version, current_set, defaults_sim, updated_at)
-		VALUES ($1, $2, $3, $4)`, version, b, defaultsSim, e.clock.Now())
+	_, err = e.pool.Exec(e.t.Context(), `INSERT INTO stand_settings (version, current_set, updated_at)
+		VALUES ($1, $2, $3)`, version, b, e.clock.Now())
 	if err != nil {
 		e.t.Fatal(err)
 	}
@@ -199,15 +199,16 @@ func oldSet() opapi.StandSettings {
 }
 
 // storeOldSet stores a set at version 2 the way the first version of
-// decision 0014 left it: a simulator report at version 1 with its
-// defaults_sim, then a change from the console.
+// decision 0014 left it: a simulator report at version 1, then a change
+// from the console. Its old column defaults_sim is gone since migration
+// 00006.
 func storeOldSet(t *testing.T, e *standEnv) {
 	set := oldSet()
 	at := e.clock.Now().Add(-time.Hour).UnixMicro()
 	reported := opapi.StandSettings{Teams: set.Teams, Sim: &opapi.SimSettings{
 		Operators: 200, Capacity: 4, HandlingMedianUS: 45_000_000, ResolveMedianUS: 180_000_000, MissedOfferShare: 0.03,
 	}}
-	e.insertRow(2, set, []byte(`{"operators":200,"capacity":4,"handling_median_us":45000000,"resolve_median_us":180000000,"missed_offer_share":0.03}`),
+	e.insertRow(2, set,
 		opapi.SettingsChange{ChangedAtUS: at, Version: 1, By: opapi.BySimulator,
 			Fields: opapi.Diff(opapi.StandSettings{Teams: set.Teams}, reported)},
 		opapi.SettingsChange{ChangedAtUS: at + 1, Version: 2, By: testBy, Fields: opapi.Diff(reported, set)},
@@ -218,7 +219,7 @@ func storeOldSet(t *testing.T, e *standEnv) {
 // the console before any simulator reported.
 func storeTeamsOnly(t *testing.T, e *standEnv) {
 	set := opapi.StandSettings{Teams: oldSet().Teams}
-	e.insertRow(1, set, nil, opapi.SettingsChange{
+	e.insertRow(1, set, opapi.SettingsChange{
 		ChangedAtUS: e.clock.Now().Add(-time.Hour).UnixMicro(), Version: 1, By: testBy,
 		Fields: opapi.Diff(opapi.StandSettings{Teams: defaultTeams()}, set),
 	})
@@ -325,8 +326,8 @@ func testStandKeepStored(t *testing.T, e *standEnv) {
 	if snap.DefaultsChanges != 0 || snap.Version != 2 || e.svc.config().TeamFormLoad != 30 || e.svc.config().TeamMaxShare != 0.25 {
 		t.Errorf("snapshot = %+v, config %+v", snap, e.svc.config())
 	}
-	// A change goes on from the stored version, and the old sim defaults
-	// column is no longer read: the answers give the defaults of the code.
+	// A change goes on from the stored version, and the answers give the
+	// defaults of the code.
 	e.clock.Advance(opapi.SettingsChangeInterval)
 	next := full(set.Teams)
 	st = e.putDone(e.svc, 2, next, opapi.ResultDone)
@@ -644,16 +645,20 @@ func testStandLowerShare(t *testing.T, e *standEnv) {
 	e.putDone(e.svc, 1, full(teams(func(t *opapi.TeamSettings) { t.MaxShare = 0.05 })), opapi.ResultDone)
 	e.wantCounts(5, 1)
 	// The load would give 10 members, and a second company reaches the
-	// threshold.
+	// threshold. The trim (decision 0009, "A trim after the cap was
+	// lowered") has a room of 1, below the min size, so it releases the
+	// team; then neither company can form one, and the 40 waiting
+	// conversations of a go to the shared queue.
 	e.open(a, 20)
 	e.open(b, 20)
-	wantTeam(t, e.check(), TeamResult{CapForm: 1, CapGrow: 1})
-	if got := e.members(a); len(got) != 5 {
-		t.Errorf("members = %v, want the same 5", got)
+	wantTeam(t, e.check(), TeamResult{Released: 1, Moved: 40, CapForm: 2, Trims: 1, TrimOperators: 5, TrimReleased: 1})
+	if got := e.members(a); len(got) != 0 || e.teamActive(a) {
+		t.Errorf("members = %v, want the team released", got)
 	}
 	if e.teamActive(b) {
 		t.Error("company b got a team above the cap")
 	}
+	e.wantCounts(0, 1)
 }
 
 func testStandHigherShare(t *testing.T, e *standEnv) {

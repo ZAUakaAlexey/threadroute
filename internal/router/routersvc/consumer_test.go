@@ -224,6 +224,31 @@ func TestObserveTeamsCapStops(t *testing.T) {
 	}
 }
 
+func TestObserveTeamsTrim(t *testing.T) {
+	m, err := newMetrics(prometheus.NewRegistry())
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.observeTeams(router.TeamResult{Resized: 1, Released: 2, Trims: 1, TrimOperators: 7, TrimReleased: 2})
+	m.observeTeams(router.TeamResult{Formed: 1})
+	m.observeTeams(router.TeamResult{Resized: 1, Trims: 1, TrimOperators: 1})
+	checks := []struct {
+		name      string
+		got, want float64
+	}{
+		{"trims", testutil.ToFloat64(m.teamTrims), 2},
+		{"trim operators", testutil.ToFloat64(m.trimOps), 8},
+		{"trim releases", testutil.ToFloat64(m.trimReleases), 2},
+		{"released", testutil.ToFloat64(m.teamChange.WithLabelValues("released")), 2},
+		{"resized", testutil.ToFloat64(m.teamChange.WithLabelValues("resized")), 2},
+	}
+	for _, c := range checks {
+		if c.got != c.want {
+			t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+		}
+	}
+}
+
 // TestCatchUpRetriesOffsets checks that a coordinator that is not ready
 // yet, as on a broker that has just started, does not end the catch-up.
 func TestCatchUpRetriesOffsets(t *testing.T) {

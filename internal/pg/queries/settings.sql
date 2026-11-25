@@ -19,9 +19,20 @@ SELECT * FROM stand_settings WHERE id;
 -- name: SaveStandSettings :exec
 -- SaveStandSettings writes the locked row of the stand settings.
 UPDATE stand_settings
-SET version = @version, current_set = @current_set, defaults_sim = @defaults_sim,
+SET version = @version, current_set = @current_set,
     last_put_at = @last_put_at, updated_at = @updated_at
 WHERE id;
+
+-- name: RequestTeamTrim :exec
+-- RequestTeamTrim stores a trim request on the locked row of the stand
+-- settings (decision 0009, "A trim after the cap was lowered"). Only a
+-- change that lowers the share calls it, in the transaction of the change.
+UPDATE stand_settings SET trim_version = @trim_version::bigint WHERE id;
+
+-- name: ClearTeamTrim :exec
+-- ClearTeamTrim clears the trim request of the locked row of the stand
+-- settings. The trim calls it under the team lock, in its own transaction.
+UPDATE stand_settings SET trim_version = NULL, updated_at = @updated_at WHERE id;
 
 -- name: InsertStandSettingsChange :exec
 -- InsertStandSettingsChange adds one entry to the change log.

@@ -106,9 +106,9 @@ type StandSetting struct {
 	ID          bool
 	Version     int64
 	CurrentSet  []byte
-	DefaultsSim []byte
 	LastPutAt   *time.Time
 	UpdatedAt   time.Time
+	TrimVersion *int64
 }
 
 type StandSettingsChange struct {

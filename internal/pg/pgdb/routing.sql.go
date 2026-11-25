@@ -10,6 +10,47 @@ import (
 	"time"
 )
 
+const activeTeamCompanies = `-- name: ActiveTeamCompanies :many
+SELECT c.company_id, l.n AS active_load
+FROM companies AS c
+CROSS JOIN LATERAL (
+    SELECT count(*)::bigint AS n FROM conversations AS cv
+    WHERE cv.company_id = c.company_id AND cv.state IN ('waiting', 'offered', 'assigned')
+) AS l
+WHERE c.team_active
+ORDER BY l.n DESC, c.company_id
+`
+
+type ActiveTeamCompaniesRow struct {
+	CompanyID  string
+	ActiveLoad int64
+}
+
+// ActiveTeamCompanies lists the companies with an active team in the order
+// of TeamCompanies: the highest active load first, then the company ID.
+// The trim after a lowered share goes through them in this order (decision
+// 0009, "A trim after the cap was lowered"). Run it after TeamLock: a team
+// forms and is released only under that lock.
+func (q *Queries) ActiveTeamCompanies(ctx context.Context) ([]ActiveTeamCompaniesRow, error) {
+	rows, err := q.db.Query(ctx, activeTeamCompanies)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ActiveTeamCompaniesRow{}
+	for rows.Next() {
+		var i ActiveTeamCompaniesRow
+		if err := rows.Scan(&i.CompanyID, &i.ActiveLoad); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const clearSkips = `-- name: ClearSkips :execrows
 DELETE FROM offer_skips
 WHERE company_id = $1 AND customer_id = $2
@@ -1636,7 +1677,9 @@ SELECT pg_advisory_xact_lock($1::bigint)
 
 // TeamLock serializes the team operations of all routers for the rest of
 // the transaction. They are rare, and one at a time they cannot deadlock
-// on each other's operators.
+// on each other's operators. It is the first lock of its transaction. The
+// trim after a lowered share locks the row of stand_settings right after
+// it, before any company (see migrations/00006_team_trim.sql).
 func (q *Queries) TeamLock(ctx context.Context, key int64) error {
 	_, err := q.db.Exec(ctx, teamLock, key)
 	return err
@@ -1645,6 +1688,7 @@ func (q *Queries) TeamLock(ctx context.Context, key int64) error {
 const teamMembers = `-- name: TeamMembers :many
 SELECT
     o.id,
+    (o.presence = 'online')::boolean AS online,
     COALESCE((SELECT array_agg(ol.lang ORDER BY ol.lang) FROM operator_languages AS ol
               WHERE ol.operator_id = o.id), '{}')::text[] AS languages,
     (SELECT count(*) FROM offers AS f
@@ -1656,11 +1700,13 @@ ORDER BY o.id
 
 type TeamMembersRow struct {
 	ID        string
+	Online    bool
 	Languages []string
 	Live      int32
 }
 
-// TeamMembers lists the members of a team with their languages and load.
+// TeamMembers lists the members of a team with their languages, load and
+// presence.
 func (q *Queries) TeamMembers(ctx context.Context, companyID string) ([]TeamMembersRow, error) {
 	rows, err := q.db.Query(ctx, teamMembers, companyID)
 	if err != nil {
@@ -1670,7 +1716,12 @@ func (q *Queries) TeamMembers(ctx context.Context, companyID string) ([]TeamMemb
 	items := []TeamMembersRow{}
 	for rows.Next() {
 		var i TeamMembersRow
-		if err := rows.Scan(&i.ID, &i.Languages, &i.Live); err != nil {
+		if err := rows.Scan(
+			&i.ID,
+			&i.Online,
+			&i.Languages,
+			&i.Live,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
