@@ -32,6 +32,25 @@ test('supervisor sees flow, queues, operators and filters conversations', async 
   await expect(row).toContainText('offline');
 });
 
+test('supervisor sees offers as a part of the load, in brackets and in the bar label', async ({ page }) => {
+  await page.goto('#/supervisor');
+  const table = page.getByRole('table', { name: 'Operators' });
+  await expect(table.getByRole('row').nth(5)).toBeVisible();
+  await expect(table).not.toContainText(/\+\d+ offered/);
+  const withOffers = table.getByRole('row').filter({ hasText: /\d+\/\d+ \(\d+ offered\)/ }).first();
+  await expect(withOffers).toBeVisible();
+  const [, load, capacity, offered] = /(\d+)\/(\d+) \((\d+) offered\)/.exec((await withOffers.textContent()) ?? '') ?? [];
+  await expect(withOffers.getByRole('meter')).toHaveAccessibleName(new RegExp(`^Load of sim-op-\\d{4}: ${load} of ${capacity}, ${offered} of them offered$`));
+  const withoutOffers = table.getByRole('row').filter({ hasNotText: 'offered' }).filter({ hasText: 'online' }).first();
+  await expect(withoutOffers.getByRole('meter')).toHaveAccessibleName(/^Load of sim-op-\d{4}: \d+ of \d+$/);
+  // At the narrowest table the text in brackets still fits its cell.
+  await page.setViewportSize({ width: 390, height: 900 });
+  const loadCell = withOffers.getByRole('cell').nth(3);
+  await expect(loadCell).toContainText('offered)');
+  const overflow = await loadCell.evaluate((el) => Math.max(...[el, ...el.querySelectorAll('*')].map((e) => e.scrollWidth - e.clientWidth)));
+  expect(overflow).toBeLessThanOrEqual(0);
+});
+
 test('supervisor at the full level reads messages in a dialog', async ({ page }) => {
   await signInFull(page);
   await page.goto('#/supervisor');

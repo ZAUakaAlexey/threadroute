@@ -34,7 +34,17 @@ describe('supervisor board', () => {
     const rows = within(table).getAllByRole('row');
     expect(rows).toHaveLength(4);
     expect(within(table).getByText('web-test0001').closest('[role="row"]')).toHaveTextContent('human');
-    expect(within(table).getByRole('meter', { name: 'Load of sim-op-0001' })).toHaveAttribute('aria-valuenow', '3');
+    expect(within(table).getByRole('meter', { name: 'Load of sim-op-0001: 3 of 4' })).toHaveAttribute('aria-valuenow', '3');
+    expect(within(table).getByText('sim-op-0001').closest('[role="row"]')).toHaveTextContent(/3\/4(?! \()/);
+  });
+
+  it('shows the offers as a part of the load, in brackets and in the label', () => {
+    start();
+    const table = screen.getByRole('table', { name: 'Operators' });
+    const row = within(table).getByText('web-test0001').closest('[role="row"]');
+    expect(row).toHaveTextContent('2/2 (1 offered)');
+    expect(row).not.toHaveTextContent('+1 offered');
+    expect(within(table).getByRole('meter', { name: 'Load of web-test0001: 2 of 2, 1 of them offered' })).toHaveAttribute('aria-valuenow', '2');
   });
 
   it('filters conversations by state and language', async () => {

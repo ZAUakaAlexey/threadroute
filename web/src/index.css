@@ -46,10 +46,14 @@
   --accent: oklch(47% 0.17 262);
   --accent-ink: oklch(99% 0 0);
   --accent-soft: oklch(94% 0.03 262);
+  /* The -muted tones: a weaker part of a bar next to the solid one, for example the offered part of a load. At least 3:1 on sunken. */
+  --accent-muted: oklch(62% 0.12 262);
   --wait: oklch(52% 0.12 65);
   --wait-soft: oklch(95% 0.045 80);
+  --wait-muted: oklch(63% 0.11 68);
   --late: oklch(50% 0.17 27);
   --late-soft: oklch(95% 0.03 25);
+  --late-muted: oklch(62% 0.12 27);
   --done: oklch(48% 0.1 160);
   --done-soft: oklch(95% 0.035 160);
   --focus: oklch(55% 0.19 262);
@@ -70,10 +74,13 @@
     --accent: oklch(72% 0.13 262);
     --accent-ink: oklch(18% 0.02 262);
     --accent-soft: oklch(28% 0.05 262);
+    --accent-muted: oklch(50% 0.09 262);
     --wait: oklch(80% 0.13 75);
     --wait-soft: oklch(28% 0.05 75);
+    --wait-muted: oklch(54% 0.09 75);
     --late: oklch(74% 0.15 27);
     --late-soft: oklch(28% 0.06 25);
+    --late-muted: oklch(51% 0.1 27);
     --done: oklch(78% 0.12 160);
     --done-soft: oklch(27% 0.045 160);
     --focus: oklch(75% 0.14 262);
@@ -96,10 +103,13 @@
   --color-accent: var(--accent);
   --color-accent-ink: var(--accent-ink);
   --color-accent-soft: var(--accent-soft);
+  --color-accent-muted: var(--accent-muted);
   --color-wait: var(--wait);
   --color-wait-soft: var(--wait-soft);
+  --color-wait-muted: var(--wait-muted);
   --color-late: var(--late);
   --color-late-soft: var(--late-soft);
+  --color-late-muted: var(--late-muted);
   --color-done: var(--done);
   --color-done-soft: var(--done-soft);
   --color-focus: var(--focus);

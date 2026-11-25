@@ -3,9 +3,10 @@
 // they stand still. They have role "timer", which screen readers do not
 // announce on every change.
 
-import { formatDuration, spokenDuration } from '../lib/format.ts';
+import { formatDuration, isoDuration, spanUs, spokenDuration } from '../lib/format.ts';
 import { ShortDuration } from '../ui/short-duration.tsx';
-import { useElapsedUs, useRemainingUs } from './hooks.ts';
+import { useElapsedUs, useLive, useRemainingUs } from './hooks.ts';
+import { selectSpeedFactor } from './selectors.ts';
 
 type TimerTone = 'neutral' | 'wait' | 'late' | 'done' | 'accent';
 
@@ -43,6 +44,26 @@ export function Elapsed({ sinceUs, label, className = '', format = 'clock' }: El
     <span role="timer" aria-label={spoken} className={`font-mono tnum ${className}`}>
       {formatDuration(elapsed)}
     </span>
+  );
+}
+
+interface FixedDurationProps {
+  readonly fromUs: number;
+  readonly toUs: number;
+  readonly className?: string;
+}
+
+/**
+ * A fixed duration between two server times, in model time, never below 0.
+ * It does not tick, so it is a time element and not a timer.
+ */
+export function FixedDuration({ fromUs, toUs, className = '' }: FixedDurationProps) {
+  const speed = useLive(selectSpeedFactor);
+  const us = spanUs(fromUs, toUs, speed);
+  return (
+    <time dateTime={isoDuration(us)} className={`font-mono tnum ${className}`}>
+      {formatDuration(us)}
+    </time>
   );
 }
 

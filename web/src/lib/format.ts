@@ -70,6 +70,43 @@ export function percent(part: number, whole: number): number {
   return whole <= 0 ? 0 : Math.min(100, Math.round((part / whole) * 100));
 }
 
+/** Model time from one source time to a later one; never below 0. */
+export function spanUs(fromUs: number, toUs: number, speedFactor: number): number {
+  return Math.max(0, (toUs - fromUs) * speedFactor);
+}
+
+/** A duration as an HTML duration string for the datetime attribute: "PT135S". */
+export function isoDuration(us: number): string {
+  return `PT${Math.floor(Math.max(0, us) / US_PER_SECOND)}S`;
+}
+
+export interface LoadSplit {
+  /** Conversations the operator accepted. */
+  readonly accepted: number;
+  /** Offers that wait for an accept; part of the load, not extra. */
+  readonly offered: number;
+}
+
+/** Splits a load into its accepted and offered parts. Odd data is clamped: offered is at most the load. */
+export function splitLoad(load: number, offered: number): LoadSplit {
+  const total = Math.max(0, load);
+  const offers = Math.min(total, Math.max(0, offered));
+  return { accepted: total - offers, offered: offers };
+}
+
+/** The two parts of a load bar in percent of the capacity: together at most 100, never negative. */
+export function loadBarWidths(load: number, capacity: number, offered: number): { readonly accepted: number; readonly offered: number } {
+  const split = splitLoad(load, offered);
+  const accepted = percent(split.accepted, capacity);
+  return { accepted, offered: Math.max(0, percent(split.accepted + split.offered, capacity) - accepted) };
+}
+
+/** Words for screen readers: "4 of 4, 2 of them offered". */
+export function spokenLoad(load: number, capacity: number, offered: number): string {
+  const part = splitLoad(load, offered).offered;
+  return part > 0 ? `${load} of ${capacity}, ${part} of them offered` : `${load} of ${capacity}`;
+}
+
 function pad(n: number): string {
   return n.toString().padStart(2, '0');
 }

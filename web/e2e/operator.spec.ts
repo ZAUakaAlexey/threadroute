@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Locator } from '@playwright/test';
 
 import { control, offer, openDeskOnline, signInFull } from './helpers.ts';
 
@@ -14,6 +14,37 @@ test('accepts an offer before the deadline and opens the conversation', async ({
   await expect(card).toBeHidden();
   await expect(page.getByRole('list', { name: 'Conversations you hold' }).getByRole('listitem')).toHaveCount(1);
   await expect(page.getByRole('list', { name: 'Messages' })).toContainText('Text hidden at the demo level');
+});
+
+test('after the accept, shows a fixed Waited and a running In work instead of Waiting', async ({ page }) => {
+  await openDeskOnline(page);
+  const card = await offer(page);
+  const cardWaiting = seconds(await card.getByRole('timer', { name: /waiting time/i }).textContent());
+  await card.getByRole('button', { name: 'Accept' }).click();
+  await expect(card).toBeHidden();
+
+  const header = page.getByRole('term').filter({ hasText: 'Waited' }).locator('xpath=..');
+  const waited = header.getByRole('definition').locator('time');
+  await expect(waited).toHaveText(/^\d+:\d\d$/);
+  const inWork = page.getByRole('definition').getByRole('timer', { name: /time in work/i });
+  await expect(inWork).toHaveText(/^\d+:\d\d$/);
+  await expect(page.getByRole('term').filter({ hasText: /^Waiting/ })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'About: In work' })).toBeVisible();
+  // Model time, as on the offer card: at least what the card showed before the accept.
+  const fixed = await waited.textContent();
+  expect(seconds(fixed)).toBeGreaterThanOrEqual(cardWaiting);
+  const workBefore = await inWork.textContent();
+  await page.waitForTimeout(1500);
+  await expect(waited).toHaveText(fixed ?? '');
+  await expect(inWork).not.toHaveText(workBefore ?? '');
+
+  const row = page.getByRole('list', { name: 'Conversations you hold' }).getByRole('listitem').first();
+  await expect(row).toContainText(new RegExp(`waited ${fixed ?? ''}, in work \\d+:\\d\\d`));
+  await expect(row.getByRole('timer', { name: /waiting time/i })).toHaveCount(0);
+  for (const width of [390, 1400]) {
+    await page.setViewportSize({ width, height: 900 });
+    await expectRowFits(row);
+  }
 });
 
 test('lets an offer expire', async ({ page }) => {
@@ -72,13 +103,13 @@ test('shows stale data, stops the timers, and recovers', async ({ page }) => {
   await card.getByRole('button', { name: 'Accept' }).click();
   await control('stale', { stale: true });
   await expect(page.getByRole('status').filter({ hasText: 'The data is stale.' })).toBeVisible();
-  const waiting = page.getByRole('timer', { name: /waiting time/i }).last();
-  const before = await waiting.textContent();
+  const inWork = page.getByRole('timer', { name: /time in work/i }).last();
+  const before = await inWork.textContent();
   await page.waitForTimeout(1500);
-  expect(await waiting.textContent()).toBe(before);
+  expect(await inWork.textContent()).toBe(before);
   await control('stale', { stale: false });
   await expect(page.getByText('The data is stale.')).toBeHidden();
-  await expect(waiting).not.toHaveText(before ?? '');
+  await expect(inWork).not.toHaveText(before ?? '');
 });
 
 test('reconnects after the gateway restarts and keeps the operator', async ({ page }) => {
@@ -89,3 +120,24 @@ test('reconnects after the gateway restarts and keeps the operator', async ({ pa
   await expect(page.getByText('Live', { exact: true })).toBeVisible({ timeout: 10_000 });
   await expect(page.getByText(/^web-synth\d{4}$/)).toHaveText(operatorId ?? '');
 });
+
+/** "1:05" in seconds. */
+function seconds(clock: string | null): number {
+  const [minutes = '0', secs = '0'] = (clock ?? '').split(':');
+  return Number(minutes) * 60 + Number(secs);
+}
+
+/** The held row keeps its height, and its text stays left of the badge. */
+async function expectRowFits(row: Locator): Promise<void> {
+  const button = row.getByRole('button');
+  const box = await button.boundingBox();
+  expect(box?.height).toBe(68);
+  const line = row.getByText(/^waited /);
+  const badge = button.locator(':scope > :last-child');
+  const lineBox = await line.boundingBox();
+  const messagesBox = await row.getByText(/^\d+ messages?$/).boundingBox();
+  const badgeBox = await badge.boundingBox();
+  expect(lineBox?.height).toBeLessThanOrEqual(20);
+  expect((lineBox?.x ?? 0) + (lineBox?.width ?? 0)).toBeLessThanOrEqual(badgeBox?.x ?? 0);
+  expect((messagesBox?.x ?? 0) + (messagesBox?.width ?? 0)).toBeLessThanOrEqual(badgeBox?.x ?? 0);
+}

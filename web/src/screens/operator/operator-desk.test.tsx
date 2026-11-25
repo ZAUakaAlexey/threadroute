@@ -85,6 +85,16 @@ describe('operator desk', () => {
     expect(screen.getByRole('list', { name: 'Messages' })).toHaveTextContent('31 characters');
   });
 
+  it('shows Waited and In work for the accepted conversation, in the header and the held row', () => {
+    start();
+    const header = screen.getByText('Waited', { selector: 'dt' }).closest('dl');
+    expect(header).toHaveTextContent(/Waited.*0:1[45]/);
+    expect(header).toHaveTextContent(/In work.*0:(29|3[01])/);
+    expect(header).not.toHaveTextContent('Waiting');
+    const row = within(screen.getByRole('list', { name: 'Conversations you hold' })).getAllByRole('listitem')[0];
+    expect(row).toHaveTextContent(/waited 0:1[45], in work 0:(29|3[01])/);
+  });
+
   it('replaces a removed message with a placeholder', () => {
     const h = start();
     h.push({

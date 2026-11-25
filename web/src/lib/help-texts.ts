@@ -139,7 +139,7 @@ const TEXTS = {
   'supervisor.operators.presence':
     'Online operators get offers. When an operator goes offline, the router puts their conversations back in the queue.',
   'supervisor.operators.load':
-    'Offers and conversations the operator holds now, against their capacity. "+N offered" is the part of the load that waits for an accept, not extra load.',
+    'Offers and conversations the operator holds now, against their capacity. The solid part of the bar is accepted conversations, the paler part is offers. "(N offered)" is the part of the load that waits for an accept, not extra load.',
   'supervisor.operators.languages':
     'The queues this operator serves. und is the general queue: posts without a language tag, and languages that no online operator of the shared pool has.',
   'supervisor.operators.team':
@@ -179,7 +179,9 @@ const TEXTS = {
   'operator.panel.conversation':
     'The conversation you chose, with its timers and messages. A session is one open period of this customer and company; when the customer writes again after it closed, a new session starts.',
   'operator.waiting':
-    'Time since the conversation entered the queue for this visit. The clock keeps running after you accept.',
+    'Waiting: time since the conversation entered the queue for this visit. After you accept, Waited shows the time from the queue to your accept, and it stops.',
+  'operator.in-work':
+    'Time since you accepted the conversation. It runs until you resolve it or it goes back to the queue.',
   'operator.first-response':
     'Time left to mark a reply: the target is {firstResponseTarget} from the moment the conversation first entered the queue in this session, so it started before your accept. Reply late: the target passed.',
   'operator.messages':

@@ -1,3 +1,4 @@
+import { splitLoad } from '../../lib/format.ts';
 import { useLive } from '../../live/hooks.ts';
 import { selectOperators } from '../../live/selectors.ts';
 import type { OperatorRow } from '../../protocol/types.ts';
@@ -38,12 +39,9 @@ const COLUMNS: readonly Column<OperatorRow>[] = [
     header: <LabelWithHint label="Load" hint="supervisor.operators.load" />,
     label: 'Load',
     render: (o) => (
-      <span className="flex items-center gap-2">
-        <Meter value={o.load} max={o.capacity} label={`Load of ${o.id}`} />
-        <span className="font-mono text-xs tnum">
-          {o.load}/{o.capacity}
-          {o.offered > 0 && <span className="text-accent"> +{o.offered} offered</span>}
-        </span>
+      <span className="flex min-w-0 items-center gap-2">
+        <Meter value={o.load} max={o.capacity} offered={o.offered} label={`Load of ${o.id}`} />
+        <LoadText load={o.load} capacity={o.capacity} offered={o.offered} />
       </span>
     ),
   },
@@ -71,12 +69,29 @@ export function OperatorsPanel() {
         label="Operators"
         rows={operators}
         columns={COLUMNS}
-        template="minmax(120px,1.2fr) 90px 96px minmax(150px,1fr) minmax(100px,1fr) minmax(100px,1fr)"
+        template="minmax(120px,1.2fr) 90px 96px minmax(184px,1fr) minmax(100px,1fr) minmax(100px,1fr)"
         rowKey={(o) => o.id}
         maxHeight={360}
         empty="No operators yet."
-        minWidth={760}
+        minWidth={794}
       />
     </Panel>
+  );
+}
+
+interface LoadTextProps {
+  readonly load: number;
+  readonly capacity: number;
+  readonly offered: number;
+}
+
+/** "4/4 (2 offered)": the offers are a part of the load, not extra. */
+function LoadText({ load, capacity, offered }: LoadTextProps) {
+  const part = splitLoad(load, offered).offered;
+  return (
+    <span className="truncate font-mono text-xs tnum">
+      {load}/{capacity}
+      {part > 0 && <span className="text-accent"> ({part} offered)</span>}
+    </span>
   );
 }

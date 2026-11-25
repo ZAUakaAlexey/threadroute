@@ -1,6 +1,5 @@
 import { useLive, useSession } from '../../live/hooks.ts';
 import { selectHasMessages, selectLevel, selectMessagesOf, selectSelectedHeld } from '../../live/selectors.ts';
-import { Elapsed } from '../../live/timers.tsx';
 import type { OperatorConversation } from '../../protocol/types.ts';
 import { Button } from '../../ui/button.tsx';
 import { CheckIcon } from '../../ui/icons.tsx';
@@ -10,6 +9,7 @@ import { HelpHint } from '../../ui/help-hint.tsx';
 import { useHelpText } from '../../ui/help-values.ts';
 import { Panel } from '../../ui/panel.tsx';
 import { FirstResponseBadge } from './held-panel.tsx';
+import { WaitTimesBlocks } from './wait-times.tsx';
 
 export function ConversationPanel() {
   const conversation = useLive(selectSelectedHeld);
@@ -65,15 +65,7 @@ function ConversationView({ conversation }: { readonly conversation: OperatorCon
           </p>
         </div>
         <dl className="flex flex-wrap items-start gap-x-6 gap-y-2 text-xs">
-          <div>
-            <dt className="eyebrow flex items-center gap-1.5">
-              Waiting
-              <HelpHint id="operator.waiting" label="Waiting" />
-            </dt>
-            <dd className="text-lg">
-              <Elapsed sinceUs={conversation.queued_at_us} label="Waiting time" />
-            </dd>
-          </div>
+          <WaitTimesBlocks conversation={conversation} />
           <div>
             <dt className="eyebrow flex items-center gap-1.5">
               First response

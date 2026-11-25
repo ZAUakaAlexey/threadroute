@@ -3,9 +3,10 @@ import { useRef } from 'react';
 
 import { useLive, useSession } from '../../live/hooks.ts';
 import { selectHeld } from '../../live/selectors.ts';
-import { Countdown, Elapsed } from '../../live/timers.tsx';
+import { Countdown } from '../../live/timers.tsx';
 import type { OperatorConversation } from '../../protocol/types.ts';
 import { Panel } from '../../ui/panel.tsx';
+import { WaitTimesInline } from './wait-times.tsx';
 
 const ROW_HEIGHT = 68;
 const MAX_VISIBLE_ROWS = 4;
@@ -71,11 +72,9 @@ function HeldRow({ row, isSelected }: { readonly row: OperatorConversation; read
       <span className="rounded bg-sunken px-1.5 py-0.5 font-mono text-[11px] text-ink-2">{row.lang}</span>
       <span className="min-w-0">
         <span className="block truncate font-mono text-[13px]">{row.customer}</span>
-        <span className="flex gap-3 text-xs text-ink-3">
-          <span>
-            waiting <Elapsed sinceUs={row.queued_at_us} label="Waiting time" className="text-ink-2" />
-          </span>
-          <span>
+        <span className="flex min-w-0 gap-3 text-xs text-ink-3">
+          <WaitTimesInline conversation={row} />
+          <span className="truncate">
             <span className="font-mono tnum text-ink-2">{row.customer_messages + row.company_messages}</span>{' '}
             {row.customer_messages + row.company_messages === 1 ? 'message' : 'messages'}
           </span>

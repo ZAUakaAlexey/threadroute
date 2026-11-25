@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
 
 import type { HelpId } from '../lib/help-texts.ts';
 import type { StateCounts } from '../protocol/types.ts';
-import { formatCount, percent } from '../lib/format.ts';
+import { formatCount, loadBarWidths, spokenLoad } from '../lib/format.ts';
 import { HelpHint } from './help-hint.tsx';
 
 type StatTone = 'neutral' | 'wait' | 'late' | 'done';
@@ -63,22 +63,37 @@ interface MeterProps {
   readonly value: number;
   readonly max: number;
   readonly label: string;
+  /**
+   * The part of the value that waits for an accept. It shows in a paler
+   * tone after the solid part, and the label says it in words.
+   */
+  readonly offered?: number;
 }
 
-/** Load against capacity. Over capacity shows red. */
-export function Meter({ value, max, label }: MeterProps) {
-  const width = percent(value, max);
-  const tone = value > max ? 'bg-late' : value === max ? 'bg-wait' : 'bg-accent';
+type MeterTone = 'accent' | 'wait' | 'late';
+
+const METER_TONES: Readonly<Record<MeterTone, { readonly solid: string; readonly muted: string }>> = {
+  accent: { solid: 'bg-accent', muted: 'bg-accent-muted' },
+  wait: { solid: 'bg-wait', muted: 'bg-wait-muted' },
+  late: { solid: 'bg-late', muted: 'bg-late-muted' },
+};
+
+/** Load against capacity. Full shows amber, over capacity red. */
+export function Meter({ value, max, label, offered }: MeterProps) {
+  const tone = METER_TONES[value > max ? 'late' : value === max ? 'wait' : 'accent'];
+  const widths = loadBarWidths(value, max, offered ?? 0);
+  const name = offered === undefined ? label : `${label}: ${spokenLoad(value, max, offered)}`;
   return (
     <span
       role="meter"
-      aria-label={label}
+      aria-label={name}
       aria-valuemin={0}
       aria-valuemax={max}
       aria-valuenow={value}
-      className="inline-block h-1.5 w-16 overflow-hidden rounded-full bg-sunken align-middle"
+      className="inline-flex h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-sunken align-middle"
     >
-      <span className={`block h-full ${tone}`} style={{ width: `${width}%` }} />
+      <span className={`h-full ${tone.solid}`} style={{ width: `${widths.accepted}%` }} />
+      {widths.offered > 0 && <span className={`h-full ${tone.muted}`} style={{ width: `${widths.offered}%` }} />}
     </span>
   );
 }
