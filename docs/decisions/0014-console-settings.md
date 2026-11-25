@@ -13,7 +13,7 @@ Facts that shape this decision:
 
 - **The number of teams is a result, not a setting.** It follows from five numbers: the load that forms a team, the load that releases it, the release time, the team size bounds and the share of operators that teams may hold.
 - **Capacity is the strongest lever.** In the evening of 2026-11-24 about 8,000 conversations waited, the operators resolved about 98 per minute, and the queue did not get shorter. While demand is above capacity, team rules change who waits, not how many wait.
-- **Team rules act slowly.** Decision 0009 has no forced exit from a team. After the cap was turned on, the teams needed about 75 minutes to shrink to it.
+- **Team rules act slowly.** Decision 0009 has no forced exit from a team. After the cap was turned on, the teams needed 84 minutes to shrink to it.
 - **The supervisor screen shows only current values.** Without history a person cannot see the effect of a change.
 - **The simulator already reads router settings** from `GET /v1/settings` at start, and the gateway reads the same endpoint.
 - **The site keeps the sign-in in a cookie that page code cannot read.** Decision 0012 chose "the token goes in the first message" (point 5C). The console cannot do that with the real site, because it has no way to read the token.
@@ -135,7 +135,7 @@ On 2026-11-24 the project owner chose the recommended option in every point:
 - **Store:** the router's PostgreSQL, with a change log (1B).
 - **Simulator settings:** kept by the router and read by the simulator from `GET /v1/settings` (2A).
 - **Simulator changes:** step by step, without a restart (3A).
-- **Team numbers that go down:** no forced exit, the console says "acts gradually" (4A).
+- **Team numbers that go down:** no forced exit, the console says "acts gradually" (4A). On 2026-11-25 one exception was added to decision 0009: a change that lowers the share of operators in teams asks for one trim at the next team check. The other team numbers keep 4A.
 - **Trend history:** in the gateway's memory, one hour (5A).
 - **Rights:** two lists of roles (6B). For now the owner gives the site's guest role both rights.
 - **Site sign-in:** the cookie of the opening request (7A), and the role setting for a local stand, tied to loopback origins (L1).

@@ -130,7 +130,7 @@ The cause is a loop in the rules above. A waiting conversation counts for the ac
 - **Rule.** All teams together hold at most a share of the online operators. The start value is one half. The router checks the cap when an operator would join a team: a new team, or a team that grows.
 - **At the cap.** A team that should grow gets only as many operators as the cap leaves. A new team forms only if the cap leaves room for the minimum team size. Otherwise the company stays in the shared queues, and the router tries again at the next check.
 - **Order.** When the cap does not leave enough for every company, the company with the highest active load comes first.
-- **No forced exit.** The cap never takes an operator out of a team. When operators of the shared pool go offline and the share of the teams rises above the cap, the teams only stop growing. They get smaller by the normal size check and the release rule.
+- **No forced exit.** The cap never takes an operator out of a team. When operators of the shared pool go offline and the share of the teams rises above the cap, the teams only stop growing. They get smaller by the normal size check and the release rule. One exception was added on 2026-11-25: a trim after a settings change lowered the cap (see below).
 - **Off switch.** A share of 1 turns the cap off.
 - **Counted.** The router shows the number of online operators in teams, the current cap, and how often the cap stopped a team from forming or growing.
 
@@ -156,6 +156,35 @@ The first live check of the cap (a laptop run with a low form threshold and a ca
 The project owner chose this on 2026-11-24, before the cap was used on the server. The option that was not chosen: keep the strict rule, so that the cap also limits how much a busy company can get. It protects the pool better, but it leaves operators free while conversations wait.
 
 The rule for a language that no online operator has (above) removes a part of what fed the loop: conversations that nobody could serve stayed in a queue and counted for the load of their company. How much of the loop is left without the cap is not measured. The recorded stream of that day can be replayed against the new rules in the load tests.
+
+## Change after the settings became changeable (2026-11-25)
+
+### A trim after the cap was lowered
+
+Decision 0014 lets a person change the share of operators in teams from the console. With "no forced exit" a lower share only stops the teams from growing. Numbers from the measurement server show how slow that is:
+
+- The cap was turned on with 174 online operators in teams and a cap of 91. The teams reached the cap after 84 minutes.
+- After that they stayed at the cap for about 11 hours and went below it only when the traffic fell in the morning.
+
+So at high load a lower share shows no effect for more than an hour, and the trend strip of the console keeps one hour.
+
+- **Rule.** A change of the stored settings that lowers the share asks for one trim. The router runs it at the next team check, before the normal check of the companies. "Reset to defaults" counts like any other change.
+- **Durable.** The request for a trim is stored with the settings and is cleared in the transaction that does the trim, under the team lock. A router restart between the change and the check does not lose it.
+- **Order.** The router goes through the teams by the active load of their company, highest first, as it does when the cap does not leave room for every company. A team keeps its online members while the cap has room. The first team that does not fit keeps as many online members as the room allows, if that is at least the min size. Every team after it is released.
+- **Online members only.** The cap counts online members, so the trim takes out online members. Offline members of a team that stays keep their place. When they come online, the teams can be above the cap again, and the old rule applies.
+- **Who leaves a team that gets smaller.** By the rule of the size check: the member with the lowest load first, and the only member with a language of the active conversations last.
+- **Conversations.** An operator who leaves keeps the conversations and offers they already have. The waiting conversations of a released team move to the shared queues at the same check. A team that gets smaller keeps its team queue, so its company waits longer, apart from what overflows to the pool.
+- **No join.** The trim never adds a member. If the online members already fit the new cap, it does nothing.
+- **Not a trigger.** A cap that moves because operators go online or offline, a change of the number of simulated operators, and offline members that come back online. In these cases the teams only stop growing, as before.
+- **After the trim.** The room under the cap is 0 or below the min size, so no new team forms until a team gets smaller or is released. A company that lost its team and still has a high load tries again at every check and is counted as stopped by the cap.
+- **Counted.** A team released by the trim has its own release reason in the routing event. The router counts the trims and the operators they took out. The gateway and the console do not use release reasons, and this does not change.
+
+The project owner chose this on 2026-11-25. Options that were not chosen:
+
+- **Keep "no forced exit" for a lower share too.** No new rule, but the setting looks dead for an hour or more.
+- **Trim every time the teams are above the cap.** Easier to say, but the cap moves with every shift change. After the teams had reached the cap on the measurement server, 158 of 741 samples were above it, by 1 to 5 operators. Team members would change all the time.
+- **Every team shrinks to the min size first.** It keeps more teams, but each of them is too small for the load of its company.
+- **Offline members of a trimmed team leave too.** The teams stay closer to the cap later, but a member loses the team while away.
 
 ## Choices confirmed by the project owner
 
