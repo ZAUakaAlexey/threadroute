@@ -399,7 +399,7 @@ To try it on the local stack:
 4. Change a value, for example "Share of operators in teams", and press "Apply". The change shows in the list of last changes, marked `local`, and on the trend strip. `curl -s 127.0.0.1:9468/metrics | grep settings_value` shows the new value in the router.
 5. A second change within 10 seconds is refused, and the console says when you can apply again.
 
-A live check on the laptop is described under "Results", in "Stand settings from the console, live check on the laptop".
+Two live checks on the laptop are described under "Results", in "Stand settings from the console, live check on the laptop" and "Stored defaults and the trim, live check on the laptop".
 
 Where the values live. The current values are in the router's PostgreSQL and nowhere else; no environment variable sets them. At a start on a database without a stored set, the router stores the defaults of the code as version 1, with one entry in the change log marked `defaults`. A database that already has a set keeps it at every start. If that set has no simulator part (a set stored by an older router), the router adds the simulator defaults as the next version, also marked `defaults`. Changes come from the console or from `PUT /v1/settings` of the operator API, and "Reset to defaults" brings back the defaults of the code. The six old team variables of the router and the five old variables of `sim` for these numbers are not read; a service that still gets one of them logs a warning at start that names it. A stored row that is not valid (only a hand edit of the database can make one) turns the settings off: the router and the simulator then run with the defaults of the code, and the console shows no panel. Removing the PostgreSQL volume (`down -v`, which removes all routing data too) brings the defaults back.
 
@@ -667,6 +667,73 @@ What the check found, and what was fixed after it:
 
 - The first version of the simulator laid out the operators in blocks by language, so a restart at another count gave 14 operators another language. The rule is now "language by number": the language of an operator depends only on the language spread and its number, and the active operators are always the numbers 1 to N (decision 0014, point 3A). A second live check on a fresh stack went 200 to 120, restart, 200, 300, restart, 250, 500. No operator changed its language at any step (0 differences in the stored languages of all operators), the counts per language were exactly 176/6/4/4/4/3/3 at 200, and there was no error-level log line.
 - The trend strip counted offline team members as "operators in teams". It now counts the online ones, the number that the cap limits.
+
+### Stored defaults and the trim, live check on the laptop
+
+This check shows the two rules of 2026-11-25 on a live stand: the settings live only in the store (decision 0014, "Change on 2026-11-25: the settings live only in the store"), and a lower share of operators in teams trims the teams once (decision 0009, "A trim after the cap was lowered"). It shows how fast the trim acts, not whether a share of 20% is a good value.
+
+Conditions: one laptop (Apple M1 Max, Docker Desktop), on 2026-11-25 (09:11 to 09:57 UTC), the local compose stack on live traffic, commit `635157a`, one router, a fresh database. Versions 2, 3 and 4 were direct calls of `PUT /v1/settings` of the operator API; versions 5 and 6 came from the console, through the gateway. The laptop slept a few times while the teams formed, so the time the teams needed to form is not a measurement, and the trend strip of the console has gaps. The operators are simulated, so the numbers describe the simulator and these settings.
+
+Start on an empty database:
+
+| What | Result | Note |
+|---|---|---|
+| Stored set at the first start | the router stored the defaults as version 1 | the change log had one entry with the label `defaults`, 11 fields, none with an old value |
+| Values of the simulator | the simulator logged that it runs with the stored values: 200 operators, capacity 4 | |
+| Two old variables in the `.env` of the stand, on purpose: `THREADROUTE_SIM_OPERATORS=50` and `THREADROUTE_ROUTER_TEAM_MAX_SHARE=0.9` | no effect: 200 operators were active, and the share was 0.5 | no warning was logged, because compose does not pass these variables to the containers |
+
+A change without the console:
+
+| What | Result | Note |
+|---|---|---|
+| The `curl` example of "Stand settings from the console" (capacity 4 to 6, `base_version` 1, label `script`) | `done`, version 2 | |
+| Capacity in the simulator metric | 6 one second later | read once per second: 4, then 6 |
+| A `PUT` with the reserved label `defaults` | refused with status 400 | |
+| Load that forms a team 20 to 6, load that releases it 8 to 2 (version 3) | `done`, in 5 ms | only to get teams faster |
+
+The trim, after the share went from 0.5 to 0.2 (version 4):
+
+| What | Result | Note |
+|---|---|---|
+| Before the change | 177 operators online, 14 teams with 88 online members, cap 88 (share 0.5) | the active loads of the 14 companies were between 55 and 14 |
+| The change | answered in 3 ms; new cap 35 | |
+| Time to the trim | 7.5 s after the change | at the next team check, which runs every 10 s |
+| Online team members | 88 to 35 | from the router log line and the counters `threadroute_router_team_trims_total`, `threadroute_router_team_trim_operators_total` and `threadroute_router_team_trim_releases_total` |
+| Operators taken out | 53 | |
+| Teams | 1 made smaller (8 to 5 members), 10 released, 4 left with 14, 8, 8 and 5 online members | |
+| Order | the team made smaller had an active load of 29; the 10 released teams had loads of 29, 28, 24, 23, 23, 21, 21, 21, 15 and 14 | from the routing events of the trim. No released team had a higher load than a team that stayed. The released team with load 29 came after the other one by the company ID, as the rule says for equal loads |
+| Release reason | `cap_lowered` for each of the 10 releases | in the routing event |
+| Team queues of companies without a team | 0 waiting conversations left | right after the trim |
+| Stored trim request | cleared | |
+| Console, about 40 s later | 4 teams, 34 operators in teams, and the dashed mark of version 4 on the trend strip at the drop | read from the console |
+
+What did not happen:
+
+- The router was restarted 20 seconds after the trim. It loaded version 4 again and did not trim again: 35 online team members at a cap of 35. It wrote no new entry in the change log, which had 4 entries: `defaults`, `script` and two with the label of this check.
+
+Changes from the console, through the gateway (a headless browser on the supervisor screen of the stand, with the local role), after the restart:
+
+| What | Result | Note |
+|---|---|---|
+| Share of operators in teams 20% to 10% in the settings panel, Apply | the console showed "Applied. The stand now runs version 5 of the settings." | the change log entry has the label `local` |
+| The trim for version 5 | 1.5 s after the change; cap 17; online team members 35 to 17, 18 operators taken out, 5 teams released, none made smaller | the next team check came sooner this time. Between the restart and this change the router counted 4 newly formed teams (`threadroute_router_team_changes_total{change="formed"}` was 4 since the restart), and right before the change the teams held 35 online members at a cap of 35 |
+| "Reset to defaults" 14 s later | the panel marked 4 unsaved changes, and Apply gave "Applied. The stand now runs version 6 of the settings." | the entry has the label `local` and 4 fields: the load that forms a team 6 to 20, the load that releases it 2 to 8, the share 10% to 50%, the capacity of an operator 6 to 4 |
+| After the reset | the current set was equal to the defaults of the code; no trim request was stored and no trim ran | the share went up, so there was nothing to trim |
+| Gateway | 2 changes with the outcome `done` (`threadroute_gateway_settings_changes_total`), settings version 6 | |
+| Browser | 0 errors logged | |
+
+Other checks:
+
+| Check | Result | Note |
+|---|---|---|
+| Error-level log lines | 0 in ingest, normalize, conv, the router, the simulator and the gateway | during the whole run |
+
+Not checked in this run:
+
+- That the conversations held by the 53 operators stayed with them. The integration tests cover it; the live run did not compare them.
+- Two routers on one database.
+- A trim that only makes teams smaller, without a release.
+- The sign-in through the site cookie.
 
 ### Known gaps
 
