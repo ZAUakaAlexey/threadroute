@@ -328,7 +328,7 @@ Every field is always present in its part, also when it is 0. Integers are writt
 
 **`by` is private.** It names who made the change and may hold a user ID of the site. It is present only when `may_change` is true. For every other connection it is absent, at every level. The gateway writes it, never the console: `user:` and the site user ID for a site user (for example `user:42`), and `local` for the local role. The router writes `defaults` for the change that stores the defaults. A direct call of the operator API (`PUT /v1/settings`, not through the gateway) writes the label its caller chose. `simulator` may appear in old entries. `defaults` and `simulator` are reserved: a change request with one of them is refused. Show it as it is.
 
-**How fast a change acts.** A team number that goes down does not force teams to shrink (decision 0014, point 4): teams above it stop growing and shrink as members leave. The console says "acts gradually" for those numbers.
+**How fast a change acts.** A lower `teams.max_share` trims the teams once, at the next team check of the router (decision 0009, "A trim after the cap was lowered"): the teams of the busiest companies keep their online members while the new cap allows, and the other teams get smaller or are released. In the `routing` topic such a release has the reason `cap_lowered`; the gateway and the console do not use release reasons. A higher share lets teams grow at the next team check. A lower load that releases a team or a lower release time does not force teams to shrink (decision 0014, point 4): teams are released only when their load stays low long enough. The console says "acts gradually" for those two numbers.
 
 ### `settings`
 
