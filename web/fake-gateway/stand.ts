@@ -22,7 +22,7 @@ import {
   type TrendPoint,
 } from '../src/protocol/types.ts';
 
-/** How the fake answers. "old": like a gateway before decision 0014. "no_sim": no simulator reported yet. */
+/** How the fake answers. "old": like a gateway before decision 0014. "no_sim": an older router that sends no sim part. */
 export type StandMode = 'normal' | 'old' | 'no_sim';
 /** An answer that the next change_settings gets, whatever it asks. */
 export type ForcedAnswer = 'conflict' | 'too_soon' | 'off' | 'unavailable' | 'not_allowed';
@@ -79,11 +79,11 @@ export class Stand {
       return;
     }
     this.defaults = { teams: example.defaults.teams, sim };
-    // A history to look at: the first report of the simulator and one
+    // A history to look at: the defaults stored at the first start and one
     // change by a person, both inside the trend window.
     this.current = this.defaults;
     this.version = 0;
-    this.record(this.defaults, 'simulator', nowUs - 50 * 60_000_000);
+    this.record(this.defaults, 'defaults', nowUs - 50 * 60_000_000);
     const teams = { ...this.defaults.teams, form_load: this.defaults.teams.form_load + 5 };
     this.record({ ...this.defaults, teams }, 'guest', nowUs - 20 * 60_000_000);
   }
@@ -113,7 +113,7 @@ export class Stand {
   /** The reasons a set is refused, like the gateway answers invalid_request. */
   check(next: StandSettings): FieldReason[] {
     if ((next.sim === undefined) !== (this.current.sim === undefined)) {
-      return [{ field: 'sim', reason: this.current.sim === undefined ? 'must be absent: no simulator reported yet' : 'is missing' }];
+      return [{ field: 'sim', reason: this.current.sim === undefined ? 'must be absent: the current set has no sim part' : 'is missing' }];
     }
     return checkValues(values(next, this.bounds));
   }

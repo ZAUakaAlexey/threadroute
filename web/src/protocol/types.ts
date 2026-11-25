@@ -135,7 +135,7 @@ export interface SimSettings {
 
 export interface StandSettings {
   readonly teams: TeamSettings;
-  /** Absent until a simulator reported its values. */
+  /** Absent when the router does not send it: an older router. A current stand always has it. */
   readonly sim?: SimSettings;
 }
 
@@ -167,7 +167,7 @@ export interface StandBounds {
 
 export interface FieldChange {
   readonly field: string;
-  /** Absent when the set had no value before (the first report of a simulator). */
+  /** Absent when the set had no value before (the first entry: the defaults stored at the first start). */
   readonly old?: number;
   readonly new: number;
 }

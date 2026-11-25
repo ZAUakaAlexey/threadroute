@@ -100,7 +100,7 @@ function SettingsPanelBody({ block }: { readonly block: SettingsBlock }) {
         <div className="grid gap-4 lg:grid-cols-2">
           <FieldGroup title="Simulated operators" view={view} prefix="sim." canEdit={canEdit} block={block} onEdit={handleEdit}>
             {!view.hasSim && (
-              <p className="py-3 text-sm text-ink-3">Not available: no simulator has reported its values to this stand yet.</p>
+              <p className="py-3 text-sm text-ink-3">Not available: this stand does not offer simulator settings.</p>
             )}
           </FieldGroup>
           <FieldGroup title="Dedicated teams" view={view} prefix="teams." canEdit={canEdit} block={block} onEdit={handleEdit} />

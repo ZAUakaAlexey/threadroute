@@ -98,7 +98,7 @@ const TEXTS = {
     'Conversations that operators resolved in the 60 seconds before the point. While this stays below the number of new conversations, the queue grows.',
   'supervisor.trend.teams': 'Dedicated teams at the time of the point.',
   'supervisor.trend.in-teams':
-    'Online operators who are members of a dedicated team. This is the number that the share of operators in teams limits, as a share of Online operators next to it. After the share goes down, teams shrink only as members leave, so this number can stay above the limit for a while.',
+    'Online operators who are members of a dedicated team. This is the number that the share of operators in teams limits, as a share of Online operators next to it. After the share goes down, the next team check trims the teams to the limit, but members who come back online can put this number above it again for a while.',
   'supervisor.trend.online': 'Online operators, simulated and human together.',
   'supervisor.trend.marks':
     'Each dashed line on the charts is a change of the stand settings, listed here by its number with its time. When changes are close together, one label shows the range of their numbers, for example 6-12. Many settings act gradually, so the effect may show only some minutes later.',
@@ -127,9 +127,9 @@ const TEXTS = {
   'supervisor.settings.teams-max-size':
     'The most operators one dedicated team may hold. The router adds or removes members at its next team check, a few seconds later, so the change acts within a minute.',
   'supervisor.settings.teams-max-share':
-    'The share of the online operators that all teams together may hold; 100% turns the limit off. A higher share lets teams grow at the next team check. A lower one stops their growth, and they shrink only as members leave, so it acts gradually.',
+    'The share of the online operators that all teams together may hold; 100% turns the limit off. A higher share lets teams grow at the next team check. A lower one trims the teams at the next team check: the teams of the busiest companies stay, the others are released, and their waiting conversations go to the shared queues.',
   'supervisor.settings.changes':
-    'The newest changes of the stand settings, newest first, with the old and the new value of each field. A first value without an old one comes from the simulator when it starts.',
+    'The newest changes of the stand settings, newest first, with the old and the new value of each field. The first entry of a stand has no old values: it is the set of defaults stored at the first start.',
 
   // Supervisor screen: operators.
   'supervisor.panel.operators':

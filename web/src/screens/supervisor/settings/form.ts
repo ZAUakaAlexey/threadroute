@@ -147,7 +147,7 @@ export interface FormView {
   readonly canReset: boolean;
 }
 
-/** The fields of the block: the teams part always, the sim part when a simulator reported. */
+/** The fields of the block: the teams part always, the sim part when the stand offers it. */
 export function fieldsOf(block: SettingsBlock): readonly FieldMeta[] {
   return ALL_META.filter((m) => valueOf(block.current, m.field) !== undefined);
 }

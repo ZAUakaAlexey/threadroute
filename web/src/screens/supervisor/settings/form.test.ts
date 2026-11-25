@@ -79,7 +79,7 @@ describe('settings form, values', () => {
     expect(deriveForm(s, block)).toMatchObject({ editedCount: 0, canApply: false });
   });
 
-  it('has no sim fields before a simulator reported, and sends no sim part', () => {
+  it('has no sim fields when the stand does not offer them, and sends no sim part', () => {
     const view = deriveForm(run(edit('teams.max_share', '30', 0)), firstStart);
     expect(view.hasSim).toBe(false);
     expect(view.fields.some((f) => f.meta.field.startsWith('sim.'))).toBe(false);

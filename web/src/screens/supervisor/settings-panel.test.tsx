@@ -79,7 +79,7 @@ describe('read only, at the demo level without the right', () => {
     expect(screen.getByRole('region', { name: 'Stand settings' })).toHaveTextContent('version 4');
   });
 
-  it('says "not available" for the sim part before a simulator reported', async () => {
+  it('says "not available" for the sim part when the stand does not offer it', async () => {
     const h = start('server_welcome_supervisor_settings_demo.json');
     h.push(readSettingsFixture('server_settings_first_start_demo.json'));
     await openPanel();

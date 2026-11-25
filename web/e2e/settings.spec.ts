@@ -3,8 +3,8 @@ import { expect, test, type Locator, type Page } from '@playwright/test';
 import { control, signInFull } from './helpers.ts';
 
 // Stand settings and the trend strip (decision 0014) against the fake
-// gateway. It starts at version 2: the first report of the simulator and
-// one change of the load that forms a team, from 20 to 25.
+// gateway. It starts at version 2: the defaults stored at the first start
+// and one change of the load that forms a team, from 20 to 25.
 
 test.beforeEach(async () => {
   await control('reset');
@@ -187,7 +187,7 @@ test('without the right the values are read only and no "by" is shown', async ({
   await expect(panel.getByRole('list', { name: 'Last changes of the stand settings' })).not.toContainText(' by ');
 });
 
-test('before a simulator reported, the sim group says it is not available', async ({ page }) => {
+test('a stand without simulator settings: the sim group says it is not available', async ({ page }) => {
   await control('settings-mode', { mode: 'no_sim' });
   const panel = await openSettings(page);
   await expect(panel.getByRole('group', { name: 'Simulated operators' })).toContainText('Not available');

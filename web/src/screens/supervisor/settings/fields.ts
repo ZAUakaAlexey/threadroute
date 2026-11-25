@@ -8,10 +8,9 @@ import type { Bound, SettingsBlock, SettingsField, SimField, StandSettings, Team
 
 /**
  * "minute": acts within a minute. "gradual": acts step by step, or only on
- * work that starts after the change. "up_minute": within a minute when
- * raised, gradually when lowered (the team share).
+ * work that starts after the change.
  */
-export type Speed = 'minute' | 'gradual' | 'up_minute';
+export type Speed = 'minute' | 'gradual';
 export type FieldKind = 'count' | 'duration' | 'share';
 
 export interface FieldMeta {
@@ -39,7 +38,7 @@ export const TEAM_META: readonly FieldMeta[] = [
   { field: 'teams.release_after_us', label: 'Release time', noun: 'release time', hint: 'supervisor.settings.teams-release-after', speed: 'gradual' },
   { field: 'teams.min_size', label: 'Team size, min', noun: 'min team size', hint: 'supervisor.settings.teams-min-size', speed: 'minute', countUnit: 'operators' },
   { field: 'teams.max_size', label: 'Team size, max', noun: 'max team size', hint: 'supervisor.settings.teams-max-size', speed: 'minute', countUnit: 'operators' },
-  { field: 'teams.max_share', label: 'Share of operators in teams', noun: 'share of operators in teams', hint: 'supervisor.settings.teams-max-share', speed: 'up_minute' },
+  { field: 'teams.max_share', label: 'Share of operators in teams', noun: 'share of operators in teams', hint: 'supervisor.settings.teams-max-share', speed: 'minute' },
 ];
 
 export const ALL_META: readonly FieldMeta[] = [...SIM_META, ...TEAM_META];
@@ -52,7 +51,6 @@ export function fieldMeta(field: string): FieldMeta | undefined {
 export const SPEED_TEXT: Readonly<Record<Speed, string>> = {
   minute: 'acts within a minute',
   gradual: 'acts gradually',
-  up_minute: 'acts within a minute when raised, gradually when lowered',
 };
 
 // ---------------------------------------------------------------- values

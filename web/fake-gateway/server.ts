@@ -573,7 +573,7 @@ export async function startFakeGateway(options: FakeGatewayOptions): Promise<Fak
       }
       case 'settings-mode': {
         // For new connections: "old" is a gateway before decision 0014,
-        // "no_sim" a stand where no simulator reported yet.
+        // "no_sim" an older router that sends no sim part.
         const mode = body.mode === 'old' || body.mode === 'no_sim' ? body.mode : 'normal';
         const mayChange = stand.mayChange;
         stand = newStand(world, mode);
